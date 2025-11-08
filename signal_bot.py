@@ -253,7 +253,6 @@ async def send_pre_signal(pair, entry_time, app):
 
 async def schedule_today_signals(app, sched):
     if datetime.utcnow().weekday() > 4:
-        await update.message.reply_text('🏖️  Weekend, aucun signal')
         print('🏖️  Weekend, aucun signal')
         return
 
