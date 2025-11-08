@@ -245,10 +245,11 @@ async def send_pre_signal(pair, entry_time, app):
 
 # --- Scheduler ---
 
-async def schedule_today_signals(app, sched):
-    if datetime.utcnow().weekday() > 4:
-        print('🏖️  Weekend, aucun signal')
-        return
+async def schedule_today_signals(update: Update, app, sched):
+   # if datetime.utcnow().weekday() > 4:
+   #     await update.message.reply_text('🏖️  Weekend, aucun signal')
+   #     print('🏖️  Weekend, aucun signal')
+    #    return
 
     sched.remove_all_jobs()
     daily = generate_daily_schedule_for_today()
@@ -320,8 +321,8 @@ async def main():
     print(f"🤖 Bot: @{(await app.bot.get_me()).username}")
     
     # 🔥 ENVOYER TOUS LES SIGNAUX IMMÉDIATEMENT POUR TEST 🔥
-    print("\n⚡ MODE TEST : Envoi immédiat de tous les signaux...")
-    await send_all_signals_now(app)
+  #  print("\n⚡ MODE TEST : Envoi immédiat de tous les signaux...")
+  #  await send_all_signals_now(app)
     
     # Garder le bot en vie
     try:
