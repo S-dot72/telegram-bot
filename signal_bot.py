@@ -166,10 +166,16 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     
 async def cmd_testsignals(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Commande manuelle pour envoyer immédiatement tous les signaux du jour."""
-    await update.message.reply_text("📡 Envoi immédiat de tous les signaux programmés...")
-    await send_all_signals_now(context.application)
-    await update.message.reply_text("✅ Tous les signaux ont été envoyés !")
+    """Envoie un signal de test immédiatement"""
+    user_id = update.effective_user.id
+    await update.message.reply_text("⚡ Génération d'un signal de test...")
+    
+    # Prendre la première paire
+    pair = PAIRS[0]
+    entry_time = datetime.utcnow().replace(tzinfo=timezone.utc) + timedelta(minutes=5)
+    
+    app = context.application
+    await send_pre_signal(pair, entry_time, app)
 
 # --- Envoi de signaux à tous les abonnés ---
 
