@@ -164,6 +164,12 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Taux de réussite: {winrate:.1f}%\n"
         f"Abonnés: {subs}"
     )
+    
+async def cmd_testsignals(update: Update, context: ContextTypes.DEFAULT_TYPE):
+         """Commande manuelle pour envoyer immédiatement tous les signaux du jour."""
+    await update.message.reply_text("📡 Envoi immédiat de tous les signaux programmés...")
+    await send_all_signals_now(context.application)
+    await update.message.reply_text("✅ Tous les signaux ont été envoyés !")
 
 # --- Envoi de signaux à tous les abonnés ---
 
@@ -245,11 +251,11 @@ async def send_pre_signal(pair, entry_time, app):
 
 # --- Scheduler ---
 
-async def schedule_today_signals(update: Update, app, sched):
-   # if datetime.utcnow().weekday() > 4:
-   #     await update.message.reply_text('🏖️  Weekend, aucun signal')
-   #     print('🏖️  Weekend, aucun signal')
-    #    return
+async def schedule_today_signals(app, sched):
+    if datetime.utcnow().weekday() > 4:
+        await update.message.reply_text('🏖️  Weekend, aucun signal')
+        print('🏖️  Weekend, aucun signal')
+        return
 
     sched.remove_all_jobs()
     daily = generate_daily_schedule_for_today()
@@ -299,6 +305,7 @@ async def main():
     app.add_handler(CommandHandler('start', cmd_start))
     app.add_handler(CommandHandler('result', cmd_result))
     app.add_handler(CommandHandler('stats', cmd_stats))
+    app.add_handler(CommandHandler('testsignals', cmd_testsignals))
 
     # Créer le scheduler APRÈS avoir démarré l'event loop
     sched = AsyncIOScheduler(timezone='UTC')
