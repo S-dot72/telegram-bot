@@ -166,7 +166,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     
 async def cmd_testsignals(update: Update, context: ContextTypes.DEFAULT_TYPE):
-         """Commande manuelle pour envoyer immédiatement tous les signaux du jour."""
+    """Commande manuelle pour envoyer immédiatement tous les signaux du jour."""
     await update.message.reply_text("📡 Envoi immédiat de tous les signaux programmés...")
     await send_all_signals_now(context.application)
     await update.message.reply_text("✅ Tous les signaux ont été envoyés !")
