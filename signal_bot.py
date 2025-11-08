@@ -32,7 +32,7 @@ TWELVE_TS_URL = 'https://api.twelvedata.com/time_series'
 # --- Fonctions utilitaires ---
 
 def fetch_ohlc_td(pair, interval, outputsize=300):
-    symbol = pair.replace('/', '')
+    
     params = {'symbol': symbol, 'interval': interval, 'outputsize': outputsize,
               'apikey': TWELVEDATA_API_KEY, 'format':'JSON'}
     r = requests.get(TWELVE_TS_URL, params=params, timeout=10)
