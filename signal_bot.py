@@ -93,7 +93,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ).fetchone()
             
             if existing:
-                await update.message.reply_text("✅ Vous êtes déjà abonné aux signaux !")
+                await update.message.reply_text("✅ Vous êtes déjà abonné aux signaux {user_id} !")
                 print(f"ℹ️  User {user_id} déjà abonné")
             else:
                 conn.execute(
