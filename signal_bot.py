@@ -4,7 +4,7 @@ Programme SIGNALS_PER_DAY et envoie chaque pré-signal GAP_MIN_BEFORE_ENTRY minu
 Support multi-utilisateurs via table subscribers.
 """
 
-import os, json
+import os, json, asyncio
 from datetime import datetime, timedelta, timezone, time as dtime
 import requests
 import pandas as pd
@@ -83,14 +83,35 @@ def format_signal_message(pair, direction, entry_time, confidence, reason):
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    username = update.effective_user.username
+    username = update.effective_user.username or "Unknown"
+    print(f"📥 /start reçu de user_id={user_id} username={username}")
     try:
         with engine.begin() as conn:
-            q = text("INSERT OR IGNORE INTO subscribers (user_id, username) VALUES (:uid, :uname)")
-            conn.execute(q, {"uid": user_id, "uname": username})
-        await update.message.reply_text("✅ Vous êtes maintenant abonné aux signaux !")
+            # Vérifier si déjà abonné
+            existing = conn.execute(
+                text("SELECT user_id FROM subscribers WHERE user_id = :uid"),
+                {"uid": user_id}
+            ).fetchone()
+            
+            if existing:
+                await update.message.reply_text("✅ Vous êtes déjà abonné aux signaux !")
+                print(f"ℹ️  User {user_id} déjà abonné")
+            else:
+                conn.execute(
+                    text("INSERT INTO subscribers (user_id, username) VALUES (:uid, :uname)"),
+                    {"uid": user_id, "uname": username}
+                )
+                await update.message.reply_text(
+                    "✅ Bienvenue ! Vous êtes maintenant abonné aux signaux de trading.\n\n"
+                    "📊 Vous recevrez automatiquement les signaux pendant les heures de trading.\n\n"
+                    "Commandes disponibles:\n"
+                    "/stats - Voir les statistiques\n"
+                    "/result <timestamp> <WIN|LOSE> - Enregistrer un résultat"
+                )
+                print(f"✅ User {user_id} ajouté aux abonnés")
     except Exception as e:
-        await update.message.reply_text(f"Erreur: {e}")
+        print(f"❌ Erreur dans cmd_start: {e}")
+        await update.message.reply_text(f"❌ Erreur: {e}")
 
 async def cmd_result(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -108,17 +129,26 @@ async def cmd_result(update: Update, context: ContextTypes.DEFAULT_TYPE):
             conn.execute(q, {'r':res, 't':datetime.utcnow().isoformat(), 'ts':ts})
         await update.message.reply_text('✅ Résultat mis à jour')
     except Exception as e:
-        await update.message.reply_text('Erreur: '+str(e))
+        await update.message.reply_text('❌ Erreur: '+str(e))
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with engine.connect() as conn:
         total = conn.execute(text('SELECT COUNT(*) FROM signals')).scalar()
         wins = conn.execute(text("SELECT COUNT(*) FROM signals WHERE result='WIN'")).scalar()
-    await update.message.reply_text(f'Total signals: {total} — Wins enregistrés: {wins}')
+        subs = conn.execute(text('SELECT COUNT(*) FROM subscribers')).scalar()
+    winrate = (wins/total*100) if total > 0 else 0
+    await update.message.reply_text(
+        f"📊 **Statistiques**\n\n"
+        f"Total signaux: {total}\n"
+        f"Victoires: {wins}\n"
+        f"Taux de réussite: {winrate:.1f}%\n"
+        f"Abonnés: {subs}"
+    )
 
 # --- Envoi de signaux à tous les abonnés ---
 
 async def send_pre_signal(pair, entry_time, app):
+    print(f"🔄 Génération du signal pour {pair} à {datetime.utcnow()}")
     try:
         # Récupération des paramètres optimisés
         params = BEST_PARAMS.get(pair, {})
@@ -128,9 +158,13 @@ async def send_pre_signal(pair, entry_time, app):
         bb_l = params.get('bb', 20)
 
         # Calcul du signal
+        print(f"📊 Récupération des données pour {pair}...")
         df = fetch_ohlc_td(pair, TIMEFRAME_M1, outputsize=400)
+        print(f"✅ {len(df)} bougies récupérées")
+        
         df = compute_indicators(df, ema_fast=ema_f, ema_slow=ema_s, rsi_len=rsi_l, bb_len=bb_l)
         sig = rule_signal(df)
+        
         if sig:
             direction = sig
             confidence = 0.8
@@ -139,6 +173,8 @@ async def send_pre_signal(pair, entry_time, app):
             direction = 'CALL' if df['ema_fast'].iloc[-1] > df['ema_slow'].iloc[-1] else 'PUT'
             confidence = 0.35
             reason = 'fallback trend'
+
+        print(f"📍 Direction: {direction}, Confiance: {confidence}")
 
         # Persister dans la DB
         ts_send = datetime.utcnow().replace(tzinfo=timezone.utc)
@@ -152,26 +188,41 @@ async def send_pre_signal(pair, entry_time, app):
             'payload': json.dumps({'pair': pair,'reason': reason})
         }
         persist_signal(payload)
+        print(f"💾 Signal sauvegardé dans la DB")
 
         # Récupérer tous les abonnés
         with engine.connect() as conn:
             user_ids = [row[0] for row in conn.execute(text("SELECT user_id FROM subscribers")).fetchall()]
 
+        print(f"👥 {len(user_ids)} abonné(s) trouvé(s)")
+
+        if not user_ids:
+            print("⚠️  Aucun abonné, signal non envoyé")
+            return
+
         msg = format_signal_message(pair, direction, entry_time, confidence, reason)
 
         # Envoyer le message à tous les abonnés
+        sent_count = 0
         for uid in user_ids:
-            await app.bot.send_message(chat_id=uid, text=msg)
+            try:
+                await app.bot.send_message(chat_id=uid, text=msg)
+                sent_count += 1
+                print(f"✅ Signal envoyé à user {uid}")
+            except Exception as e:
+                print(f"❌ Erreur envoi à user {uid}: {e}")
 
-        print(f"✅ Signal envoyé pour {pair} entrée {entry_time} direction {direction} confiance {confidence}")
+        print(f"✅ Signal envoyé à {sent_count}/{len(user_ids)} utilisateurs pour {pair}")
     except Exception as e:
-        print('Erreur en envoyant le signal:', e)
+        print(f'❌ Erreur en envoyant le signal: {e}')
+        import traceback
+        traceback.print_exc()
 
 # --- Scheduler ---
 
 async def schedule_today_signals(app):
     if datetime.utcnow().weekday() > 4:
-        print('Weekend, aucun signal')
+        print('🏖️  Weekend, aucun signal')
         return
 
     sched.remove_all_jobs()
@@ -195,20 +246,48 @@ def ensure_db():
 
 # --- Main ---
 
-if __name__ == '__main__':
+async def main():
+    print("🚀 Démarrage du bot...")
     ensure_db()
 
+    # Créer l'application
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    
+    # Ajouter les handlers
     app.add_handler(CommandHandler('start', cmd_start))
     app.add_handler(CommandHandler('result', cmd_result))
     app.add_handler(CommandHandler('stats', cmd_stats))
 
+    # Démarrer le scheduler
     sched.start()
-    import asyncio
-    asyncio.get_event_loop().create_task(schedule_today_signals(app))
-    # Scheduler quotidien automatique
-    sched.add_job(lambda: asyncio.get_event_loop().create_task(schedule_today_signals(app)),
-                  'cron', hour=8, minute=55)
+    print("⏰ Scheduler démarré")
+    
+    # Planifier les signaux d'aujourd'hui
+    await schedule_today_signals(app)
+    
+    # Ajouter le job quotidien
+    sched.add_job(schedule_today_signals, 'cron', hour=8, minute=55, args=[app])
+    print("📆 Job quotidien configuré")
 
-    # Lancer le bot
-    app.run_polling()
+    # Démarrer le bot
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
+    
+    print("✅ Bot démarré avec succès!")
+    print(f"🤖 Bot: @{(await app.bot.get_me()).username}")
+    
+    # Garder le bot en vie
+    try:
+        while True:
+            await asyncio.sleep(1)
+    except (KeyboardInterrupt, SystemExit):
+        print("\n🛑 Arrêt du bot...")
+        await app.updater.stop()
+        await app.stop()
+        await app.shutdown()
+        sched.shutdown()
+        print("👋 Bot arrêté")
+
+if __name__ == '__main__':
+    asyncio.run(main())
