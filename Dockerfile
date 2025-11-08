@@ -4,11 +4,15 @@ FROM python:3.11-slim
 # Installer git et build-essential pour compiler certains packages
 RUN apt-get update && apt-get install -y git build-essential && rm -rf /var/lib/apt/lists/*
 
+# Installer pip à jour
+RUN pip install --upgrade pip
+
+# Installer les dépendances Python
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
 # Définir le dossier de travail
 WORKDIR /app
-
-# Copier uniquement requirements.txt d'abord pour installer les dépendances
-COPY requirements.txt .
 
 # Installer les dépendances système nécessaires
 RUN apt-get update && apt-get install -y \
@@ -22,10 +26,6 @@ RUN apt-get update && apt-get install -y \
     libjpeg-dev \
     gcc \
     && rm -rf /var/lib/apt/lists/*
-
-# Installer les packages Python
-RUN pip install --upgrade pip
-RUN pip install --no-cache-dir -r requirements.txt
 
 # Copier tout le projet ensuite
 COPY . .
