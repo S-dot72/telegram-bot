@@ -1,3 +1,4 @@
+#Force reload
 name: Run backtester and commit best_params
 
 on:
