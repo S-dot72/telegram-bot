@@ -1,33 +1,41 @@
-"""Production bot that loads best_params.json if present to apply optimized params per pair.
-Schedules SIGNALS_PER_DAY and sends each pre-signal GAP_MIN_BEFORE_ENTRY minutes before entry.
 """
-import os, time, json, asyncio
+Production bot qui charge best_params.json si présent pour appliquer les paramètres optimisés par pair.
+Programme SIGNALS_PER_DAY et envoie chaque pré-signal GAP_MIN_BEFORE_ENTRY minutes avant l'entrée.
+Support multi-utilisateurs via table subscribers.
+"""
+
+import os, json
 from datetime import datetime, timedelta, timezone, time as dtime
 import requests
 import pandas as pd
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy import create_engine, text
-from telegram import Bot
+from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from config import *
 from utils import compute_indicators, rule_signal
 
+# --- Database et scheduler ---
 engine = create_engine(DB_URL, connect_args={'check_same_thread': False})
 sched = AsyncIOScheduler(timezone='UTC')
 
-TWELVE_TS_URL = 'https://api.twelvedata.com/time_series'
-
+# --- Charger les meilleurs paramètres si présents ---
 BEST_PARAMS = {}
 if os.path.exists(BEST_PARAMS_FILE):
     try:
-        with open(BEST_PARAMS_FILE,'r') as f:
+        with open(BEST_PARAMS_FILE, 'r') as f:
             BEST_PARAMS = json.load(f)
     except Exception:
         BEST_PARAMS = {}
 
+TWELVE_TS_URL = 'https://api.twelvedata.com/time_series'
+
+# --- Fonctions utilitaires ---
+
 def fetch_ohlc_td(pair, interval, outputsize=300):
-    symbol = pair.replace('/','')
-    params = {'symbol': symbol, 'interval': interval, 'outputsize': outputsize, 'apikey': TWELVEDATA_API_KEY, 'format':'JSON'}
+    symbol = pair.replace('/', '')
+    params = {'symbol': symbol, 'interval': interval, 'outputsize': outputsize,
+              'apikey': TWELVEDATA_API_KEY, 'format':'JSON'}
     r = requests.get(TWELVE_TS_URL, params=params, timeout=10)
     r.raise_for_status()
     j = r.json()
@@ -39,29 +47,27 @@ def fetch_ohlc_td(pair, interval, outputsize=300):
     return df
 
 def persist_signal(payload):
-    q = text("INSERT INTO signals (pair,direction,reason,ts_enter,ts_send,confidence,payload_json) VALUES (:pair,:direction,:reason,:ts_enter,:ts_send,:confidence,:payload)")
+    q = text("INSERT INTO signals (pair,direction,reason,ts_enter,ts_send,confidence,payload_json) "
+             "VALUES (:pair,:direction,:reason,:ts_enter,:ts_send,:confidence,:payload)")
     with engine.begin() as conn:
         conn.execute(q, payload)
 
 def generate_daily_schedule_for_today():
     today = datetime.utcnow().date()
-    start_dt = datetime.combine(today, dtime(START_HOUR_UTC,0,0), tzinfo=timezone.utc)
-    end_dt = datetime.combine(today, dtime(END_HOUR_UTC,0,0), tzinfo=timezone.utc)
+    start_dt = datetime.combine(today, dtime(START_HOUR_UTC, 0, 0), tzinfo=timezone.utc)
+    end_dt = datetime.combine(today, dtime(END_HOUR_UTC, 0, 0), tzinfo=timezone.utc)
     total_minutes = int((end_dt - start_dt).total_seconds()//60)
     interval = max(1, total_minutes // SIGNALS_PER_DAY)
-    times = []
+    schedule = []
     for i in range(SIGNALS_PER_DAY):
         t = start_dt + timedelta(minutes=i*interval)
-        times.append(t)
-    schedule = []
-    for i, t in enumerate(times):
         pair = PAIRS[i % len(PAIRS)]
         schedule.append({'pair': pair, 'entry_time': t})
     return schedule
 
 def format_signal_message(pair, direction, entry_time, confidence, reason):
     gale1 = entry_time + timedelta(minutes=GALE_INTERVAL_MIN)
-    gale2 = entry_time + timedelta(minutes=GALE_INTERVAL_MIN2)
+    gale2 = entry_time + timedelta(minutes=GALE_INTERVAL_MIN*2)
     msg = (f"📊 SIGNAL — {pair}\n"
            f"⏳ Entrée (UTC): {entry_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
            f"⏰ Envoi {GAP_MIN_BEFORE_ENTRY} minutes avant l'entrée\n"
@@ -73,7 +79,20 @@ def format_signal_message(pair, direction, entry_time, confidence, reason):
            f"⚠️ Trades du lundi au vendredi. Riskez prudemment (1% bankroll suggéré).")
     return msg
 
-async def cmd_result(update, context: ContextTypes.DEFAULT_TYPE):
+# --- Commandes Telegram ---
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    username = update.effective_user.username
+    try:
+        with engine.begin() as conn:
+            q = text("INSERT OR IGNORE INTO subscribers (user_id, username) VALUES (:uid, :uname)")
+            conn.execute(q, {"uid": user_id, "uname": username})
+        await update.message.reply_text("✅ Vous êtes maintenant abonné aux signaux !")
+    except Exception as e:
+        await update.message.reply_text(f"Erreur: {e}")
+
+async def cmd_result(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         args = context.args
         if len(args) < 2:
@@ -87,23 +106,28 @@ async def cmd_result(update, context: ContextTypes.DEFAULT_TYPE):
         with engine.begin() as conn:
             q = text("UPDATE signals SET result=:r, ts_result=:t WHERE ts_enter=:ts")
             conn.execute(q, {'r':res, 't':datetime.utcnow().isoformat(), 'ts':ts})
-        await update.message.reply_text('Updated result')
+        await update.message.reply_text('✅ Résultat mis à jour')
     except Exception as e:
-        await update.message.reply_text('Error: '+str(e))
+        await update.message.reply_text('Erreur: '+str(e))
 
-async def cmd_stats(update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with engine.connect() as conn:
         total = conn.execute(text('SELECT COUNT(*) FROM signals')).scalar()
         wins = conn.execute(text("SELECT COUNT(*) FROM signals WHERE result='WIN'")).scalar()
-    await update.message.reply_text(f'Total signals: {total} — Wins recorded: {wins}')
+    await update.message.reply_text(f'Total signals: {total} — Wins enregistrés: {wins}')
 
-async def send_pre_signal(pair, entry_time, bot):
+# --- Envoi de signaux à tous les abonnés ---
+
+async def send_pre_signal(pair, entry_time, app):
     try:
+        # Récupération des paramètres optimisés
         params = BEST_PARAMS.get(pair, {})
         ema_f = params.get('ema_fast', 8)
         ema_s = params.get('ema_slow', 21)
         rsi_l = params.get('rsi', 14)
         bb_l = params.get('bb', 20)
+
+        # Calcul du signal
         df = fetch_ohlc_td(pair, TIMEFRAME_M1, outputsize=400)
         df = compute_indicators(df, ema_fast=ema_f, ema_slow=ema_s, rsi_len=rsi_l, bb_len=bb_l)
         sig = rule_signal(df)
@@ -115,6 +139,8 @@ async def send_pre_signal(pair, entry_time, bot):
             direction = 'CALL' if df['ema_fast'].iloc[-1] > df['ema_slow'].iloc[-1] else 'PUT'
             confidence = 0.35
             reason = 'fallback trend'
+
+        # Persister dans la DB
         ts_send = datetime.utcnow().replace(tzinfo=timezone.utc)
         payload = {
             'pair': pair,
@@ -123,27 +149,41 @@ async def send_pre_signal(pair, entry_time, bot):
             'ts_enter': entry_time.isoformat(),
             'ts_send': ts_send.isoformat(),
             'confidence': confidence,
-            'payload': json.dumps({'pair':pair,'reason':reason})
+            'payload': json.dumps({'pair': pair,'reason': reason})
         }
         persist_signal(payload)
-        msg = format_signal_message(pair, direction, entry_time, confidence, reason)
-        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg)
-        print(f"Sent signal for {pair} entry {entry_time} dir {direction} conf {confidence}")
-    except Exception as e:
-        print('Error sending pre-signal', e)
 
-def schedule_today_signals(bot):
+        # Récupérer tous les abonnés
+        with engine.connect() as conn:
+            user_ids = [row[0] for row in conn.execute(text("SELECT user_id FROM subscribers")).fetchall()]
+
+        msg = format_signal_message(pair, direction, entry_time, confidence, reason)
+
+        # Envoyer le message à tous les abonnés
+        for uid in user_ids:
+            await app.bot.send_message(chat_id=uid, text=msg)
+
+        print(f"✅ Signal envoyé pour {pair} entrée {entry_time} direction {direction} confiance {confidence}")
+    except Exception as e:
+        print('Erreur en envoyant le signal:', e)
+
+# --- Scheduler ---
+
+async def schedule_today_signals(app):
     if datetime.utcnow().weekday() > 4:
-        print('Weekend, no schedule')
+        print('Weekend, aucun signal')
         return
+
     sched.remove_all_jobs()
     daily = generate_daily_schedule_for_today()
     for item in daily:
         entry = item['entry_time']
         send_time = entry - timedelta(minutes=GAP_MIN_BEFORE_ENTRY)
         if send_time > datetime.utcnow().replace(tzinfo=timezone.utc):
-            sched.add_job(send_pre_signal, 'date', run_date=send_time, args=[item['pair'], entry, bot])
-    print('Scheduled', len(daily), 'signals for today')
+            sched.add_job(send_pre_signal, 'date', run_date=send_time, args=[item['pair'], entry, app])
+    print(f"📅 {len(daily)} signaux planifiés pour aujourd'hui")
+
+# --- Création DB si nécessaire ---
 
 def ensure_db():
     sql = open('db_schema.sql').read()
@@ -153,111 +193,22 @@ def ensure_db():
             if s:
                 conn.execute(text(s))
 
-async def main():
+# --- Main ---
+
+if __name__ == '__main__':
     ensure_db()
-    
-    # Créer l'application
+
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-    
-    # Ajouter les handlers
+    app.add_handler(CommandHandler('start', cmd_start))
     app.add_handler(CommandHandler('result', cmd_result))
     app.add_handler(CommandHandler('stats', cmd_stats))
-    
-    # Récupérer le bot
-    bot = app.bot
-    
-    # Configurer le scheduler
-    sched.add_job(schedule_today_signals, 'cron', hour=8, minute=55, args=[bot])
-    schedule_today_signals(bot)
+
     sched.start()
-    
-    # Démarrer le bot
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling()
-    
-    print("Bot started successfully!")
-    
-    # Garder le bot en vie
-    try:
-        while True:
-            await asyncio.sleep(1)
-    except (KeyboardInterrupt, SystemExit):
-        print("Shutting down...")
-        await app.updater.stop()
-        await app.stop()
-        await app.shutdown()
-        sched.shutdown()
+    import asyncio
+    asyncio.get_event_loop().create_task(schedule_today_signals(app))
+    # Scheduler quotidien automatique
+    sched.add_job(lambda: asyncio.get_event_loop().create_task(schedule_today_signals(app)),
+                  'cron', hour=8, minute=55)
 
-if __name__=='__main__':
-    asyncio.run(main())        ema_f = params.get('ema_fast', 8)
-        ema_s = params.get('ema_slow', 21)
-        rsi_l = params.get('rsi', 14)
-        bb_l = params.get('bb', 20)
-        df = fetch_ohlc_td(pair, TIMEFRAME_M1, outputsize=400)
-        df = compute_indicators(df, ema_fast=ema_f, ema_slow=ema_s, rsi_len=rsi_l, bb_len=bb_l)
-        sig = rule_signal(df)
-        if sig:
-            direction = sig
-            confidence = 0.8
-            reason = f'Optimized params: EMA({ema_f},{ema_s}) RSI{rsi_l} BB{bb_l}'
-        else:
-            direction = 'CALL' if df['ema_fast'].iloc[-1] > df['ema_slow'].iloc[-1] else 'PUT'
-            confidence = 0.35
-            reason = 'fallback trend'
-        ts_send = datetime.utcnow().replace(tzinfo=timezone.utc)
-        payload = {
-            'pair': pair,
-            'direction': direction,
-            'reason': reason,
-            'ts_enter': entry_time.isoformat(),
-            'ts_send': ts_send.isoformat(),
-            'confidence': confidence,
-            'payload': json.dumps({'pair':pair,'reason':reason})
-        }
-        persist_signal(payload)
-        msg = format_signal_message(pair, direction, entry_time, confidence, reason)
-        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg)
-        print(f"Sent signal for {pair} entry {entry_time} dir {direction} conf {confidence}")
-    except Exception as e:
-        print('Error sending pre-signal', e)
-
-
-def schedule_today_signals():
-    if datetime.utcnow().weekday() > 4:
-        print('Weekend, no schedule')
-        return
-    sched.remove_all_jobs()
-    daily = generate_daily_schedule_for_today()
-    for item in daily:
-        entry = item['entry_time']
-        send_time = entry - timedelta(minutes=GAP_MIN_BEFORE_ENTRY)
-        if send_time > datetime.utcnow().replace(tzinfo=timezone.utc):
-            sched.add_job(send_pre_signal, 'date', run_date=send_time, args=[item['pair'], entry])
-    print('Scheduled', len(daily), 'signals for today')
-
-
-def ensure_db():
-    sql = open('db_schema.sql').read()
-    with engine.begin() as conn:
-            for stmt in sql.split(';'):
-                s = stmt.strip()
-                if s:
-                    conn.execute(text(s))
-
-if __name__=='__main__':
-    ensure_db()
-    sched.add_job(schedule_today_signals, 'cron', hour=8, minute=55)
-    schedule_today_signals()
-    sched.start()
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-    app.add_handler(CommandHandler('result', cmd_result))
-    app.add_handler(CommandHandler('stats', cmd_stats))
-    import threading
-    t = threading.Thread(target=app.run_polling, daemon=True)
-    t.start()
-    try:
-        while True:
-            time.sleep(5)
-    except (KeyboardInterrupt, SystemExit):
-        sched.shutdown()
+    # Lancer le bot
+    app.run_polling()
