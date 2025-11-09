@@ -165,18 +165,6 @@ async def cmd_result(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text('❌ Erreur: '+str(e))
 
-async def cmd_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Teste la génération de signal immédiatement"""
-    await update.message.reply_text("🔍 Test de génération de signal en cours...")
-    
-    # Tester sur la première paire
-    pair = PAIRS[0]
-    entry_time = datetime.utcnow().replace(tzinfo=timezone.utc) + timedelta(minutes=5)
-    
-    await send_pre_signal(pair, entry_time, context.application)
-    
-    await update.message.reply_text(f"✅ Test terminé pour {pair}! Vérifiez si vous avez reçu un signal.")
-
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with engine.connect() as conn:
         total = conn.execute(text('SELECT COUNT(*) FROM signals')).scalar()
@@ -319,7 +307,6 @@ async def main():
     app.add_handler(CommandHandler('start', cmd_start))
     app.add_handler(CommandHandler('result', cmd_result))
     app.add_handler(CommandHandler('stats', cmd_stats))
-    app.add_handler(CommandHandler('test', cmd_test))
 
     # Créer le scheduler APRÈS avoir démarré l'event loop
     sched = AsyncIOScheduler(timezone='UTC')
