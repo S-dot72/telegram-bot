@@ -1,6 +1,6 @@
-# Force reload
 name: Run backtester and commit best_params
 
+# Force reload daily et possibilité run manuel
 on:
   schedule:
     - cron: '0 6 * * *'   # run daily at 06:00 UTC
@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           persist-credentials: true
@@ -32,14 +32,15 @@ jobs:
         run: |
           python backtester_optimized.py
 
-      - name: Commit best_params.json if generated
+      - name: Commit best_params.json
+        if: always()  # Exécute même si le backtest échoue
         run: |
           if [ -f best_params.json ]; then
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
             git add best_params.json
             git commit -m "Auto: update best_params.json (backtester run)" || echo "no changes to commit"
-            git push
+            git push https://x-access-token:${{ secrets.PAT_GITHUB }}@github.com/${{ github.repository }}.git
           else
             echo "No best_params.json generated"
           fi
