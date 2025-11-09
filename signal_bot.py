@@ -1,7 +1,8 @@
 """
 Production bot qui charge best_params.json si présent pour appliquer les paramètres optimisés par pair.
-Programme SIGNALS_PER_DAY et envoie chaque pré-signal GAP_MIN_BEFORE_ENTRY minutes avant l'entrée.
+Programme 20 signaux par jour espacés de 5 minutes.
 Support multi-utilisateurs via table subscribers.
+Cache intelligent pour respecter limite API TwelveData.
 """
 
 import os, json, asyncio
@@ -15,8 +16,9 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from config import *
 from utils import compute_indicators, rule_signal
 
-# --- Database ---
+# --- Database et scheduler ---
 engine = create_engine(DB_URL, connect_args={'check_same_thread': False})
+sched = AsyncIOScheduler(timezone='UTC')
 
 # --- Charger les meilleurs paramètres si présents ---
 BEST_PARAMS = {}
@@ -29,10 +31,14 @@ if os.path.exists(BEST_PARAMS_FILE):
 
 TWELVE_TS_URL = 'https://api.twelvedata.com/time_series'
 
+# Cache global pour les données OHLC
+ohlc_cache = {}
+CACHE_DURATION_SECONDS = 60
+
 # --- Fonctions utilitaires ---
 
 def fetch_ohlc_td(pair, interval, outputsize=300):
-    # NE PAS enlever le / pour TwelveData
+    """Récupère les données OHLC depuis TwelveData API"""
     params = {'symbol': pair, 'interval': interval, 'outputsize': outputsize,
               'apikey': TWELVEDATA_API_KEY, 'format':'JSON'}
     r = requests.get(TWELVE_TS_URL, params=params, timeout=10)
@@ -55,6 +61,29 @@ def fetch_ohlc_td(pair, interval, outputsize=300):
     df.index = pd.to_datetime(df['datetime'])
     return df
 
+def get_cached_ohlc(pair, interval, outputsize=300):
+    """Récupère les données OHLC depuis le cache ou l'API"""
+    cache_key = f"{pair}_{interval}"
+    current_time = datetime.utcnow()
+    
+    # Vérifier si on a des données en cache valides
+    if cache_key in ohlc_cache:
+        cached_data, cached_time = ohlc_cache[cache_key]
+        age_seconds = (current_time - cached_time).total_seconds()
+        
+        if age_seconds < CACHE_DURATION_SECONDS:
+            print(f"💾 Utilisation du cache pour {pair} (âge: {int(age_seconds)}s)")
+            return cached_data
+    
+    # Sinon, récupérer depuis l'API
+    print(f"🌐 Appel API pour {pair}...")
+    df = fetch_ohlc_td(pair, interval, outputsize)
+    
+    # Mettre en cache
+    ohlc_cache[cache_key] = (df, current_time)
+    
+    return df
+
 def persist_signal(payload):
     q = text("INSERT INTO signals (pair,direction,reason,ts_enter,ts_send,confidence,payload_json) "
              "VALUES (:pair,:direction,:reason,:ts_enter,:ts_send,:confidence,:payload)")
@@ -62,40 +91,32 @@ def persist_signal(payload):
         conn.execute(q, payload)
 
 def generate_daily_schedule_for_today():
-    """Génère 20 signaux avec rotation intelligente des paires pour éviter saturation API"""
+    """Génère 20 signaux avec rotation des paires"""
     today = datetime.utcnow().date()
     start_dt = datetime.combine(today, dtime(START_HOUR_UTC, 0, 0), tzinfo=timezone.utc)
     end_dt = datetime.combine(today, dtime(END_HOUR_UTC, 0, 0), tzinfo=timezone.utc)
     
-    # 20 signaux espacés de 5 minutes
     num_signals = 20
-    interval = 5  # minutes
+    interval = 5
     
     schedule = []
-    
-    # Utiliser seulement 2 paires principales pour respecter la limite API
-    # TwelveData gratuit: 8 req/min
-    # Avec cache: 2 paires × 1 req chacune toutes les 60s = OK
-    active_pairs = PAIRS[:2]  # Prendre seulement les 2 premières paires
+    active_pairs = PAIRS[:2]  # 2 paires pour respecter limite API
     
     for i in range(num_signals):
         t = start_dt + timedelta(minutes=i*interval)
         if t < end_dt:
-            # Alterner entre les 2 paires
             pair = active_pairs[i % len(active_pairs)]
             schedule.append({'pair': pair, 'entry_time': t})
     
-    print(f"📅 Planning: {num_signals} signaux générés avec {len(active_pairs)} paires")
+    print(f"📅 Planning: {num_signals} signaux avec {len(active_pairs)} paires")
     return schedule
 
 def format_signal_message(pair, direction, entry_time, confidence, reason):
-    # Convertir CALL/PUT en BUY/SELL
     direction_text = "BUY" if direction == "CALL" else "SELL"
     
     gale1 = entry_time + timedelta(minutes=5)
     gale2 = entry_time + timedelta(minutes=10)
     
-    # Extraire juste la date
     date_str = entry_time.strftime('%Y-%m-%d')
     time_str = entry_time.strftime('%H:%M:%S')
     gale1_str = gale1.strftime('%H:%M:%S')
@@ -119,7 +140,6 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"📥 /start reçu de user_id={user_id} username={username}")
     try:
         with engine.begin() as conn:
-            # Vérifier si déjà abonné
             existing = conn.execute(
                 text("SELECT user_id FROM subscribers WHERE user_id = :uid"),
                 {"uid": user_id}
@@ -135,10 +155,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 await update.message.reply_text(
                     "✅ Bienvenue ! Vous êtes maintenant abonné aux signaux de trading.\n\n"
-                    "📊 Vous recevrez automatiquement les signaux pendant les heures de trading.\n\n"
-                    "Commandes disponibles:\n"
-                    "/stats - Voir les statistiques\n"
-                    "/result <timestamp> <WIN|LOSE> - Enregistrer un résultat"
+                    "📊 20 signaux par jour (85% confiance)\n"
+                    "⏰ Signaux toutes les 5 minutes\n\n"
+                    "Commandes:\n"
+                    "/test - Tester un signal maintenant\n"
+                    "/stats - Voir les statistiques"
                 )
                 print(f"✅ User {user_id} ajouté aux abonnés")
     except Exception as e:
@@ -165,6 +186,17 @@ async def cmd_result(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text('❌ Erreur: '+str(e))
 
+async def cmd_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Teste la génération de signal immédiatement"""
+    await update.message.reply_text("🔍 Test de génération de signal en cours...")
+    
+    pair = PAIRS[0]
+    entry_time = datetime.utcnow().replace(tzinfo=timezone.utc) + timedelta(minutes=5)
+    
+    await send_pre_signal(pair, entry_time, context.application)
+    
+    await update.message.reply_text(f"✅ Test terminé pour {pair}! Vérifiez si vous avez reçu un signal.")
+
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with engine.connect() as conn:
         total = conn.execute(text('SELECT COUNT(*) FROM signals')).scalar()
@@ -179,19 +211,17 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Abonnés: {subs}"
     )
 
-# --- Envoi de signaux à tous les abonnés ---
+# --- Envoi de signaux ---
 
 async def send_pre_signal(pair, entry_time, app):
     print(f"🔄 Génération du signal pour {pair} à {datetime.utcnow()}")
     try:
-        # Récupération des paramètres optimisés
         params = BEST_PARAMS.get(pair, {})
         ema_f = params.get('ema_fast', 8)
         ema_s = params.get('ema_slow', 21)
         rsi_l = params.get('rsi', 14)
         bb_l = params.get('bb', 20)
 
-        # Calcul du signal AVEC CACHE (évite saturation API)
         print(f"📊 Récupération des données pour {pair}...")
         df = get_cached_ohlc(pair, TIMEFRAME_M1, outputsize=400)
         print(f"✅ {len(df)} bougies disponibles")
@@ -202,15 +232,12 @@ async def send_pre_signal(pair, entry_time, app):
         if sig:
             direction = sig
             confidence = 0.85
-            reason = f'Signal validé: EMA + MACD + RSI (20 signaux/jour)'
+            reason = f'Signal validé: EMA + MACD + RSI (20/jour)'
             print(f"✅ SIGNAL TROUVÉ: {direction} avec {int(confidence*100)}% confiance")
         else:
-            print(f"⏭️  Pas de signal pour {pair} à ce moment")
+            print(f"⏭️  Pas de signal pour {pair}")
             return
 
-        print(f"📍 Direction: {direction}, Confiance: {int(confidence*100)}%")
-
-        # Persister dans la DB
         ts_send = datetime.utcnow().replace(tzinfo=timezone.utc)
         payload = {
             'pair': pair,
@@ -222,33 +249,27 @@ async def send_pre_signal(pair, entry_time, app):
             'payload': json.dumps({'pair': pair,'reason': reason})
         }
         persist_signal(payload)
-        print(f"💾 Signal sauvegardé dans la DB")
 
-        # Récupérer tous les abonnés
         with engine.connect() as conn:
             user_ids = [row[0] for row in conn.execute(text("SELECT user_id FROM subscribers")).fetchall()]
 
-        print(f"👥 {len(user_ids)} abonné(s) trouvé(s)")
-
         if not user_ids:
-            print("⚠️  Aucun abonné, signal non envoyé")
+            print("⚠️  Aucun abonné")
             return
 
         msg = format_signal_message(pair, direction, entry_time, confidence, reason)
 
-        # Envoyer le message à tous les abonnés
         sent_count = 0
         for uid in user_ids:
             try:
                 await app.bot.send_message(chat_id=uid, text=msg)
                 sent_count += 1
-                print(f"✅ Signal envoyé à user {uid}")
             except Exception as e:
-                print(f"❌ Erreur envoi à user {uid}: {e}")
+                print(f"❌ Erreur envoi à {uid}: {e}")
 
-        print(f"✅ Signal {int(confidence*100)}% envoyé à {sent_count}/{len(user_ids)} utilisateurs pour {pair}")
+        print(f"✅ Signal {int(confidence*100)}% envoyé à {sent_count}/{len(user_ids)} utilisateurs")
     except Exception as e:
-        print(f'❌ Erreur en envoyant le signal: {e}')
+        print(f'❌ Erreur: {e}')
         import traceback
         traceback.print_exc()
 
@@ -256,7 +277,7 @@ async def send_pre_signal(pair, entry_time, app):
 
 async def schedule_today_signals(app, sched):
     if datetime.utcnow().weekday() > 4:
-        print('🏖️  Weekend, aucun signal')
+        print('🏖️  Weekend')
         return
 
     sched.remove_all_jobs()
@@ -266,9 +287,22 @@ async def schedule_today_signals(app, sched):
         send_time = entry - timedelta(minutes=GAP_MIN_BEFORE_ENTRY)
         if send_time > datetime.utcnow().replace(tzinfo=timezone.utc):
             sched.add_job(send_pre_signal, 'date', run_date=send_time, args=[item['pair'], entry, app])
-    print(f"📅 {len(daily)} signaux planifiés pour aujourd'hui")
+    print(f"📅 {len(daily)} signaux planifiés")
 
-# --- Création DB si nécessaire ---
+async def send_all_signals_now(app):
+    """Pour test manuel uniquement"""
+    print("🚀 Test signaux...")
+    daily = generate_daily_schedule_for_today()
+    
+    for i, item in enumerate(daily[:3], 1):  # Tester seulement 3
+        print(f"📤 Test {i}/3 pour {item['pair']}...")
+        await send_pre_signal(item['pair'], item['entry_time'], app)
+        if i < 3:
+            await asyncio.sleep(10)
+    
+    print("✅ Tests terminés")
+
+# --- DB ---
 
 def ensure_db():
     sql = open('db_schema.sql').read()
@@ -280,69 +314,41 @@ def ensure_db():
 
 # --- Main ---
 
-async def send_all_signals_now(app):
-    """Envoie tous les signaux immédiatement pour test, avec délai pour respecter les limites API"""
-    print("🚀 Envoi immédiat de tous les signaux pour test...")
-    daily = generate_daily_schedule_for_today()
-    
-    for i, item in enumerate(daily, 1):
-        print(f"📤 Envoi signal {i}/{len(daily)} pour {item['pair']}...")
-        await send_pre_signal(item['pair'], item['entry_time'], app)
-        
-        # Attendre 5 minutes entre chaque signal
-        if i < len(daily):
-            print(f"⏳ Attente de 5 minutes avant le prochain signal...")
-            await asyncio.sleep(300)  # 5 minutes = 300 secondes
-    
-    print("✅ Tous les signaux ont été envoyés.")
-
 async def main():
     print("🚀 Démarrage du bot...")
     ensure_db()
 
-    # Créer l'application
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     
-    # Ajouter les handlers
     app.add_handler(CommandHandler('start', cmd_start))
     app.add_handler(CommandHandler('result', cmd_result))
     app.add_handler(CommandHandler('stats', cmd_stats))
+    app.add_handler(CommandHandler('test', cmd_test))
 
-    # Créer le scheduler APRÈS avoir démarré l'event loop
-    sched = AsyncIOScheduler(timezone='UTC')
     sched.start()
     print("⏰ Scheduler démarré")
     
-    # Planifier les signaux d'aujourd'hui
     await schedule_today_signals(app, sched)
     
-    # Ajouter le job quotidien
     sched.add_job(schedule_today_signals, 'cron', hour=8, minute=55, args=[app, sched])
     print("📆 Job quotidien configuré")
 
-    # Démarrer le bot
     await app.initialize()
     await app.start()
-    await app.updater.start_polling(drop_pending_updates=True)  # drop_pending_updates=True évite les conflits
+    await app.updater.start_polling(drop_pending_updates=True)
     
-    print("✅ Bot démarré avec succès!")
+    print("✅ Bot démarré!")
     print(f"🤖 Bot: @{(await app.bot.get_me()).username}")
     
-    # 🔥 ENVOYER TOUS LES SIGNAUX IMMÉDIATEMENT POUR TEST 🔥
-    print("\n⚡ MODE TEST : Envoi immédiat de tous les signaux...")
-    await send_all_signals_now(app)
-    
-    # Garder le bot en vie
     try:
         while True:
             await asyncio.sleep(1)
     except (KeyboardInterrupt, SystemExit):
-        print("\n🛑 Arrêt du bot...")
+        print("\n🛑 Arrêt...")
         await app.updater.stop()
         await app.stop()
         await app.shutdown()
         sched.shutdown()
-        print("👋 Bot arrêté")
 
-if __name__ == '__main__':
+if __name__=='__main__':
     asyncio.run(main())
