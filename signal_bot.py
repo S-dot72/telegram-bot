@@ -1,8 +1,10 @@
+
 """
-Production bot qui charge best_params.json si présent pour appliquer les paramètres optimisés par pair.
-Programme 20 signaux par jour espacés de 5 minutes.
-Support multi-utilisateurs via table subscribers.
-Cache intelligent pour respecter limite API TwelveData.
+Production bot avec Machine Learning et vérification automatique des résultats.
+- 20 signaux par jour espacés de 5 minutes
+- ML pour améliorer la confiance des signaux
+- Vérification automatique WIN/LOSE
+- Support multi-utilisateurs
 """
 
 import os, json, asyncio
@@ -15,10 +17,16 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from config import *
 from utils import compute_indicators, rule_signal
+from ml_predictor import MLSignalPredictor
+from auto_result_verifier import AutoResultVerifier
 
 # --- Database et scheduler ---
 engine = create_engine(DB_URL, connect_args={'check_same_thread': False})
 sched = AsyncIOScheduler(timezone='UTC')
+
+# --- ML Predictor et Auto Verifier ---
+ml_predictor = MLSignalPredictor()
+auto_verifier = None  # Initialisé dans main() car besoin de l'engine
 
 # --- Charger les meilleurs paramètres si présents ---
 BEST_PARAMS = {}
@@ -124,6 +132,7 @@ def format_signal_message(pair, direction, entry_time, confidence, reason):
     
     msg = (
         f"📊 SIGNAL — {pair} - {date_str}\n\n"
+        f"TimeFrame 1min \n\n"
         f"Entrée (UTC): {time_str}\n\n"
         f"Direction: {direction_text}\n\n"
         f"     Gale 1: {gale1_str}\n"
@@ -186,6 +195,25 @@ async def cmd_result(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text('❌ Erreur: '+str(e))
 
+async def cmd_train(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Entraîne le modèle ML sur l'historique (admin uniquement)"""
+    await update.message.reply_text("🎓 Entraînement du modèle ML en cours...")
+    
+    success = ml_predictor.train_on_history(engine)
+    
+    if success:
+        await update.message.reply_text("✅ Modèle ML entraîné avec succès!")
+    else:
+        await update.message.reply_text("⚠️ Pas assez de données pour l'entraînement (minimum 50 signaux avec résultats)")
+
+async def cmd_verify(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Force la vérification des signaux en attente"""
+    await update.message.reply_text("🔍 Vérification des signaux en cours...")
+    
+    await auto_verifier.verify_pending_signals()
+    
+    await update.message.reply_text("✅ Vérification terminée! Utilisez /stats pour voir les résultats.")
+
 async def cmd_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Teste la génération de signal immédiatement"""
     await update.message.reply_text("🔍 Test de génération de signal en cours...")
@@ -198,18 +226,33 @@ async def cmd_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Test terminé pour {pair}! Vérifiez si vous avez reçu un signal.")
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Affiche les statistiques avec performance ML"""
     with engine.connect() as conn:
         total = conn.execute(text('SELECT COUNT(*) FROM signals')).scalar()
         wins = conn.execute(text("SELECT COUNT(*) FROM signals WHERE result='WIN'")).scalar()
         subs = conn.execute(text('SELECT COUNT(*) FROM subscribers')).scalar()
-    winrate = (wins/total*100) if total > 0 else 0
-    await update.message.reply_text(
-        f"📊 **Statistiques**\n\n"
-        f"Total signaux: {total}\n"
-        f"Victoires: {wins}\n"
-        f"Taux de réussite: {winrate:.1f}%\n"
-        f"Abonnés: {subs}"
-    )
+        
+        # Stats ML
+        verified = conn.execute(text("SELECT COUNT(*) FROM signals WHERE result IS NOT NULL")).scalar()
+    
+    winrate = (wins/verified*100) if verified > 0 else 0
+    
+    # Stats de performance ML
+    perf_stats = auto_verifier.get_performance_stats() if auto_verifier else None
+    
+    msg = f"📊 **Statistiques Globales**\n\n"
+    msg += f"Total signaux: {total}\n"
+    msg += f"Vérifiés: {verified}\n"
+    msg += f"Victoires: {wins}\n"
+    msg += f"Taux de réussite: {winrate:.1f}%\n"
+    msg += f"Abonnés: {subs}\n"
+    
+    if perf_stats:
+        msg += f"\n🤖 **Performance ML**\n"
+        msg += f"Win rate: {perf_stats['winrate']:.1f}%\n"
+        msg += f"Confiance moyenne: {perf_stats['avg_confidence']:.1%}\n"
+    
+    await update.message.reply_text(msg)
 
 # --- Envoi de signaux ---
 
@@ -227,15 +270,27 @@ async def send_pre_signal(pair, entry_time, app):
         print(f"✅ {len(df)} bougies disponibles")
         
         df = compute_indicators(df, ema_fast=ema_f, ema_slow=ema_s, rsi_len=rsi_l, bb_len=bb_l)
-        sig = rule_signal(df)
+        base_signal = rule_signal(df)
         
-        if sig:
-            direction = sig
-            confidence = 0.85
-            reason = f'Signal validé: EMA + MACD + RSI (20/jour)'
-            print(f"✅ SIGNAL TROUVÉ: {direction} avec {int(confidence*100)}% confiance")
+        if base_signal:
+            # 🤖 VALIDATION ML
+            print(f"🤖 Validation ML du signal {base_signal}...")
+            ml_signal, ml_confidence = ml_predictor.predict_signal(df, base_signal)
+            
+            if ml_signal is None:
+                print(f"❌ ML rejette le signal (confiance trop faible: {ml_confidence:.1%})")
+                return
+            
+            if ml_confidence < 0.70:
+                print(f"⚠️  Confiance ML insuffisante: {ml_confidence:.1%} (minimum 70%)")
+                return
+            
+            direction = ml_signal
+            confidence = ml_confidence
+            reason = f'Signal ML validé: {int(confidence*100)}% confiance'
+            print(f"✅ SIGNAL ML VALIDÉ: {direction} avec {int(confidence*100)}% confiance")
         else:
-            print(f"⏭️  Pas de signal pour {pair}")
+            print(f"⏭️  Pas de signal base pour {pair}")
             return
 
         ts_send = datetime.utcnow().replace(tzinfo=timezone.utc)
@@ -267,7 +322,7 @@ async def send_pre_signal(pair, entry_time, app):
             except Exception as e:
                 print(f"❌ Erreur envoi à {uid}: {e}")
 
-        print(f"✅ Signal {int(confidence*100)}% envoyé à {sent_count}/{len(user_ids)} utilisateurs")
+        print(f"✅ Signal ML {int(confidence*100)}% envoyé à {sent_count}/{len(user_ids)} utilisateurs")
     except Exception as e:
         print(f'❌ Erreur: {e}')
         import traceback
@@ -315,8 +370,13 @@ def ensure_db():
 # --- Main ---
 
 async def main():
-    print("🚀 Démarrage du bot...")
+    global auto_verifier
+    
+    print("🚀 Démarrage du bot ML...")
     ensure_db()
+    
+    # Initialiser l'auto-verifier
+    auto_verifier = AutoResultVerifier(engine, TWELVEDATA_API_KEY)
 
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     
@@ -324,21 +384,34 @@ async def main():
     app.add_handler(CommandHandler('result', cmd_result))
     app.add_handler(CommandHandler('stats', cmd_stats))
     app.add_handler(CommandHandler('test', cmd_test))
+    app.add_handler(CommandHandler('train', cmd_train))
+    app.add_handler(CommandHandler('verify', cmd_verify))
 
     sched.start()
     print("⏰ Scheduler démarré")
     
     await schedule_today_signals(app, sched)
     
+    # Job quotidien pour planifier les signaux
     sched.add_job(schedule_today_signals, 'cron', hour=8, minute=55, args=[app, sched])
-    print("📆 Job quotidien configuré")
+    
+    # 🤖 Job de vérification automatique toutes les 15 minutes
+    sched.add_job(
+        auto_verifier.verify_pending_signals,
+        'interval',
+        minutes=15,
+        id='auto_verify'
+    )
+    print("📆 Jobs configurés (signaux + vérification auto)")
 
     await app.initialize()
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
     
-    print("✅ Bot démarré!")
+    print("✅ Bot ML démarré!")
     print(f"🤖 Bot: @{(await app.bot.get_me()).username}")
+    print("🎓 Modèle ML: Actif")
+    print("🔍 Vérification auto: Toutes les 15 min")
     
     try:
         while True:
