@@ -1,20 +1,21 @@
 name: Run backtester and commit best_params
 
-# Force reload daily et possibilité run manuel
+# Schedule daily at 06:00 UTC, et run manuel possible
 on:
   schedule:
-    - cron: '0 6 * * *'   # run daily at 06:00 UTC
-  workflow_dispatch:      # permet run manuel
+    - cron: '0 6 * * *'
+  workflow_dispatch:
 
 jobs:
   backtest:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          persist-credentials: true
+          # persist-credentials: false permet d’utiliser le PAT pour le push
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -30,17 +31,18 @@ jobs:
         env:
           TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
         run: |
+          echo "===== BACKTESTER START ====="
           python backtester_optimized.py
 
       - name: Commit best_params.json
-        if: always()  # Exécute même si le backtest échoue
+        if: always()
         run: |
           if [ -f best_params.json ]; then
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
             git add best_params.json
             git commit -m "Auto: update best_params.json (backtester run)" || echo "no changes to commit"
-            git push https://x-access-token:${{ secrets.PAT_GITHUB }}@github.com/${{ github.repository }}.git
+            git push https://${{ secrets.PAT_GITHUB }}@github.com/${{ github.repository }}.git HEAD:main
           else
             echo "No best_params.json generated"
           fi
