@@ -323,12 +323,12 @@ async def main():
     # Démarrer le bot
     await app.initialize()
     await app.start()
-    await app.updater.start_polling(drop_pending_updates=True)
+    await app.updater.start_polling(drop_pending_updates=True)  # drop_pending_updates=True évite les conflits
     
     print("✅ Bot démarré avec succès!")
     print(f"🤖 Bot: @{(await app.bot.get_me()).username}")
     
-    # ⚠️ ENVOI IMMÉDIAT DÉSACTIVÉ pour éviter les conflits au démarrage
+    # 🔥 ENVOYER TOUS LES SIGNAUX IMMÉDIATEMENT POUR TEST 🔥
     print("\n⚡ MODE TEST : Envoi immédiat de tous les signaux...")
     await send_all_signals_now(app)
     
