@@ -18,7 +18,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from config import *
 from utils import compute_indicators, rule_signal
 from ml_predictor import MLSignalPredictor
-from auto_result_verifier import AutoResultVerifier
+from auto_verifier import AutoResultVerifier
 
 # --- Database et scheduler ---
 engine = create_engine(DB_URL, connect_args={'check_same_thread': False})
