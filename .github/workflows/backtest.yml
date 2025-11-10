@@ -1,0 +1,38 @@
+name: Backtest ML
+
+on:
+  workflow_dispatch:  # Lance manuellement depuis GitHub
+  schedule:
+    - cron: "0 0 * * *"  # Optionnel: tous les jours à minuit
+
+jobs:
+  run-backtest:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run backtest
+        env:
+          TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
+        run: |
+          python backtest.py
+
+      - name: Upload results
+        uses: actions/upload-artifact@v3
+        with:
+          name: backtest-results
+          path: |
+            best_params.json
+            ml_model.pkl
