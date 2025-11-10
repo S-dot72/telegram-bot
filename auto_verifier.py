@@ -9,17 +9,30 @@ from sqlalchemy import text
 import requests
 
 class AutoResultVerifier:
-    def __init__(self, engine, twelvedata_api_key):
+    def __init__(self, engine, twelvedata_api_key, bot=None):
         self.engine = engine
         self.api_key = twelvedata_api_key
         self.base_url = 'https://api.twelvedata.com/time_series'
+        self.bot = bot  # Pour envoyer des notifications
+        self.admin_chat_ids = []  # Liste des admins à notifier
+    
+    def set_bot(self, bot):
+        """Configure le bot pour les notifications"""
+        self.bot = bot
+    
+    def add_admin(self, chat_id):
+        """Ajoute un admin pour recevoir les rapports"""
+        if chat_id not in self.admin_chat_ids:
+            self.admin_chat_ids.append(chat_id)
     
     async def verify_pending_signals(self):
         """
         Vérifie tous les signaux qui n'ont pas encore de résultat
         et dont l'heure d'entrée + 10 minutes est passée
         """
-        print("🔍 Vérification automatique des résultats...")
+        print("\n" + "="*60)
+        print(f"🔍 VÉRIFICATION AUTOMATIQUE - {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
+        print("="*60)
         
         # Récupérer les signaux sans résultat et passés
         query = text("""
@@ -36,76 +49,102 @@ class AutoResultVerifier:
         
         if not pending:
             print("✅ Aucun signal en attente de vérification")
+            print("="*60 + "\n")
             return
         
         print(f"📊 {len(pending)} signaux à vérifier")
+        print("-"*60)
         
+        results = []
         verified_count = 0
+        
         for signal in pending:
             try:
-                result = await self._verify_single_signal(signal)
+                print(f"\n🔎 Signal #{signal.id} - {signal.pair} {signal.direction}")
+                result, details = await self._verify_single_signal(signal)
+                
                 if result:
                     self._update_signal_result(signal.id, result)
                     verified_count += 1
-                    await asyncio.sleep(2)  # Respecter limite API
+                    results.append({
+                        'signal': signal,
+                        'result': result,
+                        'details': details
+                    })
+                    
+                    # Log détaillé
+                    emoji = "✅" if result == 'WIN' else "❌"
+                    print(f"{emoji} Résultat: {result}")
+                    print(f"   Entrée: {details['entry_price']:.5f}")
+                    print(f"   Sortie: {details['exit_price']:.5f}")
+                    print(f"   Diff: {details['pips']:.1f} pips")
+                
+                await asyncio.sleep(2)  # Respecter limite API
+                
             except Exception as e:
                 print(f"❌ Erreur vérification signal {signal.id}: {e}")
         
-        print(f"✅ {verified_count}/{len(pending)} signaux vérifiés")
+        print("\n" + "-"*60)
+        print(f"📈 RÉSUMÉ: {verified_count}/{len(pending)} signaux vérifiés")
+        print("="*60 + "\n")
         
-        # Entraîner le modèle ML si assez de données
-        self._trigger_ml_retraining()
+        # Envoyer rapport aux admins
+        if verified_count > 0 and self.bot and self.admin_chat_ids:
+            await self._send_verification_report(results)
+        
+        # Vérifier si réentraînement nécessaire
+        self._check_ml_retraining()
     
     async def _verify_single_signal(self, signal):
         """
         Vérifie un signal individuel
-        Logique:
-        - BUY (CALL): WIN si prix > prix_entrée après 5 min
-        - SELL (PUT): WIN si prix < prix_entrée après 5 min
+        Retourne: (result, details)
         """
         entry_time = datetime.fromisoformat(signal.ts_enter.replace('Z', '+00:00'))
-        check_time = entry_time + timedelta(minutes=5)  # Vérifier 5 min après
+        check_time = entry_time + timedelta(minutes=5)
         
-        print(f"🔎 Vérification {signal.pair} {signal.direction} entrée à {entry_time}")
-        
-        # Récupérer les prix au moment de l'entrée et 5 min après
-        entry_price = self._get_price_at_time(signal.pair, entry_time)
-        exit_price = self._get_price_at_time(signal.pair, check_time)
+        # Récupérer les prix
+        entry_price = await self._get_price_at_time(signal.pair, entry_time)
+        await asyncio.sleep(1)  # Petite pause entre les appels API
+        exit_price = await self._get_price_at_time(signal.pair, check_time)
         
         if entry_price is None or exit_price is None:
-            print(f"⚠️  Prix non disponibles pour {signal.pair}")
-            return None
+            print(f"⚠️  Prix non disponibles")
+            return None, None
         
         # Déterminer WIN ou LOSE
         if signal.direction == 'CALL':
-            # BUY: on gagne si le prix monte
             result = 'WIN' if exit_price > entry_price else 'LOSE'
         else:  # PUT
-            # SELL: on gagne si le prix descend
             result = 'WIN' if exit_price < entry_price else 'LOSE'
         
-        pips_diff = abs(exit_price - entry_price) * 10000  # Différence en pips
+        pips_diff = abs(exit_price - entry_price) * 10000
         
-        print(f"{'✅' if result == 'WIN' else '❌'} {signal.pair}: {result} "
-              f"(entrée: {entry_price:.5f}, sortie: {exit_price:.5f}, {pips_diff:.1f} pips)")
+        details = {
+            'entry_price': entry_price,
+            'exit_price': exit_price,
+            'pips': pips_diff,
+            'entry_time': entry_time,
+            'check_time': check_time
+        }
         
-        return result
+        return result, details
     
-    def _get_price_at_time(self, pair, timestamp):
-        """
-        Récupère le prix d'une paire à un moment donné
-        """
+    async def _get_price_at_time(self, pair, timestamp):
+        """Récupère le prix d'une paire à un moment donné"""
         try:
-            # Formater la date pour TwelveData
-            date_str = timestamp.strftime('%Y-%m-%d %H:%M:%S')
+            # Utiliser end_date pour obtenir les données jusqu'à ce moment
+            end_str = timestamp.strftime('%Y-%m-%d %H:%M:%S')
+            start_str = (timestamp - timedelta(minutes=5)).strftime('%Y-%m-%d %H:%M:%S')
             
             params = {
                 'symbol': pair,
                 'interval': '1min',
-                'outputsize': 10,
+                'outputsize': 5,
                 'apikey': self.api_key,
                 'format': 'JSON',
-                'start_date': date_str
+                'start_date': start_str,
+                'end_date': end_str
             }
             
             response = requests.get(self.base_url, params=params, timeout=10)
@@ -113,13 +152,14 @@ class AutoResultVerifier:
             data = response.json()
             
             if 'values' in data and len(data['values']) > 0:
-                # Prendre le prix de clôture de la première bougie
-                return float(data['values'][0]['close'])
+                # Trouver la bougie la plus proche du timestamp
+                for candle in data['values']:
+                    return float(candle['close'])
             
             return None
             
         except Exception as e:
-            print(f"⚠️  Erreur récupération prix: {e}")
+            print(f"⚠️  Erreur API: {e}")
             return None
     
     def _update_signal_result(self, signal_id, result):
@@ -136,9 +176,37 @@ class AutoResultVerifier:
                 'ts_result': datetime.utcnow().isoformat(),
                 'id': signal_id
             })
+        
+        print(f"💾 Résultat sauvegardé: Signal #{signal_id} = {result}")
     
-    def _trigger_ml_retraining(self):
-        """Déclenche le réentraînement du modèle ML si nécessaire"""
+    async def _send_verification_report(self, results):
+        """Envoie un rapport de vérification aux admins"""
+        wins = sum(1 for r in results if r['result'] == 'WIN')
+        losses = len(results) - wins
+        winrate = (wins / len(results)) * 100
+        
+        report = f"📊 **Rapport de Vérification**\n\n"
+        report += f"Signaux vérifiés: {len(results)}\n"
+        report += f"✅ Gains: {wins}\n"
+        report += f"❌ Pertes: {losses}\n"
+        report += f"📈 Win rate: {winrate:.1f}%\n\n"
+        report += f"Détails:\n"
+        
+        for r in results[:5]:  # Montrer max 5 derniers
+            emoji = "✅" if r['result'] == 'WIN' else "❌"
+            sig = r['signal']
+            det = r['details']
+            report += f"{emoji} {sig.pair} {sig.direction}: {det['pips']:.1f} pips\n"
+        
+        # Envoyer à tous les admins
+        for chat_id in self.admin_chat_ids:
+            try:
+                await self.bot.send_message(chat_id=chat_id, text=report)
+            except Exception as e:
+                print(f"⚠️  Erreur envoi rapport à {chat_id}: {e}")
+    
+    def _check_ml_retraining(self):
+        """Vérifie si réentraînement ML nécessaire"""
         query = text("""
             SELECT COUNT(*) as count 
             FROM signals 
@@ -149,8 +217,9 @@ class AutoResultVerifier:
             count = conn.execute(query).scalar()
         
         if count >= 100 and count % 50 == 0:
-            print(f"🎓 {count} résultats disponibles, réentraînement du modèle ML recommandé")
-            # TODO: Appeler ml_predictor.train_on_history()
+            print(f"\n🎓 {count} résultats disponibles")
+            print(f"💡 Réentraînement du modèle ML recommandé")
+            print(f"   Utilisez /train pour améliorer la précision\n")
     
     def get_performance_stats(self):
         """Calcule les statistiques de performance"""
@@ -177,3 +246,18 @@ class AutoResultVerifier:
             }
         
         return None
+    
+    def get_recent_results(self, limit=10):
+        """Récupère les derniers résultats vérifiés"""
+        query = text("""
+            SELECT pair, direction, result, confidence, ts_enter, ts_result
+            FROM signals 
+            WHERE result IS NOT NULL
+            ORDER BY ts_result DESC
+            LIMIT :limit
+        """)
+        
+        with self.engine.connect() as conn:
+            results = conn.execute(query, {'limit': limit}).fetchall()
+        
+        return results
