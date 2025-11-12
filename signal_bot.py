@@ -199,8 +199,6 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "Commandes:\n"
                     "/test - Tester un signal maintenant\n"
                     "/stats - Voir les statistiques\n"
-                    "/train - Entraîner le modèle ML (admin)\n"
-                    "/verify - Vérifier les résultats (admin)"
                 )
                 print(f"✅ User {user_id} ajouté aux abonnés")
     except Exception as e:
