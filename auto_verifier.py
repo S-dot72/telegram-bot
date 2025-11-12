@@ -25,6 +25,7 @@ class AutoResultVerifier:
         """Ajoute un admin pour recevoir les rapports"""
         if chat_id not in self.admin_chat_ids:
             self.admin_chat_ids.append(chat_id)
+            print(f"✅ Admin {chat_id} ajouté pour recevoir les rapports")
     
     async def verify_pending_signals(self):
         """
@@ -35,9 +36,11 @@ class AutoResultVerifier:
         print(f"🔍 VÉRIFICATION AUTOMATIQUE - {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
         print("="*60)
         
-        # Récupérer les signaux sans résultat
+        # Récupérer les signaux sans résultat avec valeurs par défaut pour timeframe et max_gales
         query = text("""
-            SELECT id, pair, direction, ts_enter, confidence, timeframe, max_gales
+            SELECT id, pair, direction, ts_enter, confidence,
+                   COALESCE(timeframe, 5) as timeframe,
+                   COALESCE(max_gales, 2) as max_gales
             FROM signals 
             WHERE result IS NULL 
             AND datetime(ts_enter) < datetime('now')
@@ -51,6 +54,15 @@ class AutoResultVerifier:
         if not pending:
             print("✅ Aucun signal en attente de vérification")
             print("="*60 + "\n")
+            
+            # Envoyer un message aux admins même s'il n'y a rien à vérifier
+            if self.bot and self.admin_chat_ids:
+                msg = "✅ Aucun signal en attente de vérification"
+                for chat_id in self.admin_chat_ids:
+                    try:
+                        await self.bot.send_message(chat_id=chat_id, text=msg)
+                    except Exception as e:
+                        print(f"⚠️  Erreur envoi à {chat_id}: {e}")
             return
         
         print(f"📊 {len(pending)} signaux à vérifier")
@@ -58,11 +70,13 @@ class AutoResultVerifier:
         
         results = []
         verified_count = 0
+        skipped_count = 0
         
         for signal in pending:
             try:
                 # Vérifier si toutes les tentatives sont terminées
                 if not self._is_signal_complete(signal):
+                    skipped_count += 1
                     continue
                 
                 print(f"\n🔎 Signal #{signal.id} - {signal.pair} {signal.direction} M{signal.timeframe}")
@@ -90,23 +104,37 @@ class AutoResultVerifier:
                 
             except Exception as e:
                 print(f"❌ Erreur vérification signal {signal.id}: {e}")
+                import traceback
+                traceback.print_exc()
         
         print("\n" + "-"*60)
-        print(f"📈 RÉSUMÉ: {verified_count}/{len(pending)} signaux vérifiés")
+        print(f"📈 RÉSUMÉ: {verified_count} signaux vérifiés, {skipped_count} en attente")
         print("="*60 + "\n")
         
-        # Envoyer rapport aux admins si des signaux ont été vérifiés
-        if verified_count > 0 and self.bot and self.admin_chat_ids:
-            await self._send_verification_report(results)
+        # TOUJOURS envoyer un rapport aux admins
+        if self.bot and self.admin_chat_ids:
+            await self._send_verification_report(results, skipped_count)
+        else:
+            print(f"⚠️  Impossible d'envoyer le rapport:")
+            print(f"   Bot: {self.bot is not None}")
+            print(f"   Admins: {len(self.admin_chat_ids)}")
         
         # Vérifier si réentraînement nécessaire
-        self._check_ml_retraining()
+        if verified_count > 0:
+            self._check_ml_retraining()
     
     def _is_signal_complete(self, signal):
         """Vérifie si toutes les tentatives du signal sont terminées"""
-        entry_time = datetime.fromisoformat(signal.ts_enter.replace('Z', '+00:00'))
-        timeframe = signal.timeframe  # en minutes
-        max_attempts = signal.max_gales + 1  # signal initial + gales
+        try:
+            entry_time = datetime.fromisoformat(signal.ts_enter.replace('Z', '+00:00'))
+        except:
+            # Si le format ISO échoue, essayer sans timezone
+            entry_time = datetime.fromisoformat(signal.ts_enter)
+            if entry_time.tzinfo is None:
+                entry_time = entry_time.replace(tzinfo=timezone.utc)
+        
+        timeframe = signal.timeframe  # en minutes (par défaut 5)
+        max_attempts = signal.max_gales + 1  # signal initial + gales (par défaut 3 = 1+2)
         
         # Temps total nécessaire = timeframe * nombre de tentatives
         total_time_needed = timeframe * max_attempts
@@ -127,9 +155,20 @@ class AutoResultVerifier:
         Vérifie un signal en testant chaque tentative (signal + gales)
         Retourne: (result, details)
         """
-        entry_time = datetime.fromisoformat(signal.ts_enter.replace('Z', '+00:00'))
+        try:
+            entry_time = datetime.fromisoformat(signal.ts_enter.replace('Z', '+00:00'))
+        except:
+            entry_time = datetime.fromisoformat(signal.ts_enter)
+            if entry_time.tzinfo is None:
+                entry_time = entry_time.replace(tzinfo=timezone.utc)
+        
         timeframe = signal.timeframe
         max_attempts = signal.max_gales + 1
+        
+        # Variables pour stocker les derniers prix (au cas où on ne trouve rien)
+        last_entry_price = None
+        last_exit_price = None
+        last_pips_diff = 0
         
         # Tester chaque tentative
         for attempt in range(max_attempts):
@@ -150,6 +189,10 @@ class AutoResultVerifier:
                 print(f"   ⚠️  Prix de sortie non disponible")
                 continue
             
+            # Sauvegarder pour la fin
+            last_entry_price = entry_price
+            last_exit_price = exit_price
+            
             # Vérifier si cette tentative est gagnante
             is_winning = False
             if signal.direction == 'CALL':
@@ -158,6 +201,7 @@ class AutoResultVerifier:
                 is_winning = exit_price < entry_price
             
             pips_diff = abs(exit_price - entry_price) * 10000
+            last_pips_diff = pips_diff
             
             if is_winning:
                 # Victoire !
@@ -178,10 +222,16 @@ class AutoResultVerifier:
         
         # Toutes les tentatives ont échoué
         print(f"   ❌ LOSE après {max_attempts} tentatives")
+        
+        # Utiliser les derniers prix disponibles
+        if last_entry_price is None or last_exit_price is None:
+            print(f"   ⚠️  Impossible de récupérer les prix")
+            return None, None
+        
         details = {
-            'entry_price': entry_price,
-            'exit_price': exit_price,
-            'pips': pips_diff,
+            'entry_price': last_entry_price,
+            'exit_price': last_exit_price,
+            'pips': last_pips_diff,
             'winning_attempt': None,
             'attempt_number': max_attempts,
             'total_attempts': max_attempts
@@ -223,7 +273,7 @@ class AutoResultVerifier:
                         min_diff = diff
                         closest_candle = candle
                 
-                if closest_candle and min_diff < 120:  # Max 2 minutes de différence
+                if closest_candle and min_diff < 180:  # Max 3 minutes de différence
                     return float(closest_candle['close'])
             
             return None
@@ -252,7 +302,7 @@ class AutoResultVerifier:
         
         print(f"💾 Résultat sauvegardé: Signal #{signal_id} = {result}")
     
-    async def _send_verification_report(self, results):
+    async def _send_verification_report(self, results, skipped_count=0):
         """Envoie un rapport de vérification aux admins"""
         # Statistiques du jour
         today_stats = self._get_today_stats()
@@ -271,37 +321,54 @@ class AutoResultVerifier:
             report += f"• ✅ Réussis: {today_stats['wins']}\n"
             report += f"• ❌ Échoués: {today_stats['losses']}\n"
             report += f"• ⏳ En attente: {today_stats['pending']}\n"
-            report += f"• 📈 Win rate: {today_stats['winrate']:.1f}%\n\n"
+            if today_stats['wins'] + today_stats['losses'] > 0:
+                report += f"• 📈 Win rate: {today_stats['winrate']:.1f}%\n"
+            report += "\n"
         
         # Signaux vérifiés maintenant
-        report += f"🔍 **Vérification actuelle:**\n"
-        report += f"• Signaux vérifiés: {len(results)}\n"
-        report += f"• ✅ Gains: {wins}\n"
-        report += f"• ❌ Pertes: {losses}\n\n"
-        
-        report += "📋 **Détails:**\n"
-        
-        for r in results[:10]:  # Max 10 derniers
-            emoji = "✅" if r['result'] == 'WIN' else "❌"
-            sig = r['signal']
-            det = r['details']
+        if len(results) > 0:
+            report += f"🔍 **Vérification actuelle:**\n"
+            report += f"• Signaux vérifiés: {len(results)}\n"
+            report += f"• ✅ Gains: {wins}\n"
+            report += f"• ❌ Pertes: {losses}\n"
+            if skipped_count > 0:
+                report += f"• ⏳ Non terminés: {skipped_count}\n"
+            report += "\n"
             
-            attempt_info = ""
-            if det.get('winning_attempt'):
-                attempt_info = f" ({det['winning_attempt']})"
+            report += "📋 **Détails:**\n"
             
-            report += f"{emoji} {sig.pair} {sig.direction} M{sig.timeframe}{attempt_info}\n"
-            report += f"   {det['pips']:.1f} pips | Conf: {sig.confidence:.0%}\n"
+            for r in results[:10]:  # Max 10 derniers
+                emoji = "✅" if r['result'] == 'WIN' else "❌"
+                sig = r['signal']
+                det = r['details']
+                
+                attempt_info = ""
+                if det.get('winning_attempt'):
+                    attempt_info = f" ({det['winning_attempt']})"
+                
+                report += f"{emoji} {sig.pair} {sig.direction} M{sig.timeframe}{attempt_info}\n"
+                report += f"   {det['pips']:.1f} pips | Conf: {sig.confidence:.0%}\n"
+        else:
+            report += "ℹ️ Aucun signal vérifié lors de cette session\n"
+            if skipped_count > 0:
+                report += f"⏳ {skipped_count} signaux en attente (temps non écoulé)\n"
         
         report += "\n━━━━━━━━━━━━━━━━━━━━"
         
         # Envoyer à tous les admins
+        sent_count = 0
         for chat_id in self.admin_chat_ids:
             try:
                 await self.bot.send_message(chat_id=chat_id, text=report)
+                sent_count += 1
                 print(f"✅ Rapport envoyé à l'admin {chat_id}")
             except Exception as e:
                 print(f"⚠️  Erreur envoi rapport à {chat_id}: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        if sent_count == 0:
+            print(f"❌ Aucun rapport envoyé! Admins: {self.admin_chat_ids}")
     
     def _get_today_stats(self):
         """Calcule les statistiques des signaux du jour"""
@@ -319,7 +386,7 @@ class AutoResultVerifier:
             stats = conn.execute(query).fetchone()
         
         if stats and stats.total_signals > 0:
-            verified = stats.wins + stats.losses
+            verified = (stats.wins or 0) + (stats.losses or 0)
             winrate = (stats.wins / verified * 100) if verified > 0 else 0
             
             return {
@@ -363,14 +430,14 @@ class AutoResultVerifier:
         with self.engine.connect() as conn:
             stats = conn.execute(query).fetchone()
         
-        if stats.total > 0:
+        if stats and stats.total > 0:
             winrate = (stats.wins / stats.total) * 100
             return {
                 'total': stats.total,
-                'wins': stats.wins,
-                'losses': stats.losses,
+                'wins': stats.wins or 0,
+                'losses': stats.losses or 0,
                 'winrate': winrate,
-                'avg_confidence': stats.avg_confidence
+                'avg_confidence': stats.avg_confidence or 0
             }
         
         return None
@@ -378,7 +445,8 @@ class AutoResultVerifier:
     def get_recent_results(self, limit=10):
         """Récupère les derniers résultats vérifiés"""
         query = text("""
-            SELECT pair, direction, result, confidence, timeframe, 
+            SELECT pair, direction, result, confidence, 
+                   COALESCE(timeframe, 5) as timeframe,
                    winning_attempt, ts_enter, ts_result
             FROM signals 
             WHERE result IS NOT NULL
@@ -406,16 +474,18 @@ class AutoResultVerifier:
         report += f"• ✅ Réussis: {stats['wins']}\n"
         report += f"• ❌ Échoués: {stats['losses']}\n"
         report += f"• ⏳ En attente: {stats['pending']}\n\n"
-        report += f"📊 **Performance:**\n"
-        report += f"• Win rate: {stats['winrate']:.1f}%\n"
         
-        # Ajouter évaluation
-        if stats['winrate'] >= 70:
-            report += f"• 🎉 Excellente performance !\n"
-        elif stats['winrate'] >= 60:
-            report += f"• 👍 Bonne performance\n"
-        else:
-            report += f"• ⚠️  Performance à améliorer\n"
+        if stats['wins'] + stats['losses'] > 0:
+            report += f"📊 **Performance:**\n"
+            report += f"• Win rate: {stats['winrate']:.1f}%\n"
+            
+            # Ajouter évaluation
+            if stats['winrate'] >= 70:
+                report += f"• 🎉 Excellente performance !\n"
+            elif stats['winrate'] >= 60:
+                report += f"• 👍 Bonne performance\n"
+            else:
+                report += f"• ⚠️  Performance à améliorer\n"
         
         report += "\n━━━━━━━━━━━━━━━━━━━━"
         
