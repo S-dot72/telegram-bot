@@ -18,7 +18,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from config import *
 from utils import compute_indicators, rule_signal
 from ml_predictor import MLSignalPredictor
-from auto_verifier import AutoResultVerifier
+from auto_result_verifier import AutoResultVerifier
 
 # --- Configuration horaires ---
 START_HOUR_UTC = 9  # Début à 9h UTC
@@ -199,6 +199,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "Commandes:\n"
                     "/test - Tester un signal maintenant\n"
                     "/stats - Voir les statistiques\n"
+                    "/train - Entraîner le modèle ML (admin)\n"
+                    "/verify - Vérifier les résultats (admin)"
                 )
                 print(f"✅ User {user_id} ajouté aux abonnés")
     except Exception as e:
@@ -238,14 +240,43 @@ async def cmd_train(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_verify(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Force la vérification des signaux en attente"""
-    await update.message.reply_text("🔍 Vérification des signaux en cours...")
+    chat_id = update.effective_chat.id
     
-    # Ajouter l'utilisateur comme admin pour recevoir les rapports
-    auto_verifier.add_admin(update.effective_chat.id)
+    print(f"\n{'='*60}")
+    print(f"📥 /verify reçu de {chat_id}")
+    print(f"{'='*60}")
     
-    await auto_verifier.verify_pending_signals()
-    
-    await update.message.reply_text("✅ Vérification terminée!")
+    try:
+        # Message initial
+        msg = await update.message.reply_text("🔍 Vérification des signaux en cours...")
+        
+        # Ajouter l'utilisateur comme admin pour recevoir les rapports
+        auto_verifier.add_admin(chat_id)
+        
+        # Configurer le bot si ce n'est pas déjà fait
+        if not auto_verifier.bot:
+            auto_verifier.set_bot(context.application.bot)
+            print("✅ Bot configuré dans le vérificateur")
+        
+        print(f"📊 Admins configurés: {auto_verifier.admin_chat_ids}")
+        
+        # Lancer la vérification
+        await auto_verifier.verify_pending_signals()
+        
+        # Supprimer le message "en cours"
+        try:
+            await msg.delete()
+        except:
+            pass
+        
+        print(f"✅ Commande /verify terminée pour {chat_id}\n")
+        
+    except Exception as e:
+        error_msg = f"❌ Erreur lors de la vérification:\n{str(e)}"
+        print(f"❌ ERREUR dans cmd_verify: {e}")
+        import traceback
+        traceback.print_exc()
+        await update.message.reply_text(error_msg)
 
 async def cmd_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Teste la génération de signal immédiatement"""
@@ -289,6 +320,12 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"\n🤖 **Performance ML**\n"
         msg += f"Win rate: {perf_stats['winrate']:.1f}%\n"
         msg += f"Confiance moyenne: {perf_stats['avg_confidence']:.1%}\n"
+    
+    msg += f"\n⏰ **Configuration**\n"
+    msg += f"Premier signal: {START_HOUR_UTC}h00 UTC\n"
+    msg += f"Intervalle: {SIGNAL_INTERVAL_MIN} min\n"
+    msg += f"Délai entrée: {DELAY_BEFORE_ENTRY_MIN} min\n"
+    msg += f"Signaux/jour: {NUM_SIGNALS_PER_DAY}\n"
     
     await update.message.reply_text(msg)
 
