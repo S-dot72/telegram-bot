@@ -1,6 +1,6 @@
 """
-Bot de trading simplifié qui fonctionne
-- Signaux à 9h UTC (peu importe le fuseau du serveur)
+Bot de trading simplifié — version UTC corrigée
+- Signaux à 9h UTC (fixe, peu importe le fuseau du serveur)
 - Vérification automatique après chaque signal
 """
 
@@ -17,14 +17,18 @@ from utils import compute_indicators, rule_signal
 from ml_predictor import MLSignalPredictor
 from auto_verifier import AutoResultVerifier
 
-# Configuration
+# =====================================================
+# Configuration UTC globale
+# =====================================================
+
+os.environ['TZ'] = 'UTC'  # Force le fuseau UTC
 START_HOUR_UTC = 9
 SIGNAL_INTERVAL_MIN = 5
 DELAY_BEFORE_ENTRY_MIN = 3
 NUM_SIGNALS_PER_DAY = 20
 
 engine = create_engine(DB_URL, connect_args={'check_same_thread': False})
-sched = AsyncIOScheduler()
+sched = AsyncIOScheduler(timezone=timezone.utc)
 ml_predictor = MLSignalPredictor()
 auto_verifier = None
 
@@ -38,6 +42,11 @@ if os.path.exists(BEST_PARAMS_FILE):
 
 TWELVE_TS_URL = 'https://api.twelvedata.com/time_series'
 ohlc_cache = {}
+
+
+# =====================================================
+# Fonctions utilitaires
+# =====================================================
 
 def get_utc_now():
     return datetime.now(timezone.utc)
@@ -76,7 +85,10 @@ def persist_signal(payload):
     with engine.begin() as conn:
         conn.execute(q, payload)
 
-# --- Commandes Telegram ---
+
+# =====================================================
+# Commandes Telegram
+# =====================================================
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -154,7 +166,10 @@ async def cmd_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {e}")
 
-# --- Envoi de signaux ---
+
+# =====================================================
+# Envoi de signaux
+# =====================================================
 
 async def send_pre_signal(pair, entry_time_utc, app):
     now_utc = get_utc_now()
@@ -216,51 +231,32 @@ async def send_pre_signal(pair, entry_time_utc, app):
     except Exception as e:
         print(f"❌ Erreur: {e}")
 
-# --- Scheduler ---
+
+# =====================================================
+# Scheduler — UTC only
+# =====================================================
 
 def generate_schedule():
-    """Génère les horaires d'envoi EN HEURE LOCALE"""
-    now_local = datetime.now()
-    now_utc = get_utc_now()
-    
-    # Calculer l'offset
-    offset_hours = (now_local.replace(tzinfo=None) - now_utc.replace(tzinfo=None)).total_seconds() / 3600
-    
-    # 9h UTC = 9 - offset en heure locale
-    local_hour = int(START_HOUR_UTC - offset_hours) % 24
-    
-    print(f"\n📅 Planning:")
-    print(f"   Offset serveur: UTC{offset_hours:+.0f}")
-    print(f"   9h UTC = {local_hour}h locale")
-    
+    print(f"\n📅 Planning UTC:")
     schedule = []
     active_pairs = PAIRS[:2]
     
     for i in range(NUM_SIGNALS_PER_DAY):
-        # Calculer l'heure locale
-        minutes_offset = i * SIGNAL_INTERVAL_MIN
-        total_minutes = local_hour * 60 + minutes_offset
-        hour = (total_minutes // 60) % 24
-        minute = total_minutes % 60
-        
-        # Calculer l'heure d'entrée UTC
-        utc_send = START_HOUR_UTC + (i * SIGNAL_INTERVAL_MIN) / 60
-        utc_entry = utc_send + DELAY_BEFORE_ENTRY_MIN / 60
-        
-        pair = active_pairs[i % len(active_pairs)]
+        utc_send_hour = START_HOUR_UTC + (i * SIGNAL_INTERVAL_MIN) / 60
+        utc_entry = utc_send_hour + DELAY_BEFORE_ENTRY_MIN / 60
         
         schedule.append({
-            'pair': pair,
-            'hour': hour,
-            'minute': minute,
+            'pair': active_pairs[i % len(active_pairs)],
+            'hour': int(utc_send_hour),
+            'minute': int((utc_send_hour % 1) * 60),
             'entry_utc_hour': int(utc_entry),
             'entry_utc_minute': int((utc_entry % 1) * 60)
         })
     
     return schedule
 
+
 async def schedule_daily_signals(app, sched):
-    """Planifie les signaux du jour"""
     now_utc = get_utc_now()
     if now_utc.weekday() > 4:
         print("🏖️ Weekend")
@@ -274,10 +270,8 @@ async def schedule_daily_signals(app, sched):
     schedule = generate_schedule()
     
     for i, item in enumerate(schedule):
-        # Créer l'heure d'entrée UTC
-        today_utc = now_utc.date()
         entry_time_utc = datetime(
-            today_utc.year, today_utc.month, today_utc.day,
+            now_utc.year, now_utc.month, now_utc.day,
             item['entry_utc_hour'], item['entry_utc_minute'],
             tzinfo=timezone.utc
         )
@@ -293,7 +287,10 @@ async def schedule_daily_signals(app, sched):
     
     print(f"✅ {len(schedule)} signaux planifiés\n")
 
-# --- DB ---
+
+# =====================================================
+# Base de données
+# =====================================================
 
 def ensure_db():
     sql = open('db_schema.sql').read()
@@ -302,19 +299,18 @@ def ensure_db():
             if stmt.strip():
                 conn.execute(text(stmt.strip()))
 
-# --- Main ---
+
+# =====================================================
+# Main
+# =====================================================
 
 async def main():
     global auto_verifier
     
-    now_local = datetime.now()
-    now_utc = get_utc_now()
-    
     print("\n" + "="*60)
-    print("🤖 BOT DE TRADING")
+    print("🤖 BOT DE TRADING (UTC MODE)")
     print("="*60)
-    print(f"🕐 Heure locale: {now_local.strftime('%H:%M:%S')}")
-    print(f"🌍 Heure UTC: {now_utc.strftime('%H:%M:%S')}")
+    print(f"🌍 Heure UTC: {get_utc_now().strftime('%H:%M:%S')}")
     print("="*60 + "\n")
     
     ensure_db()
@@ -329,16 +325,11 @@ async def main():
     sched.start()
     await schedule_daily_signals(app, sched)
     
-    # Job quotidien 8h55 UTC
-    now_local = datetime.now()
-    now_utc = get_utc_now()
-    offset_hours = (now_local.replace(tzinfo=None) - now_utc.replace(tzinfo=None)).total_seconds() / 3600
-    schedule_hour = int(8 - offset_hours) % 24
-    
+    # Replanification quotidienne à 8h55 UTC
     sched.add_job(
         schedule_daily_signals,
         'cron',
-        hour=schedule_hour,
+        hour=8,
         minute=55,
         args=[app, sched],
         id='daily_schedule'
@@ -356,7 +347,7 @@ async def main():
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
     
-    print("✅ BOT DÉMARRÉ\n")
+    print("✅ BOT DÉMARRÉ (en UTC)\n")
     
     try:
         while True:
@@ -366,6 +357,7 @@ async def main():
         await app.stop()
         await app.shutdown()
         sched.shutdown()
+
 
 if __name__ == '__main__':
     asyncio.run(main())
