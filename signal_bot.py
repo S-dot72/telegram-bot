@@ -149,17 +149,35 @@ async def cmd_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await update.message.reply_text("🔍 Test de signal...")
         pair = PAIRS[0]
-        entry_time_utc = get_utc_now() + timedelta(minutes=DELAY_BEFORE_ENTRY_MIN)
-        await send_pre_signal(pair, entry_time_utc, context.application)
+        
+        # Calculer l'heure d'entrée en LOCAL (sera convertie en UTC dans send_pre_signal)
+        now_local = datetime.now()
+        entry_time_local = now_local + timedelta(minutes=DELAY_BEFORE_ENTRY_MIN)
+        
+        await send_pre_signal(pair, entry_time_local, context.application)
         await update.message.reply_text("✅ Test terminé!")
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {e}")
 
 # --- Envoi de signaux ---
 
-async def send_pre_signal(pair, entry_time_utc, app):
+async def send_pre_signal(pair, entry_time_local, app):
+    """Envoie un signal - entry_time_local est en heure locale"""
     now_utc = get_utc_now()
-    print(f"\n📤 Signal {pair} - {now_utc.strftime('%H:%M:%S')} UTC")
+    now_local = datetime.now()
+    
+    # Calculer l'offset entre local et UTC
+    offset_seconds = (now_local.replace(tzinfo=None) - now_utc.replace(tzinfo=None)).total_seconds()
+    
+    # Convertir l'heure locale en UTC
+    entry_time_utc = entry_time_local - timedelta(seconds=offset_seconds)
+    entry_time_utc = entry_time_utc.replace(tzinfo=timezone.utc)
+    
+    print(f"\n📤 Signal {pair}")
+    print(f"   Heure locale: {now_local.strftime('%H:%M:%S')}")
+    print(f"   Heure UTC: {now_utc.strftime('%H:%M:%S')}")
+    print(f"   Entrée (local): {entry_time_local.strftime('%H:%M:%S')}")
+    print(f"   Entrée (UTC): {entry_time_utc.strftime('%H:%M:%S')}")
     
     try:
         params = BEST_PARAMS.get(pair, {})
@@ -179,7 +197,7 @@ async def send_pre_signal(pair, entry_time_utc, app):
             print(f"❌ Rejeté ({ml_conf:.1%})")
             return
         
-        # Sauvegarder
+        # Sauvegarder avec l'heure UTC
         payload = {
             'pair': pair, 'direction': ml_signal, 'reason': f'ML {ml_conf:.1%}',
             'ts_enter': entry_time_utc.isoformat(), 
@@ -189,20 +207,20 @@ async def send_pre_signal(pair, entry_time_utc, app):
         }
         persist_signal(payload)
         
-        # Envoyer
+        # Envoyer avec affichage en UTC
         with engine.connect() as conn:
             user_ids = [r[0] for r in conn.execute(text("SELECT user_id FROM subscribers")).fetchall()]
         
         direction_text = "BUY" if ml_signal == "CALL" else "SELL"
-        gale1 = entry_time_utc + timedelta(minutes=5)
-        gale2 = entry_time_utc + timedelta(minutes=10)
+        gale1_utc = entry_time_utc + timedelta(minutes=5)
+        gale2_utc = entry_time_utc + timedelta(minutes=10)
         
         msg = (
             f"📊 SIGNAL — {pair}\n\n"
             f"Entrée (UTC): {entry_time_utc.strftime('%H:%M')}\n\n"
             f"Direction: {direction_text}\n\n"
-            f"     Gale 1: {gale1.strftime('%H:%M')}\n"
-            f"     Gale 2: {gale2.strftime('%H:%M')}\n\n"
+            f"     Gale 1: {gale1_utc.strftime('%H:%M')}\n"
+            f"     Gale 2: {gale2_utc.strftime('%H:%M')}\n\n"
             f"Confiance: {int(ml_conf*100)}%"
         )
         
@@ -258,9 +276,6 @@ async def process_signal_queue(app):
             send_time_local = start_time_local + timedelta(minutes=i * SIGNAL_INTERVAL_MIN)
             entry_time_local = send_time_local + timedelta(minutes=DELAY_BEFORE_ENTRY_MIN)
             
-            # Convertir en UTC pour la base de données
-            entry_time_utc = entry_time_local.astimezone(timezone.utc) if entry_time_local.tzinfo else datetime.fromtimestamp(entry_time_local.timestamp(), tz=timezone.utc)
-            
             pair = active_pairs[i % len(active_pairs)]
             
             # Attendre l'heure d'envoi
@@ -270,9 +285,9 @@ async def process_signal_queue(app):
                 print(f"\n⏳ Attente de {wait_seconds/60:.1f} min jusqu'à {send_time_local.strftime('%H:%M')} (local)")
                 await asyncio.sleep(wait_seconds)
             
-            # Envoyer le signal
+            # Envoyer le signal (l'heure UTC sera calculée à l'intérieur)
             print(f"\n📤 Signal {i+1}/{NUM_SIGNALS_PER_DAY}")
-            await send_pre_signal(pair, entry_time_utc, app)
+            await send_pre_signal(pair, entry_time_local, app)
             
             # Attendre la fin du signal + gales (15 min)
             verification_time = entry_time_local + timedelta(minutes=15)
