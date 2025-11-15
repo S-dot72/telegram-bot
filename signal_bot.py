@@ -107,6 +107,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"🔄 Signal → Vérification → Résultat → Nouveau signal\n\n"
                     f"Commandes:\n"
                     f"/test - Tester un signal\n"
+                    f"/force - Forcer démarrage session\n"
                     f"/stats - Voir les stats\n"
                     f"/verify - Vérifier manuellement"
                 )
@@ -159,8 +160,27 @@ async def cmd_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🔍 Test de signal...")
         pair = PAIRS[0]
         entry_time_haiti = get_haiti_now() + timedelta(minutes=DELAY_BEFORE_ENTRY_MIN)
-        await send_pre_signal(pair, entry_time_haiti, context.application)
-        await update.message.reply_text("✅ Test terminé!")
+        signal_id = await send_pre_signal(pair, entry_time_haiti, context.application)
+        
+        if signal_id:
+            await update.message.reply_text(f"✅ Signal envoyé (ID: {signal_id})")
+        else:
+            await update.message.reply_text("❌ Pas de signal valide actuellement. Réessayez dans quelques minutes.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur: {e}")
+
+async def cmd_force(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Force le démarrage de la session même si déjà en cours"""
+    global signal_queue_running
+    
+    if signal_queue_running:
+        await update.message.reply_text("⚠️ Une session est déjà en cours!")
+        return
+    
+    try:
+        await update.message.reply_text("🚀 Démarrage forcé de la session...")
+        asyncio.create_task(process_signal_queue(context.application))
+        await update.message.reply_text("✅ Session démarrée!")
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {e}")
 
@@ -169,11 +189,16 @@ async def cmd_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def send_pre_signal(pair, entry_time_haiti, app):
     """Envoie un signal avec horaire en heure d'Haïti"""
     now_haiti = get_haiti_now()
-    print(f"\n📤 Signal {pair} - {now_haiti.strftime('%H:%M:%S')} (Haïti)")
+    print(f"\n📤 Tentative signal {pair} - {now_haiti.strftime('%H:%M:%S')} (Haïti)")
     
     try:
         params = BEST_PARAMS.get(pair, {})
         df = get_cached_ohlc(pair, TIMEFRAME_M1, outputsize=400)
+        
+        if df is None or len(df) < 50:
+            print("❌ Pas assez de données")
+            return None
+            
         df = compute_indicators(df, ema_fast=params.get('ema_fast',8),
                                 ema_slow=params.get('ema_slow',21),
                                 rsi_len=params.get('rsi',14),
@@ -181,12 +206,14 @@ async def send_pre_signal(pair, entry_time_haiti, app):
         base_signal = rule_signal(df)
         
         if not base_signal:
-            print("⏭️ Pas de signal de base")
+            print("⏭️ Pas de signal de base (conditions techniques non remplies)")
             return None
+        
+        print(f"📊 Signal de base détecté: {base_signal}")
         
         ml_signal, ml_conf = ml_predictor.predict_signal(df, base_signal)
         if ml_signal is None or ml_conf < 0.70:
-            print(f"❌ Rejeté par ML ({ml_conf:.1%})")
+            print(f"❌ Rejeté par ML (confiance: {ml_conf:.1%} < 70%)")
             return None
         
         # Convertir en UTC pour la DB
@@ -312,12 +339,19 @@ async def process_signal_queue(app):
             now_haiti = get_haiti_now()
             entry_time_haiti = now_haiti + timedelta(minutes=DELAY_BEFORE_ENTRY_MIN)
             
-            print(f"⏰ Envoi du signal à {now_haiti.strftime('%H:%M:%S')}")
-            signal_id = await send_pre_signal(pair, entry_time_haiti, app)
+            print(f"⏰ Tentative d'envoi du signal à {now_haiti.strftime('%H:%M:%S')}")
+            
+            # Réessayer jusqu'à 3 fois si pas de signal
+            signal_id = None
+            for attempt in range(3):
+                signal_id = await send_pre_signal(pair, entry_time_haiti, app)
+                if signal_id is not None:
+                    break
+                print(f"⚠️ Tentative {attempt + 1}/3 échouée, nouvelle tentative dans 30s...")
+                await asyncio.sleep(30)
             
             if signal_id is None:
-                print("⏭️ Pas de signal valide, passage au suivant")
-                await asyncio.sleep(60)  # Attendre 1 min avant de réessayer
+                print(f"❌ Aucun signal valide après 3 tentatives pour {pair}, passage à la paire suivante")
                 continue
             
             # 2. Attendre le temps d'entrée + temps de vérification
@@ -399,6 +433,7 @@ async def main():
     app.add_handler(CommandHandler('stats', cmd_stats))
     app.add_handler(CommandHandler('verify', cmd_verify))
     app.add_handler(CommandHandler('test', cmd_test))
+    app.add_handler(CommandHandler('force', cmd_force))
 
     sched.start()
     
