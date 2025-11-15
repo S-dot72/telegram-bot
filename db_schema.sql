@@ -21,7 +21,10 @@ CREATE TABLE IF NOT EXISTS signals (
     confidence REAL,
     payload_json TEXT,
     result TEXT,
+    timeframe INTEGER DEFAULT 5,
     gale_level INTEGER DEFAULT 0,
+    max_gales INTEGER DEFAULT 2,
+    winning_attempt TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -29,7 +32,3 @@ CREATE TABLE IF NOT EXISTS metadata (
   k TEXT PRIMARY KEY,
   v TEXT
 );
-
-ALTER TABLE signals ADD COLUMN timeframe INTEGER DEFAULT 5;
-ALTER TABLE signals ADD COLUMN max_gales INTEGER DEFAULT 2;
-ALTER TABLE signals ADD COLUMN winning_attempt TEXT;
