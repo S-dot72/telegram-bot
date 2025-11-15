@@ -107,8 +107,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"🔄 Signal → Vérification → Résultat → Nouveau signal\n\n"
                     f"Commandes:\n"
                     f"/test - Tester un signal\n"
+                    f"/force - Forcer démarrage session\n"
                     f"/stats - Voir les stats\n"
-                    f"/verify - Vérifier manuellement"
+                    f"/verify - Vérifier tous les signaux\n"
+                    f"/debug - Voir derniers signaux\n"
+                    f"/check <id> - Vérifier un signal spécifique"
                 )
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {e}")
@@ -165,8 +168,80 @@ async def cmd_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🔍 Test de signal...")
         pair = PAIRS[0]
         entry_time_haiti = get_haiti_now() + timedelta(minutes=DELAY_BEFORE_ENTRY_MIN)
-        await send_pre_signal(pair, entry_time_haiti, context.application)
-        await update.message.reply_text("✅ Test terminé!")
+        signal_id = await send_pre_signal(pair, entry_time_haiti, context.application)
+        
+        if signal_id:
+            await update.message.reply_text(f"✅ Signal envoyé (ID: {signal_id})")
+        else:
+            await update.message.reply_text("❌ Pas de signal valide actuellement. Réessayez dans quelques minutes.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur: {e}")
+
+async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Affiche les derniers signaux pour debug"""
+    try:
+        now_utc = get_utc_now()
+        now_haiti = get_haiti_now()
+        
+        with engine.connect() as conn:
+            signals = conn.execute(
+                text("SELECT id, pair, direction, result, gale_level, ts_enter FROM signals ORDER BY id DESC LIMIT 5")
+            ).fetchall()
+        
+        if not signals:
+            await update.message.reply_text("Aucun signal en base")
+            return
+        
+        msg = f"🔍 **Derniers signaux:**\n\n"
+        msg += f"⏰ Maintenant UTC: {now_utc.strftime('%H:%M:%S')}\n"
+        msg += f"⏰ Maintenant Haïti: {now_haiti.strftime('%H:%M:%S')}\n\n"
+        
+        for sig in signals:
+            sid, pair, direction, result, gale, ts_enter = sig
+            result_text = result if result else "⏳ En attente"
+            gale_text = f"(Gale {gale})" if gale else ""
+            
+            # Parser ts_enter
+            try:
+                entry_time = datetime.fromisoformat(ts_enter.replace('Z', '+00:00'))
+            except:
+                entry_time = datetime.fromisoformat(ts_enter)
+                if entry_time.tzinfo is None:
+                    entry_time = entry_time.replace(tzinfo=timezone.utc)
+            
+            # Calculer temps restant
+            end_time = entry_time + timedelta(minutes=15)
+            time_left = (end_time - now_utc).total_seconds() / 60
+            
+            msg += f"**ID:{sid}** - {pair} {direction}\n"
+            msg += f"Résultat: {result_text} {gale_text}\n"
+            msg += f"Entrée: {entry_time.strftime('%H:%M')} UTC\n"
+            
+            if not result:
+                if time_left > 0:
+                    msg += f"⏳ Reste {time_left:.0f} min\n"
+                else:
+                    msg += f"✅ Prêt pour vérification\n"
+            
+            msg += "\n"
+        
+        await update.message.reply_text(msg)
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur: {e}")
+        import traceback
+        traceback.print_exc()
+    """Force le démarrage de la session même si déjà en cours"""
+    global signal_queue_running
+    
+    if signal_queue_running:
+        await update.message.reply_text("⚠️ Une session est déjà en cours!")
+        return
+    
+    try:
+        await update.message.reply_text("🚀 Démarrage forcé de la session...")
+        asyncio.create_task(process_signal_queue(context.application))
+        await update.message.reply_text("✅ Session démarrée!")
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {e}")
 
@@ -544,6 +619,9 @@ async def main():
     app.add_handler(CommandHandler('stats', cmd_stats))
     app.add_handler(CommandHandler('verify', cmd_verify))
     app.add_handler(CommandHandler('test', cmd_test))
+    app.add_handler(CommandHandler('force', cmd_force))
+    app.add_handler(CommandHandler('debug', cmd_debug))
+    app.add_handler(CommandHandler('check', cmd_check_signal))
 
     sched.start()
     
