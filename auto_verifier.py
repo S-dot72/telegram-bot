@@ -77,12 +77,18 @@ class AutoResultVerifier:
                     ts_enter = signal_row[3]
                     confidence = signal_row[4] if signal_row[4] else 0.5
                     
+                    print(f"\n{'='*40}")
+                    print(f"🔎 Signal #{signal_id} - {pair} {direction}")
+                    print(f"   Confiance: {confidence:.0%}")
+                    print(f"{'='*40}")
+                    
                     # Vérifier si le signal est complet (assez de temps écoulé)
                     if not self._is_signal_complete(ts_enter):
                         skipped_count += 1
+                        print(f"➡️  SKIP - Signal pas encore prêt\n")
                         continue
                     
-                    print(f"\n🔎 Signal #{signal_id} - {pair} {direction}")
+                    print(f"✅ Signal prêt pour vérification")
                     
                     # Vérifier le signal
                     result, details = await self._verify_signal_with_gales(
@@ -153,6 +159,8 @@ class AutoResultVerifier:
         """Vérifie si toutes les tentatives du signal sont terminées"""
         try:
             # Parser le timestamp d'entrée
+            print(f"   📅 ts_enter brut: {ts_enter}")
+            
             try:
                 entry_time = datetime.fromisoformat(ts_enter.replace('Z', '+00:00'))
             except:
@@ -160,22 +168,32 @@ class AutoResultVerifier:
                 if entry_time.tzinfo is None:
                     entry_time = entry_time.replace(tzinfo=timezone.utc)
             
+            print(f"   📅 Heure d'entrée: {entry_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+            
             # Temps total nécessaire = 5 min * 3 tentatives = 15 minutes
             total_time_needed = self.default_timeframe * (self.default_max_gales + 1)
             last_attempt_end = entry_time + timedelta(minutes=total_time_needed)
             
+            print(f"   📅 Fin prévue: {last_attempt_end.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+            
             # Vérifier si le temps est écoulé
             now = datetime.now(timezone.utc)
+            print(f"   📅 Maintenant: {now.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+            
             is_complete = now >= last_attempt_end
             
             if not is_complete:
                 time_remaining = (last_attempt_end - now).total_seconds() / 60
-                print(f"⏳ Signal pas encore terminé (reste {time_remaining:.1f} min)")
+                print(f"   ⏳ PAS COMPLET - Reste {time_remaining:.1f} min")
+            else:
+                print(f"   ✅ COMPLET - Peut être vérifié")
             
             return is_complete
             
         except Exception as e:
             print(f"❌ Erreur _is_signal_complete: {e}")
+            import traceback
+            traceback.print_exc()
             return False
     
     async def _verify_signal_with_gales(self, signal_id, pair, direction, ts_enter):
