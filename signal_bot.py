@@ -1,8 +1,8 @@
 """
-Bot de trading - 9h AM HEURE LOCALE + Affichage local
-- Signaux à 9h AM heure locale
-- Affichage des heures en fuseau local utilisateur
-- Vérification après chaque signal
+Bot de trading - Signaux séquentiels après vérification
+- Démarre à 9h AM heure d'Haïti (UTC-5)
+- Envoie signal → attend vérification → envoie résultat → nouveau signal
+- 20 signaux max par jour
 """
 
 import os, json, asyncio
@@ -20,16 +20,14 @@ from ml_predictor import MLSignalPredictor
 from auto_verifier import AutoResultVerifier
 
 # Configuration
-START_HOUR_LOCAL = 9  # 9h AM heure locale serveur
-SIGNAL_INTERVAL_MIN = 5
+HAITI_TZ = ZoneInfo("America/Port-au-Prince")  # UTC-5
+START_HOUR_HAITI = 9  # 9h AM heure d'Haïti
 DELAY_BEFORE_ENTRY_MIN = 3
+VERIFICATION_WAIT_MIN = 15  # Attendre 15 min après entrée avant vérification
 NUM_SIGNALS_PER_DAY = 20
 
-# Fuseau horaire pour l'affichage (Haïti)
-USER_TZ = ZoneInfo("America/Port-au-Prince")
-
 engine = create_engine(DB_URL, connect_args={'check_same_thread': False})
-sched = AsyncIOScheduler()  # Utilise l'heure locale du serveur
+sched = AsyncIOScheduler(timezone=HAITI_TZ)  # Scheduler en heure d'Haïti
 ml_predictor = MLSignalPredictor()
 auto_verifier = None
 signal_queue_running = False
@@ -45,7 +43,12 @@ if os.path.exists(BEST_PARAMS_FILE):
 TWELVE_TS_URL = 'https://api.twelvedata.com/time_series'
 ohlc_cache = {}
 
+def get_haiti_now():
+    """Retourne l'heure actuelle en timezone Haïti"""
+    return datetime.now(HAITI_TZ)
+
 def get_utc_now():
+    """Retourne l'heure actuelle en UTC"""
     return datetime.now(timezone.utc)
 
 def fetch_ohlc_td(pair, interval, outputsize=300):
@@ -80,7 +83,8 @@ def persist_signal(payload):
     q = text("""INSERT INTO signals (pair,direction,reason,ts_enter,ts_send,confidence,payload_json)
                 VALUES (:pair,:direction,:reason,:ts_enter,:ts_send,:confidence,:payload)""")
     with engine.begin() as conn:
-        conn.execute(q, payload)
+        result = conn.execute(q, payload)
+        return result.lastrowid
 
 # --- Commandes Telegram ---
 
@@ -98,13 +102,13 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                              {"uid": user_id, "uname": username})
                 await update.message.reply_text(
                     f"✅ Bienvenue !\n\n"
-                    f"📊 {NUM_SIGNALS_PER_DAY} signaux/jour à {START_HOUR_LOCAL}h AM (heure locale)\n"
-                    f"⏱️ Signal toutes les {SIGNAL_INTERVAL_MIN} min\n"
-                    f"🔍 Vérification après chaque signal\n\n"
+                    f"📊 Jusqu'à {NUM_SIGNALS_PER_DAY} signaux/jour\n"
+                    f"⏰ Début: {START_HOUR_HAITI}h00 AM (Haïti)\n"
+                    f"🔄 Signal → Vérification → Résultat → Nouveau signal\n\n"
                     f"Commandes:\n"
                     f"/test - Tester un signal\n"
                     f"/stats - Voir les stats\n"
-                    f"/verify - Vérifier les résultats"
+                    f"/verify - Vérifier manuellement"
                 )
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {e}")
@@ -154,17 +158,18 @@ async def cmd_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await update.message.reply_text("🔍 Test de signal...")
         pair = PAIRS[0]
-        entry_time_utc = get_utc_now() + timedelta(minutes=DELAY_BEFORE_ENTRY_MIN)
-        await send_pre_signal(pair, entry_time_utc, context.application)
+        entry_time_haiti = get_haiti_now() + timedelta(minutes=DELAY_BEFORE_ENTRY_MIN)
+        await send_pre_signal(pair, entry_time_haiti, context.application)
         await update.message.reply_text("✅ Test terminé!")
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {e}")
 
 # --- Envoi de signaux ---
 
-async def send_pre_signal(pair, entry_time_utc, app):
-    now_utc = get_utc_now()
-    print(f"\n📤 Signal {pair} - {now_utc.strftime('%H:%M:%S')} UTC")
+async def send_pre_signal(pair, entry_time_haiti, app):
+    """Envoie un signal avec horaire en heure d'Haïti"""
+    now_haiti = get_haiti_now()
+    print(f"\n📤 Signal {pair} - {now_haiti.strftime('%H:%M:%S')} (Haïti)")
     
     try:
         params = BEST_PARAMS.get(pair, {})
@@ -176,23 +181,28 @@ async def send_pre_signal(pair, entry_time_utc, app):
         base_signal = rule_signal(df)
         
         if not base_signal:
-            print("⏭️ Pas de signal")
-            return
+            print("⏭️ Pas de signal de base")
+            return None
         
         ml_signal, ml_conf = ml_predictor.predict_signal(df, base_signal)
         if ml_signal is None or ml_conf < 0.70:
-            print(f"❌ Rejeté ({ml_conf:.1%})")
-            return
+            print(f"❌ Rejeté par ML ({ml_conf:.1%})")
+            return None
         
-        # Sauvegarder en UTC
+        # Convertir en UTC pour la DB
+        entry_time_utc = entry_time_haiti.astimezone(timezone.utc)
+        
+        # Sauvegarder
         payload = {
-            'pair': pair, 'direction': ml_signal, 'reason': f'ML {ml_conf:.1%}',
+            'pair': pair, 
+            'direction': ml_signal, 
+            'reason': f'ML {ml_conf:.1%}',
             'ts_enter': entry_time_utc.isoformat(), 
-            'ts_send': now_utc.isoformat(),
+            'ts_send': get_utc_now().isoformat(),
             'confidence': ml_conf, 
             'payload': json.dumps({'pair': pair})
         }
-        persist_signal(payload)
+        signal_id = persist_signal(payload)
         
         # Récupérer les abonnés
         with engine.connect() as conn:
@@ -200,22 +210,17 @@ async def send_pre_signal(pair, entry_time_utc, app):
         
         direction_text = "BUY" if ml_signal == "CALL" else "SELL"
         
-        # Calculer gales en UTC
-        gale1_utc = entry_time_utc + timedelta(minutes=5)
-        gale2_utc = entry_time_utc + timedelta(minutes=10)
-        
-        # Convertir en heure locale pour l'affichage
-        entry_local = entry_time_utc.astimezone(USER_TZ)
-        gale1_local = gale1_utc.astimezone(USER_TZ)
-        gale2_local = gale2_utc.astimezone(USER_TZ)
+        # Calculer les gales en heure d'Haïti
+        gale1_haiti = entry_time_haiti + timedelta(minutes=5)
+        gale2_haiti = entry_time_haiti + timedelta(minutes=10)
         
         msg = (
             f"📊 SIGNAL — {pair}\n\n"
-            f"Entrée (UTC): {entry_time_utc.strftime('%H:%M')}\n\n"
-            f"Direction: {direction_text}\n\n"
-            f"     Gale 1: {gale1_utc.strftime('%H:%M')}\n"
-            f"     Gale 2: {gale2_utc.strftime('%H:%M')}\n\n"
-            f"Confiance: {int(ml_conf*100)}%"
+            f"🕐 Entrée: {entry_time_haiti.strftime('%H:%M')} (Haïti)\n\n"
+            f"📈 Direction: {direction_text}\n\n"
+            f"🔄 Gale 1: {gale1_haiti.strftime('%H:%M')}\n"
+            f"🔄 Gale 2: {gale2_haiti.strftime('%H:%M')}\n\n"
+            f"💪 Confiance: {int(ml_conf*100)}%"
         )
         
         for uid in user_ids:
@@ -225,17 +230,56 @@ async def send_pre_signal(pair, entry_time_utc, app):
                 print(f"❌ Envoi à {uid}: {e}")
         
         print(f"✅ Signal envoyé ({ml_signal}, {ml_conf:.1%})")
-        print(f"   UTC: {entry_time_utc.strftime('%H:%M')} → Local: {entry_local.strftime('%H:%M')}")
+        print(f"   Entrée: {entry_time_haiti.strftime('%H:%M')} (Haïti)")
+        
+        return signal_id
         
     except Exception as e:
-        print(f"❌ Erreur: {e}")
+        print(f"❌ Erreur signal: {e}")
         import traceback
         traceback.print_exc()
+        return None
+
+async def send_verification_result(signal_id, app):
+    """Envoie le résultat de vérification aux abonnés"""
+    try:
+        with engine.connect() as conn:
+            signal = conn.execute(
+                text("SELECT pair, direction, result FROM signals WHERE id = :sid"),
+                {"sid": signal_id}
+            ).fetchone()
+            
+            if not signal or not signal[2]:  # Pas de résultat
+                return
+            
+            pair, direction, result = signal
+            user_ids = [r[0] for r in conn.execute(text("SELECT user_id FROM subscribers")).fetchall()]
+        
+        # Message simple et clair
+        if result == "WIN":
+            emoji = "✅"
+            status = "GAGNÉ"
+        else:
+            emoji = "❌"
+            status = "PERDU"
+        
+        msg = f"{emoji} Résultat: {status}\n{pair} - {direction}"
+        
+        for uid in user_ids:
+            try:
+                await app.bot.send_message(chat_id=uid, text=msg)
+            except Exception as e:
+                print(f"❌ Envoi résultat à {uid}: {e}")
+        
+        print(f"📤 Résultat envoyé: {status}")
+        
+    except Exception as e:
+        print(f"❌ Erreur envoi résultat: {e}")
 
 # --- File de signaux séquentielle ---
 
 async def process_signal_queue(app):
-    """Traite les signaux un par un avec vérification"""
+    """Traite les signaux séquentiellement: signal → vérification → résultat → nouveau signal"""
     global signal_queue_running
     
     if signal_queue_running:
@@ -245,66 +289,65 @@ async def process_signal_queue(app):
     signal_queue_running = True
     
     try:
-        now_local = datetime.now()
-        now_utc = get_utc_now()
+        now_haiti = get_haiti_now()
         
-        # Calculer l'heure de début (9h AM local)
-        start_time_local = now_local.replace(hour=START_HOUR_LOCAL, minute=0, second=0, microsecond=0)
+        print(f"\n{'='*60}")
+        print(f"🚀 DÉBUT DE LA SESSION DE TRADING")
+        print(f"{'='*60}")
+        print(f"🕐 Heure actuelle (Haïti): {now_haiti.strftime('%H:%M:%S')}")
+        print(f"🌍 Heure actuelle (UTC): {get_utc_now().strftime('%H:%M:%S')}")
+        print(f"📊 Max {NUM_SIGNALS_PER_DAY} signaux aujourd'hui")
+        print(f"{'='*60}\n")
         
-        # Si on est déjà passé 9h, commencer maintenant
-        if now_local > start_time_local:
-            start_time_local = now_local + timedelta(minutes=1)
-        
-        active_pairs = PAIRS[:2]
-        
-        print(f"\n🚀 DÉBUT DE LA FILE")
-        print(f"   Heure locale: {now_local.strftime('%H:%M:%S')}")
-        print(f"   Heure UTC: {now_utc.strftime('%H:%M:%S')}")
-        print(f"   Début prévu: {start_time_local.strftime('%H:%M:%S')} (local)")
+        active_pairs = PAIRS[:2]  # EUR/USD et GBP/USD
         
         for i in range(NUM_SIGNALS_PER_DAY):
-            # Horaires en LOCAL
-            send_time_local = start_time_local + timedelta(minutes=i * SIGNAL_INTERVAL_MIN)
-            entry_time_local = send_time_local + timedelta(minutes=DELAY_BEFORE_ENTRY_MIN)
-            
-            # Convertir en UTC pour la DB
-            if entry_time_local.tzinfo is None:
-                entry_time_utc = datetime.fromtimestamp(entry_time_local.timestamp(), tz=timezone.utc)
-            else:
-                entry_time_utc = entry_time_local.astimezone(timezone.utc)
-            
             pair = active_pairs[i % len(active_pairs)]
             
-            # Attendre l'heure d'envoi
-            now = datetime.now()
-            if send_time_local > now:
-                wait_seconds = (send_time_local - now).total_seconds()
-                print(f"\n⏳ Attente de {wait_seconds/60:.1f} min jusqu'à {send_time_local.strftime('%H:%M')}")
+            print(f"\n{'─'*60}")
+            print(f"📍 SIGNAL {i+1}/{NUM_SIGNALS_PER_DAY} - {pair}")
+            print(f"{'─'*60}")
+            
+            # 1. Envoyer le signal
+            now_haiti = get_haiti_now()
+            entry_time_haiti = now_haiti + timedelta(minutes=DELAY_BEFORE_ENTRY_MIN)
+            
+            print(f"⏰ Envoi du signal à {now_haiti.strftime('%H:%M:%S')}")
+            signal_id = await send_pre_signal(pair, entry_time_haiti, app)
+            
+            if signal_id is None:
+                print("⏭️ Pas de signal valide, passage au suivant")
+                await asyncio.sleep(60)  # Attendre 1 min avant de réessayer
+                continue
+            
+            # 2. Attendre le temps d'entrée + temps de vérification
+            verification_time_haiti = entry_time_haiti + timedelta(minutes=VERIFICATION_WAIT_MIN)
+            now_haiti = get_haiti_now()
+            wait_seconds = (verification_time_haiti - now_haiti).total_seconds()
+            
+            if wait_seconds > 0:
+                wait_minutes = wait_seconds / 60
+                print(f"⏳ Attente de {wait_minutes:.1f} min jusqu'à {verification_time_haiti.strftime('%H:%M')}")
                 await asyncio.sleep(wait_seconds)
             
-            # Envoyer le signal
-            print(f"\n📤 Signal {i+1}/{NUM_SIGNALS_PER_DAY}")
-            await send_pre_signal(pair, entry_time_utc, app)
-            
-            # Attendre 15 min pour vérification
-            verification_time = entry_time_local + timedelta(minutes=15)
-            now = datetime.now()
-            wait_for_verification = (verification_time - now).total_seconds()
-            
-            if wait_for_verification > 0:
-                print(f"⏳ Attente de {wait_for_verification/60:.1f} min pour vérification...")
-                await asyncio.sleep(wait_for_verification)
-            
-            # Vérifier
-            print(f"🔍 Vérification...")
+            # 3. Vérifier le signal
+            print(f"🔍 Vérification du signal...")
             await auto_verifier.verify_pending_signals()
             
-            print(f"✅ Signal {i+1} terminé\n")
+            # 4. Envoyer le résultat
+            await send_verification_result(signal_id, app)
+            
+            print(f"✅ Cycle {i+1} terminé\n")
+            
+            # Petite pause avant le prochain signal
+            await asyncio.sleep(30)
         
-        print(f"\n🏁 FIN DE LA FILE")
+        print(f"\n{'='*60}")
+        print(f"🏁 SESSION TERMINÉE")
+        print(f"{'='*60}\n")
         
     except Exception as e:
-        print(f"❌ Erreur: {e}")
+        print(f"❌ Erreur dans la file: {e}")
         import traceback
         traceback.print_exc()
     finally:
@@ -313,14 +356,15 @@ async def process_signal_queue(app):
 # --- Scheduler ---
 
 async def start_daily_signals(app):
-    """Démarre la file quotidienne"""
-    now_local = datetime.now()
+    """Démarre la session quotidienne à 9h AM Haïti"""
+    now_haiti = get_haiti_now()
     
-    if now_local.weekday() > 4:
-        print("🏖️ Weekend")
+    # Vérifier si c'est un jour de semaine
+    if now_haiti.weekday() > 4:  # Samedi=5, Dimanche=6
+        print(f"🏖️ Weekend - Pas de trading")
         return
     
-    print(f"\n📅 Démarrage - {now_local.strftime('%H:%M:%S')}")
+    print(f"\n📅 Démarrage session - {now_haiti.strftime('%A %d %B %Y, %H:%M:%S')}")
     asyncio.create_task(process_signal_queue(app))
 
 def ensure_db():
@@ -335,16 +379,16 @@ def ensure_db():
 async def main():
     global auto_verifier
     
-    now_local = datetime.now()
+    now_haiti = get_haiti_now()
     now_utc = get_utc_now()
     
     print("\n" + "="*60)
-    print("🤖 BOT DE TRADING")
+    print("🤖 BOT DE TRADING - HAÏTI")
     print("="*60)
-    print(f"🕐 Heure locale serveur: {now_local.strftime('%H:%M:%S')}")
-    print(f"🌍 Heure UTC: {now_utc.strftime('%H:%M:%S')}")
-    print(f"⏰ Premier signal: {START_HOUR_LOCAL}h00 AM (local)")
-    print(f"📱 Affichage: {USER_TZ.key}")
+    print(f"🇭🇹 Heure Haïti: {now_haiti.strftime('%H:%M:%S %Z')}")
+    print(f"🌍 Heure UTC: {now_utc.strftime('%H:%M:%S %Z')}")
+    print(f"⏰ Début quotidien: {START_HOUR_HAITI}h00 AM (Haïti)")
+    print(f"📊 Signaux: Séquentiels après vérification")
     print("="*60 + "\n")
     
     ensure_db()
@@ -358,19 +402,21 @@ async def main():
 
     sched.start()
     
-    # Démarrer si on est après 9h AM
-    if now_local.hour >= START_HOUR_LOCAL and now_local.weekday() <= 4:
-        print("🚀 Démarrage immédiat")
+    # Démarrer immédiatement si on est après 9h AM et avant 18h
+    if (now_haiti.hour >= START_HOUR_HAITI and now_haiti.hour < 18 and 
+        now_haiti.weekday() <= 4 and not signal_queue_running):
+        print("🚀 Démarrage immédiat de la session")
         asyncio.create_task(process_signal_queue(app))
     
-    # Job quotidien à 9h AM local
+    # Job quotidien à 9h00 AM heure d'Haïti
     sched.add_job(
         start_daily_signals,
         'cron',
-        hour=START_HOUR_LOCAL,
+        hour=START_HOUR_HAITI,
         minute=0,
+        timezone=HAITI_TZ,
         args=[app],
-        id='daily_signals'
+        id='daily_signals_haiti'
     )
 
     await app.initialize()
@@ -378,12 +424,14 @@ async def main():
     await app.updater.start_polling(drop_pending_updates=True)
     
     bot_info = await app.bot.get_me()
-    print(f"✅ BOT DÉMARRÉ: @{bot_info.username}\n")
+    print(f"✅ BOT ACTIF: @{bot_info.username}")
+    print(f"📍 Prochaine session: Demain {START_HOUR_HAITI}h00 AM (Haïti)\n")
     
     try:
         while True:
             await asyncio.sleep(1)
     except (KeyboardInterrupt, SystemExit):
+        print("\n🛑 Arrêt du bot...")
         await app.updater.stop()
         await app.stop()
         await app.shutdown()
