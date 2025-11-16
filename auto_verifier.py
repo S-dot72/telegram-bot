@@ -1,4 +1,9 @@
-# auto_verifier.py - Version finale corrigée
+"""
+Système de vérification automatique des résultats
+Vérifie si les signaux ont gagné ou perdu en analysant les prix après l'entrée
+Prend en compte le timeframe et les gales
+"""
+
 import asyncio
 from datetime import datetime, timedelta, timezone
 from sqlalchemy import text
@@ -11,264 +16,184 @@ class AutoResultVerifier:
         self.base_url = 'https://api.twelvedata.com/time_series'
         self.bot = bot
         self.admin_chat_ids = []
-        
-        # Paramètres par défaut
-        self.default_timeframe = 5  # minutes
-        self.default_max_gales = 2  # 2 gales (3 tentatives total)
-        self._session = requests.Session()
     
     def set_bot(self, bot):
         """Configure le bot pour les notifications"""
         self.bot = bot
-        print("✅ Bot configuré pour les notifications")
     
     def add_admin(self, chat_id):
         """Ajoute un admin pour recevoir les rapports"""
         if chat_id not in self.admin_chat_ids:
             self.admin_chat_ids.append(chat_id)
-            print(f"✅ Admin {chat_id} ajouté")
     
     async def verify_pending_signals(self):
-        """Vérifie tous les signaux qui n'ont pas encore de résultat - TOUT EN UTC"""
-        try:
-            now_utc = datetime.now(timezone.utc)
-            print("\n" + "="*60)
-            print(f"🔍 VÉRIFICATION AUTOMATIQUE - {now_utc.strftime('%Y-%m-%d %H:%M:%S')} UTC")
-            print("="*60)
-            
-            # Récupérer les signaux sans résultat
-            query = text("""
-                SELECT id, pair, direction, ts_enter, confidence
-                FROM signals 
-                WHERE result IS NULL
-                ORDER BY ts_enter DESC
-                LIMIT 50
-            """)
-            
-            with self.engine.connect() as conn:
-                pending = conn.execute(query).fetchall()
-            
-            print(f"📊 Signaux sans résultat: {len(pending)}")
-            
-            if not pending:
-                print("✅ Aucun signal en attente")
-                print("="*60 + "\n")
-                
-                if self.bot and self.admin_chat_ids:
-                    await self._send_no_pending_report()
-                return
-            
-            print(f"📊 {len(pending)} signaux à vérifier")
-            print("-"*60)
-            
-            results = []
-            verified_count = 0
-            skipped_count = 0
-            error_count = 0
-            
-            for signal_row in pending:
-                try:
-                    signal_id = signal_row[0]
-                    pair = signal_row[1]
-                    direction = signal_row[2]
-                    ts_enter = signal_row[3]
-                    confidence = signal_row[4] if signal_row[4] else 0.5
-                    
-                    print(f"\n{'='*40}")
-                    print(f"🔎 Signal #{signal_id} - {pair} {direction}")
-                    print(f"{'='*40}")
-                    
-                    # CRITIQUE: Vérifier en UTC uniquement
-                    if not self._is_signal_complete_utc(ts_enter):
-                        skipped_count += 1
-                        print(f"➡️  SKIP - Signal pas prêt\n")
-                        continue
-                    
-                    print(f"✅ Signal prêt pour vérification")
-                    
-                    # Vérifier le signal
-                    result, details = await self._verify_signal_with_gales(
-                        signal_id, pair, direction, ts_enter
-                    )
-                    
-                    if result:
-                        self._update_signal_result(signal_id, result, details)
-                        verified_count += 1
-                        results.append({
-                            'signal_id': signal_id,
-                            'pair': pair,
-                            'direction': direction,
-                            'result': result,
-                            'details': details or {},
-                            'confidence': confidence
-                        })
-                        
-                        emoji = "✅" if result == 'WIN' else "❌"
-                        print(f"{emoji} Résultat: {result}")
-                        if details and details.get('gale_level') is not None:
-                            gale_text = ["Signal initial", "Gale 1", "Gale 2"][details['gale_level']]
-                            print(f"   Gagné à: {gale_text}")
-                    else:
-                        error_count += 1
-                        print(f"⚠️  Impossible de vérifier #{signal_id}")
-                    
-                    await asyncio.sleep(1.5)
-                    
-                except Exception as e:
-                    error_count += 1
-                    print(f"❌ Erreur: {e}")
-                    import traceback
-                    traceback.print_exc()
-            
-            print("\n" + "-"*60)
-            print(f"📈 RÉSUMÉ: {verified_count} vérifiés, {skipped_count} en attente, {error_count} erreurs")
-            print("="*60 + "\n")
-            
-            if self.bot and self.admin_chat_ids:
-                print(f"📤 Envoi rapport à {len(self.admin_chat_ids)} admin(s)")
-                await self._send_verification_report(results, skipped_count, error_count)
+        """
+        Vérifie tous les signaux qui n'ont pas encore de résultat
+        et dont toutes les tentatives (signal + gales) sont terminées
+        """
+        print("\n" + "="*60)
+        print(f"🔍 VÉRIFICATION AUTOMATIQUE - {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
+        print("="*60)
         
-        except Exception as e:
-            print(f"❌ ERREUR GLOBALE: {e}")
-            import traceback
-            traceback.print_exc()
-            
-            if self.bot and self.admin_chat_ids:
-                error_msg = f"❌ **Erreur vérification**\n\n{str(e)[:200]}"
-                for chat_id in self.admin_chat_ids:
-                    try:
-                        await self.bot.send_message(chat_id=chat_id, text=error_msg)
-                    except:
-                        pass
-    
-    def _is_signal_complete_utc(self, ts_enter):
-        """Vérifie si signal complet - TOUT EN UTC, PAS DE CONVERSION"""
-        try:
-            # Parser timestamp - GARDER EN UTC
-            if isinstance(ts_enter, str):
-                # Supprimer le 'Z' ou '+00:00' si présent
-                ts_clean = ts_enter.replace('Z', '').replace('+00:00', '')
-                # Parser comme UTC directement
-                entry_time_utc = datetime.fromisoformat(ts_clean).replace(tzinfo=timezone.utc)
-            else:
-                entry_time_utc = ts_enter
-                if entry_time_utc.tzinfo is None:
-                    entry_time_utc = entry_time_utc.replace(tzinfo=timezone.utc)
-            
-            # Calculer fin en UTC (15 minutes après)
-            end_time_utc = entry_time_utc + timedelta(minutes=15)
-            
-            # Comparer avec maintenant UTC
-            now_utc = datetime.now(timezone.utc)
-            
-            is_complete = now_utc >= end_time_utc
-            
-            print(f"   📅 Entrée UTC: {entry_time_utc.strftime('%H:%M:%S')}")
-            print(f"   📅 Fin UTC: {end_time_utc.strftime('%H:%M:%S')}")
-            print(f"   📅 Maintenant UTC: {now_utc.strftime('%H:%M:%S')}")
-            print(f"   {'✅ COMPLET' if is_complete else '⏳ PAS COMPLET'}")
-            
-            return is_complete
-            
-        except Exception as e:
-            print(f"❌ Erreur: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
-    
-    async def _verify_signal_with_gales(self, signal_id, pair, direction, ts_enter):
-        """Vérifie signal avec gales - TOUT EN UTC, PAS DE CONVERSION"""
-        try:
-            # Parser timestamp - GARDER EN UTC
-            if isinstance(ts_enter, str):
-                ts_clean = ts_enter.replace('Z', '').replace('+00:00', '')
-                entry_time_utc = datetime.fromisoformat(ts_clean).replace(tzinfo=timezone.utc)
-            else:
-                entry_time_utc = ts_enter
-                if entry_time_utc.tzinfo is None:
-                    entry_time_utc = entry_time_utc.replace(tzinfo=timezone.utc)
-            
-            max_attempts = 3  # signal initial + 2 gales
-            
-            last_entry_price = None
-            last_exit_price = None
-            last_pips_diff = 0
-            
-            for attempt in range(max_attempts):
-                # Calcul des timestamps en UTC
-                attempt_entry_utc = entry_time_utc + timedelta(minutes=5 * attempt)
-                attempt_exit_utc = attempt_entry_utc + timedelta(minutes=5)
-                
-                print(f"   Tentative {attempt + 1}/3: {attempt_entry_utc.strftime('%H:%M')} UTC")
-                
-                # Récupérer prix
-                entry_price = await self._get_price_at_time(pair, attempt_entry_utc)
-                if entry_price is None:
-                    print(f"   ⚠️  Prix d'entrée non disponible")
+        # Récupérer les signaux sans résultat
+        query = text("""
+            SELECT id, pair, direction, ts_enter, confidence, timeframe, max_gales
+            FROM signals 
+            WHERE result IS NULL 
+            AND datetime(ts_enter) < datetime('now')
+            ORDER BY ts_enter DESC
+            LIMIT 50
+        """)
+        
+        with self.engine.connect() as conn:
+            pending = conn.execute(query).fetchall()
+        
+        if not pending:
+            print("✅ Aucun signal en attente de vérification")
+            print("="*60 + "\n")
+            return
+        
+        print(f"📊 {len(pending)} signaux à vérifier")
+        print("-"*60)
+        
+        results = []
+        verified_count = 0
+        
+        for signal in pending:
+            try:
+                # Vérifier si toutes les tentatives sont terminées
+                if not self._is_signal_complete(signal):
                     continue
                 
-                await asyncio.sleep(0.5)
+                print(f"\n🔎 Signal #{signal.id} - {signal.pair} {signal.direction} M{signal.timeframe}")
+                result, details = await self._verify_signal_with_gales(signal)
                 
-                exit_price = await self._get_price_at_time(pair, attempt_exit_utc)
-                if exit_price is None:
-                    print(f"   ⚠️  Prix de sortie non disponible")
-                    last_entry_price = entry_price
-                    continue
+                if result:
+                    self._update_signal_result(signal.id, result, details)
+                    verified_count += 1
+                    results.append({
+                        'signal': signal,
+                        'result': result,
+                        'details': details
+                    })
+                    
+                    # Log détaillé
+                    emoji = "✅" if result == 'WIN' else "❌"
+                    print(f"{emoji} Résultat: {result}")
+                    if details.get('winning_attempt'):
+                        print(f"   Gagné à: {details['winning_attempt']}")
+                    print(f"   Entrée: {details['entry_price']:.5f}")
+                    print(f"   Sortie: {details['exit_price']:.5f}")
+                    print(f"   Diff: {details['pips']:.1f} pips")
                 
-                last_entry_price = entry_price
-                last_exit_price = exit_price
+                await asyncio.sleep(2)  # Respecter limite API
                 
-                # Déterminer WIN/LOSE
-                is_winning = (exit_price > entry_price) if direction == 'CALL' else (exit_price < entry_price)
-                
-                pips_diff = abs(exit_price - entry_price) * 10000
-                last_pips_diff = pips_diff
-                
-                if is_winning:
-                    print(f"   ✅ WIN tentative {attempt + 1} (+{pips_diff:.1f} pips)")
-                    details = {
-                        'entry_price': entry_price,
-                        'exit_price': exit_price,
-                        'pips': pips_diff,
-                        'gale_level': attempt
-                    }
-                    return 'WIN', details
-                else:
-                    print(f"   ❌ Tentative {attempt + 1} perdue ({pips_diff:.1f} pips)")
+            except Exception as e:
+                print(f"❌ Erreur vérification signal {signal.id}: {e}")
+        
+        print("\n" + "-"*60)
+        print(f"📈 RÉSUMÉ: {verified_count}/{len(pending)} signaux vérifiés")
+        print("="*60 + "\n")
+        
+        # Envoyer rapport aux admins si des signaux ont été vérifiés
+        if verified_count > 0 and self.bot and self.admin_chat_ids:
+            await self._send_verification_report(results)
+        
+        # Vérifier si réentraînement nécessaire
+        self._check_ml_retraining()
+    
+    def _is_signal_complete(self, signal):
+        """Vérifie si toutes les tentatives du signal sont terminées"""
+        entry_time = datetime.fromisoformat(signal.ts_enter.replace('Z', '+00:00'))
+        timeframe = signal.timeframe  # en minutes
+        max_attempts = signal.max_gales + 1  # signal initial + gales
+        
+        # Temps total nécessaire = timeframe * nombre de tentatives
+        total_time_needed = timeframe * max_attempts
+        last_attempt_end = entry_time + timedelta(minutes=total_time_needed)
+        
+        # Vérifier si le temps est écoulé
+        now = datetime.now(timezone.utc)
+        is_complete = now >= last_attempt_end
+        
+        if not is_complete:
+            time_remaining = (last_attempt_end - now).total_seconds() / 60
+            print(f"⏳ Signal #{signal.id} pas encore terminé (reste {time_remaining:.1f} min)")
+        
+        return is_complete
+    
+    async def _verify_signal_with_gales(self, signal):
+        """
+        Vérifie un signal en testant chaque tentative (signal + gales)
+        Retourne: (result, details)
+        """
+        entry_time = datetime.fromisoformat(signal.ts_enter.replace('Z', '+00:00'))
+        timeframe = signal.timeframe
+        max_attempts = signal.max_gales + 1
+        
+        # Tester chaque tentative
+        for attempt in range(max_attempts):
+            attempt_entry = entry_time + timedelta(minutes=timeframe * attempt)
+            attempt_exit = attempt_entry + timedelta(minutes=timeframe)
             
-            # Toutes tentatives perdues
-            print(f"   ❌ LOSE après {max_attempts} tentatives")
+            print(f"   Tentative {attempt + 1}/{max_attempts}: {attempt_entry.strftime('%H:%M:%S')}")
             
-            if last_entry_price is None or last_exit_price is None:
-                print(f"   ⚠️  Pas assez de prix")
-                return None, None
+            # Récupérer les prix
+            entry_price = await self._get_price_at_time(signal.pair, attempt_entry)
+            if entry_price is None:
+                print(f"   ⚠️  Prix d'entrée non disponible")
+                continue
+                
+            await asyncio.sleep(1)
+            exit_price = await self._get_price_at_time(signal.pair, attempt_exit)
+            if exit_price is None:
+                print(f"   ⚠️  Prix de sortie non disponible")
+                continue
             
-            details = {
-                'entry_price': last_entry_price,
-                'exit_price': last_exit_price,
-                'pips': last_pips_diff,
-                'gale_level': None
-            }
-            return 'LOSE', details
+            # Vérifier si cette tentative est gagnante
+            is_winning = False
+            if signal.direction == 'CALL':
+                is_winning = exit_price > entry_price
+            else:  # PUT
+                is_winning = exit_price < entry_price
             
-        except Exception as e:
-            print(f"❌ Erreur: {e}")
-            import traceback
-            traceback.print_exc()
-            return None, None
+            pips_diff = abs(exit_price - entry_price) * 10000
+            
+            if is_winning:
+                # Victoire !
+                attempt_name = "Signal initial" if attempt == 0 else f"Gale {attempt}"
+                print(f"   ✅ WIN sur {attempt_name} (+{pips_diff:.1f} pips)")
+                
+                details = {
+                    'entry_price': entry_price,
+                    'exit_price': exit_price,
+                    'pips': pips_diff,
+                    'winning_attempt': attempt_name,
+                    'attempt_number': attempt + 1,
+                    'total_attempts': max_attempts
+                }
+                return 'WIN', details
+            else:
+                print(f"   ❌ Tentative {attempt + 1} perdue ({pips_diff:.1f} pips)")
+        
+        # Toutes les tentatives ont échoué
+        print(f"   ❌ LOSE après {max_attempts} tentatives")
+        details = {
+            'entry_price': entry_price,
+            'exit_price': exit_price,
+            'pips': pips_diff,
+            'winning_attempt': None,
+            'attempt_number': max_attempts,
+            'total_attempts': max_attempts
+        }
+        return 'LOSE', details
     
     async def _get_price_at_time(self, pair, timestamp):
-        """Récupère prix à un moment donné (timestamp en UTC)"""
+        """Récupère le prix d'une paire à un moment donné"""
         try:
-            if timestamp.tzinfo is None:
-                timestamp = timestamp.replace(tzinfo=timezone.utc)
-            
-            ts_utc = timestamp.astimezone(timezone.utc)
-            start_dt = ts_utc - timedelta(minutes=3)
-            end_dt = ts_utc + timedelta(minutes=2)
-            
-            start_str = start_dt.strftime('%Y-%m-%d %H:%M:%S')
-            end_str = end_dt.strftime('%Y-%m-%d %H:%M:%S')
+            # Chercher dans une fenêtre de 5 minutes autour du timestamp
+            end_str = (timestamp + timedelta(minutes=2)).strftime('%Y-%m-%d %H:%M:%S')
+            start_str = (timestamp - timedelta(minutes=3)).strftime('%Y-%m-%d %H:%M:%S')
             
             params = {
                 'symbol': pair,
@@ -280,33 +205,26 @@ class AutoResultVerifier:
                 'end_date': end_str
             }
             
-            resp = self._session.get(self.base_url, params=params, timeout=12)
-            resp.raise_for_status()
-            data = resp.json()
+            response = requests.get(self.base_url, params=params, timeout=10)
+            response.raise_for_status()
+            data = response.json()
             
             if 'values' in data and len(data['values']) > 0:
+                # Trouver la bougie la plus proche du timestamp
                 closest_candle = None
                 min_diff = float('inf')
                 
                 for candle in data['values']:
-                    try:
-                        candle_time = datetime.fromisoformat(candle['datetime'])
-                    except:
-                        candle_time = datetime.strptime(candle['datetime'], '%Y-%m-%d %H:%M:%S')
+                    candle_time = datetime.strptime(candle['datetime'], '%Y-%m-%d %H:%M:%S')
+                    candle_time = candle_time.replace(tzinfo=timezone.utc)
+                    diff = abs((candle_time - timestamp).total_seconds())
                     
-                    if candle_time.tzinfo is None:
-                        candle_time = candle_time.replace(tzinfo=timezone.utc)
-                    
-                    diff = abs((candle_time - ts_utc).total_seconds())
                     if diff < min_diff:
                         min_diff = diff
                         closest_candle = candle
                 
-                if closest_candle and min_diff <= 180:
-                    try:
-                        return float(closest_candle['close'])
-                    except:
-                        return None
+                if closest_candle and min_diff < 120:  # Max 2 minutes de différence
+                    return float(closest_candle['close'])
             
             return None
             
@@ -315,174 +233,194 @@ class AutoResultVerifier:
             return None
     
     def _update_signal_result(self, signal_id, result, details):
-        """Met à jour résultat dans DB"""
-        try:
-            gale_level = 0
-            if details and isinstance(details, dict) and details.get('gale_level') is not None:
-                gale_level = details.get('gale_level', 0)
-            
-            query = text("""
-                UPDATE signals 
-                SET result = :result, gale_level = :gale_level
-                WHERE id = :id
-            """)
-            
-            with self.engine.begin() as conn:
-                conn.execute(query, {
-                    'result': result,
-                    'gale_level': gale_level,
-                    'id': signal_id
-                })
-            
-            print(f"💾 Résultat sauvegardé: #{signal_id} = {result}")
-            
-        except Exception as e:
-            print(f"❌ Erreur _update_signal_result: {e}")
-            try:
-                query = text("UPDATE signals SET result = :result WHERE id = :id")
-                with self.engine.begin() as conn:
-                    conn.execute(query, {'result': result, 'id': signal_id})
-                print(f"💾 Sauvegardé (version simple)")
-            except Exception as e2:
-                print(f"❌ Échec total: {e2}")
+        """Met à jour le résultat d'un signal dans la DB"""
+        query = text("""
+            UPDATE signals 
+            SET result = :result, 
+                ts_result = :ts_result,
+                winning_attempt = :winning_attempt
+            WHERE id = :id
+        """)
+        
+        with self.engine.begin() as conn:
+            conn.execute(query, {
+                'result': result,
+                'ts_result': datetime.utcnow().isoformat(),
+                'winning_attempt': details.get('winning_attempt'),
+                'id': signal_id
+            })
+        
+        print(f"💾 Résultat sauvegardé: Signal #{signal_id} = {result}")
     
-    async def _send_no_pending_report(self):
-        """Rapport quand rien à vérifier"""
+    async def _send_verification_report(self, results):
+        """Envoie un rapport de vérification aux admins"""
+        # Statistiques du jour
         today_stats = self._get_today_stats()
         
-        msg = "📊 **RAPPORT DE VÉRIFICATION**\n"
-        msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
-        msg += "✅ Aucun signal à vérifier\n\n"
+        # Rapport des signaux vérifiés maintenant
+        wins = sum(1 for r in results if r['result'] == 'WIN')
+        losses = len(results) - wins
         
-        if today_stats and today_stats['total_signals'] > 0:
-            msg += f"📅 **Stats du jour:**\n"
-            msg += f"• Total: {today_stats['total_signals']}\n"
-            msg += f"• ✅ Réussis: {today_stats['wins']}\n"
-            msg += f"• ❌ Échoués: {today_stats['losses']}\n"
-            msg += f"• ⏳ En attente: {today_stats['pending']}\n"
-            if today_stats['wins'] + today_stats['losses'] > 0:
-                msg += f"• 📈 Win rate: {today_stats['winrate']:.1f}%\n"
+        report = "📊 **RAPPORT DE VÉRIFICATION**\n"
+        report += "━━━━━━━━━━━━━━━━━━━━\n\n"
         
-        msg += "\n━━━━━━━━━━━━━━━━━━━━"
+        # Stats du jour
+        if today_stats:
+            report += f"📅 **Statistiques du jour:**\n"
+            report += f"• Signaux envoyés: {today_stats['total_signals']}\n"
+            report += f"• ✅ Réussis: {today_stats['wins']}\n"
+            report += f"• ❌ Échoués: {today_stats['losses']}\n"
+            report += f"• ⏳ En attente: {today_stats['pending']}\n"
+            report += f"• 📈 Win rate: {today_stats['winrate']:.1f}%\n\n"
+        
+        # Signaux vérifiés maintenant
+        report += f"🔍 **Vérification actuelle:**\n"
+        report += f"• Signaux vérifiés: {len(results)}\n"
+        report += f"• ✅ Gains: {wins}\n"
+        report += f"• ❌ Pertes: {losses}\n\n"
+        
+        report += "📋 **Détails:**\n"
+        
+        for r in results[:10]:  # Max 10 derniers
+            emoji = "✅" if r['result'] == 'WIN' else "❌"
+            sig = r['signal']
+            det = r['details']
+            
+            attempt_info = ""
+            if det.get('winning_attempt'):
+                attempt_info = f" ({det['winning_attempt']})"
+            
+            report += f"{emoji} {sig.pair} {sig.direction} M{sig.timeframe}{attempt_info}\n"
+            report += f"   {det['pips']:.1f} pips | Conf: {sig.confidence:.0%}\n"
+        
+        report += "\n━━━━━━━━━━━━━━━━━━━━"
+        
+        # Envoyer à tous les admins
+        for chat_id in self.admin_chat_ids:
+            try:
+                await self.bot.send_message(chat_id=chat_id, text=report)
+                print(f"✅ Rapport envoyé à l'admin {chat_id}")
+            except Exception as e:
+                print(f"⚠️  Erreur envoi rapport à {chat_id}: {e}")
+    
+    def _get_today_stats(self):
+        """Calcule les statistiques des signaux du jour"""
+        query = text("""
+            SELECT 
+                COUNT(*) as total_signals,
+                SUM(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) as wins,
+                SUM(CASE WHEN result = 'LOSE' THEN 1 ELSE 0 END) as losses,
+                SUM(CASE WHEN result IS NULL THEN 1 ELSE 0 END) as pending
+            FROM signals 
+            WHERE DATE(ts_enter) = DATE('now')
+        """)
+        
+        with self.engine.connect() as conn:
+            stats = conn.execute(query).fetchone()
+        
+        if stats and stats.total_signals > 0:
+            verified = stats.wins + stats.losses
+            winrate = (stats.wins / verified * 100) if verified > 0 else 0
+            
+            return {
+                'total_signals': stats.total_signals,
+                'wins': stats.wins or 0,
+                'losses': stats.losses or 0,
+                'pending': stats.pending or 0,
+                'winrate': winrate
+            }
+        
+        return None
+    
+    def _check_ml_retraining(self):
+        """Vérifie si réentraînement ML nécessaire"""
+        query = text("""
+            SELECT COUNT(*) as count 
+            FROM signals 
+            WHERE result IS NOT NULL
+        """)
+        
+        with self.engine.connect() as conn:
+            count = conn.execute(query).scalar()
+        
+        if count >= 100 and count % 50 == 0:
+            print(f"\n🎓 {count} résultats disponibles")
+            print(f"💡 Réentraînement du modèle ML recommandé")
+            print(f"   Utilisez /train pour améliorer la précision\n")
+    
+    def get_performance_stats(self):
+        """Calcule les statistiques de performance globales"""
+        query = text("""
+            SELECT 
+                COUNT(*) as total,
+                SUM(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) as wins,
+                SUM(CASE WHEN result = 'LOSE' THEN 1 ELSE 0 END) as losses,
+                AVG(confidence) as avg_confidence
+            FROM signals 
+            WHERE result IS NOT NULL
+        """)
+        
+        with self.engine.connect() as conn:
+            stats = conn.execute(query).fetchone()
+        
+        if stats.total > 0:
+            winrate = (stats.wins / stats.total) * 100
+            return {
+                'total': stats.total,
+                'wins': stats.wins,
+                'losses': stats.losses,
+                'winrate': winrate,
+                'avg_confidence': stats.avg_confidence
+            }
+        
+        return None
+    
+    def get_recent_results(self, limit=10):
+        """Récupère les derniers résultats vérifiés"""
+        query = text("""
+            SELECT pair, direction, result, confidence, timeframe, 
+                   winning_attempt, ts_enter, ts_result
+            FROM signals 
+            WHERE result IS NOT NULL
+            ORDER BY ts_result DESC
+            LIMIT :limit
+        """)
+        
+        with self.engine.connect() as conn:
+            results = conn.execute(query, {'limit': limit}).fetchall()
+        
+        return results
+    
+    async def send_daily_summary(self):
+        """Envoie un résumé quotidien aux admins"""
+        stats = self._get_today_stats()
+        
+        if not stats or stats['total_signals'] == 0:
+            return
+        
+        report = "📊 **RÉSUMÉ QUOTIDIEN**\n"
+        report += "━━━━━━━━━━━━━━━━━━━━\n\n"
+        report += f"📅 Date: {datetime.now().strftime('%d/%m/%Y')}\n\n"
+        report += f"📈 **Résultats:**\n"
+        report += f"• Total signaux: {stats['total_signals']}\n"
+        report += f"• ✅ Réussis: {stats['wins']}\n"
+        report += f"• ❌ Échoués: {stats['losses']}\n"
+        report += f"• ⏳ En attente: {stats['pending']}\n\n"
+        report += f"📊 **Performance:**\n"
+        report += f"• Win rate: {stats['winrate']:.1f}%\n"
+        
+        # Ajouter évaluation
+        if stats['winrate'] >= 70:
+            report += f"• 🎉 Excellente performance !\n"
+        elif stats['winrate'] >= 60:
+            report += f"• 👍 Bonne performance\n"
+        else:
+            report += f"• ⚠️  Performance à améliorer\n"
+        
+        report += "\n━━━━━━━━━━━━━━━━━━━━"
         
         for chat_id in self.admin_chat_ids:
             try:
-                await self.bot.send_message(chat_id=chat_id, text=msg)
+                await self.bot.send_message(chat_id=chat_id, text=report)
             except Exception as e:
-                print(f"❌ Envoi à {chat_id}: {e}")
-    
-    async def _send_verification_report(self, results, skipped_count=0, error_count=0):
-        """Envoie rapport de vérification"""
-        try:
-            print("📝 Génération rapport...")
-            
-            today_stats = self._get_today_stats()
-            wins = sum(1 for r in results if r.get('result') == 'WIN')
-            losses = len(results) - wins
-            
-            report = "📊 **RAPPORT DE VÉRIFICATION**\n"
-            report += "━━━━━━━━━━━━━━━━━━━━\n\n"
-            
-            if today_stats and today_stats['total_signals'] > 0:
-                report += f"📅 **Stats du jour:**\n"
-                report += f"• Total: {today_stats['total_signals']}\n"
-                report += f"• ✅ Réussis: {today_stats['wins']}\n"
-                report += f"• ❌ Échoués: {today_stats['losses']}\n"
-                report += f"• ⏳ En attente: {today_stats['pending']}\n"
-                if today_stats['wins'] + today_stats['losses'] > 0:
-                    report += f"• 📈 Win rate: {today_stats['winrate']:.1f}%\n"
-                report += "\n"
-            
-            if len(results) > 0:
-                report += f"🔍 **Vérification actuelle:**\n"
-                report += f"• Vérifiés: {len(results)}\n"
-                report += f"• ✅ Gains: {wins}\n"
-                report += f"• ❌ Pertes: {losses}\n"
-                if skipped_count > 0:
-                    report += f"• ⏳ Non terminés: {skipped_count}\n"
-                if error_count > 0:
-                    report += f"• ⚠️ Erreurs: {error_count}\n"
-                report += "\n📋 **Détails:**\n\n"
-                
-                for i, r in enumerate(results[:10], 1):
-                    emoji = "✅" if r['result'] == 'WIN' else "❌"
-                    gale_level = r['details'].get('gale_level') if r.get('details') else None
-                    
-                    gale_text = ""
-                    if r['result'] == 'WIN' and gale_level is not None:
-                        gale_names = ["Signal initial", "Gale 1", "Gale 2"]
-                        if gale_level < len(gale_names):
-                            gale_text = f" • {gale_names[gale_level]}"
-                    
-                    report += f"{i}. {emoji} **{r['pair']}** {r['direction']}{gale_text}\n"
-                    report += f"   📊 {r['details'].get('pips', 0):.1f} pips\n\n"
-            else:
-                report += "ℹ️ Aucun signal vérifié\n"
-                if skipped_count > 0:
-                    report += f"\n⏳ {skipped_count} signal(s) en attente\n"
-            
-            report += "\n━━━━━━━━━━━━━━━━━━━━"
-            
-            print(f"📤 Envoi à {len(self.admin_chat_ids)} admin(s)")
-            
-            sent_count = 0
-            for chat_id in self.admin_chat_ids:
-                try:
-                    await self.bot.send_message(chat_id=chat_id, text=report)
-                    sent_count += 1
-                    print(f"   ✅ Envoyé à {chat_id}")
-                except Exception as e:
-                    print(f"   ❌ Échec {chat_id}: {e}")
-            
-            print(f"✅ Rapport envoyé à {sent_count}/{len(self.admin_chat_ids)}")
-                
-        except Exception as e:
-            print(f"❌ Erreur rapport: {e}")
-            import traceback
-            traceback.print_exc()
-    
-    def _get_today_stats(self):
-        """Stats du jour"""
-        try:
-            now_utc = datetime.now(timezone.utc)
-            start_utc = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
-            end_utc = start_utc + timedelta(days=1)
-            
-            query = text("""
-                SELECT 
-                    COUNT(*) as total,
-                    SUM(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) as wins,
-                    SUM(CASE WHEN result = 'LOSE' THEN 1 ELSE 0 END) as losses,
-                    SUM(CASE WHEN result IS NULL THEN 1 ELSE 0 END) as pending
-                FROM signals 
-                WHERE ts_enter >= :start AND ts_enter < :end
-            """)
-            
-            with self.engine.connect() as conn:
-                stats = conn.execute(query, {
-                    "start": start_utc.isoformat(),
-                    "end": end_utc.isoformat()
-                }).fetchone()
-            
-            if stats and stats[0] > 0:
-                total = stats[0]
-                wins = stats[1] or 0
-                losses = stats[2] or 0
-                pending = stats[3] or 0
-                
-                verified = wins + losses
-                winrate = (wins / verified * 100) if verified > 0 else 0
-                
-                return {
-                    'total_signals': total,
-                    'wins': wins,
-                    'losses': losses,
-                    'pending': pending,
-                    'winrate': winrate
-                }
-            
-            return None
-            
-        except Exception as e:
-            print(f"❌ Erreur stats: {e}")
-            return None
+                print(f"⚠️  Erreur envoi résumé à {chat_id}: {e}")
