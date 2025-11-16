@@ -48,7 +48,7 @@ class AutoResultVerifier:
         self.api_call_times.append(time.time())
         return await self._get_real_price_at_time(pair, timestamp)
 
-    async def verify_pending_signals_real_data(self):
+    async def verify_pending_signals(self):
         """Vérification UNIQUEMENT avec données réelles"""
         try:
             now_utc = datetime.now(timezone.utc)
