@@ -1,5 +1,5 @@
 """
-Bot de trading
+Bot de trading - Version DEBUG avec logs détaillés
 """
 
 import os, json, asyncio
@@ -15,6 +15,8 @@ from config import *
 from utils import compute_indicators, rule_signal
 from ml_predictor import MLSignalPredictor
 from auto_verifier import AutoResultVerifier
+
+from ml_continuous_learning import ContinuousLearning, scheduled_retraining
 
 # Configuration
 HAITI_TZ = ZoneInfo("America/Port-au-Prince")
@@ -197,6 +199,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"Commandes:\n"
                     f"/stats - Statistiques\n"
                     f"/status - État du bot\n"
+                    f"/rapport - Rapport du jour\n"
+                    f"/mlstats - Stats ML\n"
+                    f"/retrain - Réentraîner ML\n"
                     f"/testsignal - Forcer un signal de test"
                 )
     except Exception as e:
@@ -249,6 +254,133 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 msg += "⏰ Réouverture: Lundi 00h UTC\n"
         
         await update.message.reply_text(msg)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur: {e}")
+
+async def cmd_retrain(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Force le réentraînement du modèle ML"""
+    try:
+        msg = await update.message.reply_text("🤖 Réentraînement en cours...")
+        
+        learner = ContinuousLearning(engine)
+        result = learner.retrain_model(min_signals=30, min_accuracy_improvement=0.00)
+        
+        if result['success']:
+            if result['accepted']:
+                response = (
+                    f"✅ **Modèle réentraîné avec succès**\n\n"
+                    f"📊 Signaux: {result['signals_count']}\n"
+                    f"🎯 Accuracy: {result['accuracy']*100:.2f}%\n"
+                    f"📈 Amélioration: {result['improvement']*100:+.2f}%"
+                )
+            else:
+                response = (
+                    f"⚠️ **Modèle rejeté**\n\n"
+                    f"📊 Signaux: {result['signals_count']}\n"
+                    f"🎯 Accuracy: {result['accuracy']*100:.2f}%\n"
+                    f"📉 Amélioration: {result['improvement']*100:+.2f}%\n"
+                    f"ℹ️ Amélioration trop faible"
+                )
+        else:
+            response = f"❌ Erreur: {result['reason']}"
+        
+        await msg.edit_text(response)
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur: {e}")
+
+async def cmd_mlstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Affiche les stats ML"""
+    try:
+        learner = ContinuousLearning(engine)
+        stats = learner.get_training_stats()
+        
+        msg = (
+            f"🤖 **Statistiques ML**\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📊 Entraînements: {stats['total_trainings']}\n"
+            f"🎯 Meilleure accuracy: {stats['best_accuracy']*100:.2f}%\n"
+            f"📈 Signaux entraînés: {stats['total_signals']}\n"
+            f"📅 Dernier entraînement: {stats['last_training']}\n\n"
+        )
+        
+        if stats['recent_trainings']:
+            msg += "📋 **Derniers entraînements:**\n\n"
+            for t in reversed(stats['recent_trainings']):
+                date = datetime.fromisoformat(t['timestamp']).strftime('%d/%m %H:%M')
+                emoji = "✅" if t.get('accepted', False) else "⚠️"
+                msg += f"{emoji} {date} - {t['accuracy']*100:.1f}%\n"
+        
+        msg += "\n━━━━━━━━━━━━━━━━━━━━"
+        
+        await update.message.reply_text(msg)
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur: {e}")
+
+async def cmd_rapport(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Affiche le rapport du jour en cours"""
+    try:
+        msg = await update.message.reply_text("📊 Génération du rapport...")
+        
+        # Utiliser l'heure Haïti pour délimiter le jour
+        now_haiti = get_haiti_now()
+        start_haiti = now_haiti.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_haiti = start_haiti + timedelta(days=1)
+        
+        start_utc = start_haiti.astimezone(timezone.utc)
+        end_utc = end_haiti.astimezone(timezone.utc)
+        
+        with engine.connect() as conn:
+            query = text("""
+                SELECT 
+                    COUNT(*) as total,
+                    SUM(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) as wins,
+                    SUM(CASE WHEN result = 'LOSE' THEN 1 ELSE 0 END) as losses,
+                    SUM(CASE WHEN result = 'WIN' AND gale_level = 0 THEN 1 ELSE 0 END) as win_initial,
+                    SUM(CASE WHEN result = 'WIN' AND gale_level = 1 THEN 1 ELSE 0 END) as win_gale1,
+                    SUM(CASE WHEN result = 'WIN' AND gale_level = 2 THEN 1 ELSE 0 END) as win_gale2
+                FROM signals
+                WHERE ts_send >= :start AND ts_send < :end
+                AND result IS NOT NULL
+            """)
+            
+            stats = conn.execute(query, {
+                "start": start_utc.isoformat(),
+                "end": end_utc.isoformat()
+            }).fetchone()
+        
+        if not stats or stats[0] == 0:
+            await msg.edit_text("ℹ️ Aucun signal aujourd'hui")
+            return
+        
+        total, wins, losses, win_initial, win_gale1, win_gale2 = stats
+        verified = wins + losses
+        winrate = (wins / verified * 100) if verified > 0 else 0
+        
+        report = (
+            f"📊 **RAPPORT DU JOUR**\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📅 {now_haiti.strftime('%d/%m/%Y %H:%M')}\n\n"
+            f"📈 **PERFORMANCE**\n"
+            f"• Total: {total}\n"
+            f"• ✅ Gagnés: {wins}\n"
+            f"• ❌ Perdus: {losses}\n"
+            f"• 📊 Win rate: **{winrate:.1f}%**\n\n"
+        )
+        
+        if wins > 0:
+            report += (
+                f"🎯 **DÉTAIL**\n"
+                f"• Signal initial: {win_initial}\n"
+                f"• Gale 1: {win_gale1}\n"
+                f"• Gale 2: {win_gale2}\n\n"
+            )
+        
+        report += "━━━━━━━━━━━━━━━━━━━━"
+        
+        await msg.edit_text(report)
+        
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {e}")
 
@@ -400,13 +532,22 @@ async def send_verification_briefing(signal_id, app):
 
 async def send_daily_report(app):
     try:
-        print("\n[RAPPORT] 📊 Génération...")
+        print("\n[RAPPORT] 📊 Génération rapport du jour...")
         
-        now_utc = datetime.now(timezone.utc)
-        start_utc = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
-        end_utc = start_utc + timedelta(days=1)
+        # CORRECTION: Utiliser l'heure Haïti pour délimiter le jour
+        now_haiti = get_haiti_now()
+        start_haiti = now_haiti.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_haiti = start_haiti + timedelta(days=1)
+        
+        # Convertir en UTC pour la requête SQL
+        start_utc = start_haiti.astimezone(timezone.utc)
+        end_utc = end_haiti.astimezone(timezone.utc)
+        
+        print(f"[RAPPORT] Période: {start_haiti.strftime('%Y-%m-%d %H:%M')} → {end_haiti.strftime('%Y-%m-%d %H:%M')} (Haïti)")
+        print(f"[RAPPORT] Période UTC: {start_utc.strftime('%Y-%m-%d %H:%M')} → {end_utc.strftime('%Y-%m-%d %H:%M')}")
         
         with engine.connect() as conn:
+            # Stats du jour uniquement
             query = text("""
                 SELECT 
                     COUNT(*) as total,
@@ -416,7 +557,8 @@ async def send_daily_report(app):
                     SUM(CASE WHEN result = 'WIN' AND gale_level = 1 THEN 1 ELSE 0 END) as win_gale1,
                     SUM(CASE WHEN result = 'WIN' AND gale_level = 2 THEN 1 ELSE 0 END) as win_gale2
                 FROM signals
-                WHERE ts_enter >= :start AND ts_enter < :end
+                WHERE ts_send >= :start AND ts_send < :end
+                AND result IS NOT NULL
             """)
             
             stats = conn.execute(query, {
@@ -424,16 +566,33 @@ async def send_daily_report(app):
                 "end": end_utc.isoformat()
             }).fetchone()
             
+            # Liste des signaux du jour
+            signals_query = text("""
+                SELECT pair, direction, result, gale_level
+                FROM signals
+                WHERE ts_send >= :start AND ts_send < :end
+                AND result IS NOT NULL
+                ORDER BY ts_send ASC
+            """)
+            
+            signals_list = conn.execute(signals_query, {
+                "start": start_utc.isoformat(),
+                "end": end_utc.isoformat()
+            }).fetchall()
+            
             user_ids = [r[0] for r in conn.execute(text("SELECT user_id FROM subscribers")).fetchall()]
         
         if not stats or stats[0] == 0:
+            print("[RAPPORT] ⚠️ Aucun signal aujourd'hui")
             return
         
         total, wins, losses, win_initial, win_gale1, win_gale2 = stats
-        winrate = (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0
+        verified = wins + losses
+        winrate = (wins / verified * 100) if verified > 0 else 0
         
-        now_haiti = get_haiti_now()
+        print(f"[RAPPORT] Stats: {wins} wins, {losses} losses, {winrate:.1f}% win rate")
         
+        # Construire le rapport
         report = (
             f"📊 **RAPPORT QUOTIDIEN**\n"
             f"━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -453,21 +612,51 @@ async def send_daily_report(app):
                 f"• Gale 2: {win_gale2}\n\n"
             )
         
+        # Ajouter historique des signaux
+        if len(signals_list) > 0:
+            report += f"📋 **HISTORIQUE ({len(signals_list)} signaux)**\n\n"
+            
+            for i, sig in enumerate(signals_list, 1):
+                pair, direction, result, gale_level = sig
+                
+                if result == "WIN":
+                    emoji = "✅"
+                    if gale_level == 0:
+                        detail = "Signal"
+                    elif gale_level == 1:
+                        detail = "G1"
+                    elif gale_level == 2:
+                        detail = "G2"
+                    else:
+                        detail = f"G{gale_level}"
+                else:
+                    emoji = "❌"
+                    detail = "Perdu"
+                
+                report += f"{i}. {emoji} {pair} {direction} • {detail}\n"
+            
+            report += "\n"
+        
         report += (
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"📅 Prochaine session: Demain {START_HOUR_HAITI}h00 AM"
         )
         
+        # Envoyer à tous les abonnés
+        sent_count = 0
         for uid in user_ids:
             try:
                 await app.bot.send_message(chat_id=uid, text=report)
-            except:
-                pass
+                sent_count += 1
+            except Exception as e:
+                print(f"[RAPPORT] ❌ Envoi à {uid}: {e}")
         
-        print(f"[RAPPORT] ✅ Envoyé (Win rate: {winrate:.1f}%)")
+        print(f"[RAPPORT] ✅ Envoyé à {sent_count} abonnés (Win rate: {winrate:.1f}%)")
         
     except Exception as e:
         print(f"[RAPPORT] ❌ Erreur: {e}")
+        import traceback
+        traceback.print_exc()
 
 async def process_signal_queue(app):
     global signal_queue_running
@@ -580,9 +769,25 @@ async def main():
     app.add_handler(CommandHandler('start', cmd_start))
     app.add_handler(CommandHandler('stats', cmd_stats))
     app.add_handler(CommandHandler('status', cmd_status))
+    app.add_handler(CommandHandler('rapport', cmd_rapport))
+    app.add_handler(CommandHandler('mlstats', cmd_mlstats))
+    app.add_handler(CommandHandler('retrain', cmd_retrain))
     app.add_handler(CommandHandler('testsignal', cmd_test_signal))
 
     sched.start()
+
+    # Réentraînement automatique chaque nuit à 2h AM (Haïti)
+    admin_ids = []  # Liste des admins à notifier
+    
+    sched.add_job(
+        scheduled_retraining,
+        'cron',
+        hour=2,
+        minute=0,
+        timezone=HAITI_TZ,
+        args=[engine, app, admin_ids],
+        id='ml_retraining'
+    )
 
     sched.add_job(
         start_daily_signals,
