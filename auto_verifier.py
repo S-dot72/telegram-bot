@@ -613,11 +613,19 @@ class AutoResultVerifier:
             traceback.print_exc()
 
     def _get_today_stats(self):
-        """Stats du jour"""
+        """Stats du jour UNIQUEMENT - basé sur ts_send en heure Haïti"""
         try:
-            now_utc = datetime.now(timezone.utc)
-            start_utc = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
-            end_utc = start_utc + timedelta(days=1)
+            from zoneinfo import ZoneInfo
+            HAITI_TZ = ZoneInfo("America/Port-au-Prince")
+            
+            # Utiliser l'heure Haïti pour délimiter le jour
+            now_haiti = datetime.now(HAITI_TZ)
+            start_haiti = now_haiti.replace(hour=0, minute=0, second=0, microsecond=0)
+            end_haiti = start_haiti + timedelta(days=1)
+            
+            # Convertir en UTC pour la requête
+            start_utc = start_haiti.astimezone(timezone.utc)
+            end_utc = end_haiti.astimezone(timezone.utc)
 
             query = text("""    
                 SELECT     
@@ -626,7 +634,7 @@ class AutoResultVerifier:
                     SUM(CASE WHEN result = 'LOSE' THEN 1 ELSE 0 END) as losses,    
                     SUM(CASE WHEN result IS NULL THEN 1 ELSE 0 END) as pending    
                 FROM signals     
-                WHERE ts_enter >= :start AND ts_enter < :end    
+                WHERE ts_send >= :start AND ts_send < :end    
             """)    
                 
             with self.engine.connect() as conn:    
