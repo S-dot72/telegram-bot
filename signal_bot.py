@@ -22,7 +22,7 @@ from ml_continuous_learning import ContinuousLearning, scheduled_retraining
 # Configuration
 HAITI_TZ = ZoneInfo("America/Port-au-Prince")
 START_HOUR_HAITI = 9
-DELAY_BEFORE_ENTRY_MIN = 1  # Entrée 1 minute après envoi
+DELAY_BEFORE_ENTRY_MIN = 3  # Entrée 3 minutes après envoi du signal
 VERIFICATION_WAIT_MIN = 1  # Vérification 1 minute après entrée (M1)
 NUM_SIGNALS_PER_DAY = 10  # 10 signaux premium/jour
 SIGNAL_INTERVAL_MINUTES = 30  # Signal toutes les 30 minutes
@@ -201,7 +201,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"🔄 Lundi-Vendredi (marché Forex)\n"
                     f"⚡ Signal toutes les 30 minutes\n"
                     f"📍 Timeframe: M1 (1 minute)\n"
-                    f"⚙️ Entrée: 1 min après signal\n"
+                    f"⏰ Signal envoyé: 3 min AVANT l'entrée\n"
                     f"🔍 Vérification: 1 min après entrée\n"
                     f"🚫 SANS GALE (haute précision)\n\n"
                     f"Commandes:\n"
@@ -257,7 +257,8 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"🎯 Mode: SANS GALE (90% WR)\n"
         msg += f"⚡ Intervalle: 30 minutes\n"
         msg += f"📍 Timeframe: M1\n"
-        msg += f"⚙️ Vérification: 1 min après entrée\n\n"
+        msg += f"⏰ Signal: 3 min AVANT entrée\n"
+        msg += f"🔍 Vérification: 1 min après entrée\n\n"
         
         if not forex_open:
             if now_utc.weekday() == 6 and now_utc.hour < 22:
@@ -440,7 +441,11 @@ async def send_pre_signal(pair, entry_time_haiti, app):
             print(f"[SIGNAL] ❌ Rejeté par ML ({ml_conf:.1%})")
             return None
         
+        # ⚠️ CORRECTION: entry_time_haiti est dans 3 minutes (pas 1)
+        entry_time_haiti = now_haiti + timedelta(minutes=DELAY_BEFORE_ENTRY_MIN)
         entry_time_utc = entry_time_haiti.astimezone(timezone.utc)
+        
+        print(f"[SIGNAL] 📤 Signal trouvé ! Entrée prévue: {entry_time_haiti.strftime('%H:%M')} (dans {DELAY_BEFORE_ENTRY_MIN} min)")
         
         payload = {
             'pair': pair, 'direction': ml_signal, 'reason': f'ML Ultra {ml_conf:.1%}',
@@ -657,7 +662,11 @@ async def process_signal_queue(app):
             print(f"\n[SESSION] 📍 Signal {i+1}/{NUM_SIGNALS_PER_DAY} - {pair}")
             
             now_haiti = get_haiti_now()
+            
+            # ⚠️ CORRECTION IMPORTANTE: L'heure d'entrée est dans 3 minutes
             entry_time_haiti = now_haiti + timedelta(minutes=DELAY_BEFORE_ENTRY_MIN)
+            
+            print(f"[SESSION] ⏰ Signal sera envoyé maintenant pour entrée à {entry_time_haiti.strftime('%H:%M')}")
             
             # Tenter jusqu'à 5 fois pour trouver un signal ultra-strict
             signal_id = None
@@ -672,10 +681,10 @@ async def process_signal_queue(app):
                 print(f"[SESSION] ❌ Aucun signal ultra-strict trouvé")
                 continue
             
-            # Attendre l'heure d'entrée (1 min)
+            # Attendre l'heure d'entrée (3 min)
             wait_to_entry = (entry_time_haiti - get_haiti_now()).total_seconds()
             if wait_to_entry > 0:
-                print(f"[SESSION] ⏳ Attente entrée: {wait_to_entry:.0f}s")
+                print(f"[SESSION] ⏳ Attente entrée: {wait_to_entry/60:.1f} min")
                 await asyncio.sleep(wait_to_entry)
             
             # Attendre 1 minute supplémentaire pour vérification M1
@@ -744,7 +753,8 @@ async def main():
     print(f"🎯 Objectif: {NUM_SIGNALS_PER_DAY} signaux/jour - 90% WR")
     print(f"⚡ Intervalle: 30 minutes entre signaux")
     print(f"📍 Timeframe: M1 (1 minute)")
-    print(f"⚙️ Entrée: 1 min après envoi | Vérif: 1 min après entrée")
+    print(f"⏰ Signal envoyé: 3 min AVANT l'entrée")
+    print(f"⚙️ Vérification: 1 min après entrée (total 4 min)")
     print(f"🚫 Mode: SANS GALE (haute précision)")
     print("="*60 + "\n")
 
