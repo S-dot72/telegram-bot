@@ -279,20 +279,28 @@ class MLSignalPredictor:
         Objectif: 90%+ de confiance
         Retourne: (signal, confidence)
         """
+        # Si pas de modèle, utiliser confiance par défaut
         if self.model is None:
-            # Mode sans ML: confiance par défaut élevée
+            print(f"   ⚠️  ML: Modèle non entraîné, confiance par défaut")
             return base_signal, 0.88
         
         try:
             features = self.extract_features(df)
             if features is None:
                 print(f"⚠️  ML: Features incomplètes")
-                return None, 0.0
+                return base_signal, 0.88  # Confiance par défaut au lieu de rejeter
             
             X = pd.DataFrame([features])
             
-            # Normaliser les features
-            X_scaled = self.scaler.transform(X)
+            # Vérifier si le scaler est entraîné
+            try:
+                # Tester si le scaler a été fit
+                X_scaled = self.scaler.transform(X)
+            except Exception as scaler_error:
+                print(f"   ⚠️  ML: Scaler non entraîné ({scaler_error})")
+                # Si le scaler n'est pas fit, l'entraîner sur ces données
+                X_scaled = self.scaler.fit_transform(X)
+                print(f"   ✅ ML: Scaler initialisé")
             
             # Prédire la probabilité
             probas = self.model.predict_proba(X_scaled)[0]
@@ -319,7 +327,7 @@ class MLSignalPredictor:
             print(f"⚠️  Erreur ML prediction: {e}")
             import traceback
             traceback.print_exc()
-            # En cas d'erreur, retourner confiance par défaut
+            # En cas d'erreur, retourner confiance par défaut élevée
             return base_signal, 0.88
     
     def train_on_history(self, engine):
