@@ -1,6 +1,5 @@
 """
 Bot de trading - 10 signaux/jour avec 90% de win rate
-Sans gale - Signaux toutes les minutes
 """
 
 import os, json, asyncio
@@ -660,25 +659,32 @@ async def process_signal_queue(app):
             pair = active_pairs[i % len(active_pairs)]
             
             print(f"\n[SESSION] 📍 Signal {i+1}/{NUM_SIGNALS_PER_DAY} - {pair}")
+            print(f"[SESSION] ⏰ Analyse du marché en temps réel...")
             
             now_haiti = get_haiti_now()
             
             # ⚠️ CORRECTION IMPORTANTE: L'heure d'entrée est dans 3 minutes
             entry_time_haiti = now_haiti + timedelta(minutes=DELAY_BEFORE_ENTRY_MIN)
             
-            print(f"[SESSION] ⏰ Signal sera envoyé maintenant pour entrée à {entry_time_haiti.strftime('%H:%M')}")
+            print(f"[SESSION] 🎯 Signal sera envoyé pour entrée à {entry_time_haiti.strftime('%H:%M')}")
             
             # Tenter jusqu'à 5 fois pour trouver un signal ultra-strict
             signal_id = None
             for attempt in range(5):
+                print(f"[SESSION] 🔍 Tentative {attempt+1}/5 d'analyse...")
                 signal_id = await send_pre_signal(pair, entry_time_haiti, app)
                 if signal_id:
                     signals_sent += 1
+                    print(f"[SESSION] ✅ Signal trouvé et envoyé !")
                     break
-                await asyncio.sleep(20)
+                
+                if attempt < 4:  # Pas d'attente après la dernière tentative
+                    print(f"[SESSION] ⏳ Attente 20s avant nouvelle tentative...")
+                    await asyncio.sleep(20)
             
             if not signal_id:
-                print(f"[SESSION] ❌ Aucun signal ultra-strict trouvé")
+                print(f"[SESSION] ❌ Aucun signal ultra-strict après 5 tentatives")
+                print(f"[SESSION] 📊 Marché non favorable pour {pair}")
                 continue
             
             # Attendre l'heure d'entrée (3 min)
