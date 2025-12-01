@@ -98,8 +98,8 @@ def rule_signal_ultra_strict(df):
     # ========================================
     # CRITÈRE 1: TENDANCE CONFIRMÉE
     # ========================================
-    # ADX > 25 = tendance forte (réaliste pour M1)
-    if adx < 25:
+    # ADX > 20 = tendance confirmée (assoupli pour plus de signaux)
+    if adx < 20:
         return None
     
     # ========================================
@@ -114,8 +114,8 @@ def rule_signal_ultra_strict(df):
     # ========================================
     # CRITÈRE 3: RSI DANS ZONE SÉCURISÉE
     # ========================================
-    # Pas d'extrêmes (ni survente ni surachat extrême)
-    if rsi < 30 or rsi > 70:
+    # Zone élargie pour plus de signaux
+    if rsi < 25 or rsi > 75:
         return None
     
     # ========================================
@@ -158,9 +158,9 @@ def rule_signal_ultra_strict(df):
     adx_bullish = last['adx_pos'] > last['adx_neg']
     call_signals.append(adx_bullish)
     
-    # DÉCISION CALL: 5/6 critères minimum (83%)
+    # DÉCISION CALL: 4/6 critères minimum (67% au lieu de 83%)
     call_score = sum(call_signals)
-    if call_score >= 5:
+    if call_score >= 4:
         return 'CALL'
     
     # ========================================
@@ -203,9 +203,9 @@ def rule_signal_ultra_strict(df):
     adx_bearish = last['adx_neg'] > last['adx_pos']
     put_signals.append(adx_bearish)
     
-    # DÉCISION PUT: 5/6 critères minimum (83%)
+    # DÉCISION PUT: 4/6 critères minimum (67% au lieu de 83%)
     put_score = sum(put_signals)
-    if put_score >= 5:
+    if put_score >= 4:
         return 'PUT'
     
     # Si moins de 5/6 critères, NE PAS TRADER
