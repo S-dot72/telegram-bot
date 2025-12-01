@@ -284,8 +284,9 @@ class AutoResultVerifier:
             else:
                 entry_time_utc = entry_time_utc.astimezone(timezone.utc)
 
-            # Pour M1: vérification 1 minute après l'entrée
-            end_time_utc = entry_time_utc + timedelta(minutes=1)
+            # Pour M1: vérification 2 minutes après l'entrée (au lieu de 1)
+            # Donne plus de marge pour que l'API ait les données
+            end_time_utc = entry_time_utc + timedelta(minutes=2)
             
             now_utc = datetime.now(timezone.utc)
             
@@ -294,8 +295,12 @@ class AutoResultVerifier:
             print(f"   📅 Entrée UTC: {entry_time_utc.strftime('%Y-%m-%d %H:%M:%S')}")
             print(f"   📅 Fin M1 UTC: {end_time_utc.strftime('%Y-%m-%d %H:%M:%S')}")
             print(f"   📅 Maintenant UTC: {now_utc.strftime('%Y-%m-%d %H:%M:%S')}")
-            print(f"   ⏱️  Temps restant: {(end_time_utc - now_utc).total_seconds():.0f}s")
-            print(f"   {'✅ COMPLET M1' if is_complete else '⏳ PAS COMPLET M1'}")
+            
+            if is_complete:
+                print(f"   ✅ COMPLET M1")
+            else:
+                remaining_seconds = (end_time_utc - now_utc).total_seconds()
+                print(f"   ⏳ PAS COMPLET M1 - Attente: {remaining_seconds:.0f}s")
             
             return is_complete
             
@@ -355,23 +360,30 @@ class AutoResultVerifier:
                 print(f"   ⚠️  Prix de sortie M1 non disponible")
                 return None, None
             
-            # ⚠️ CORRECTION: Vérification stricte de la direction
+            # ⚠️ CORRECTION: Vérification stricte avec marge broker
             price_diff = exit_price - entry_price
             pips_diff = abs(price_diff) * 10000
+            
+            # ⚠️ IMPORTANT: Marge de sécurité pour spread + commission
+            # EUR/USD spread ≈ 1-2 pips + commission ≈ 0.5 pips = 2 pips minimum (assoupli)
+            MIN_PIPS_TO_WIN = 2.0  # Réduit de 3 à 2 pips
             
             print(f"   💰 Prix entrée:  {entry_price:.5f}")
             print(f"   💰 Prix sortie:  {exit_price:.5f}")
             print(f"   📊 Différence:   {price_diff:+.5f} ({pips_diff:.1f} pips)")
+            print(f"   ⚠️  Marge requise: {MIN_PIPS_TO_WIN} pips (spread + commission)")
             
-            # Calculer résultat
+            # Calculer résultat AVEC marge de sécurité
             if direction == 'CALL':
-                is_winning = exit_price > entry_price
-                print(f"   🎯 CALL: Besoin que sortie > entrée")
-                print(f"   🎯 {exit_price:.5f} > {entry_price:.5f} ? {is_winning}")
+                is_winning = (exit_price > entry_price) and (pips_diff >= MIN_PIPS_TO_WIN)
+                print(f"   🎯 CALL: Besoin que sortie > entrée ET gain ≥ {MIN_PIPS_TO_WIN} pips")
+                print(f"   🎯 {exit_price:.5f} > {entry_price:.5f} ? {exit_price > entry_price}")
+                print(f"   🎯 {pips_diff:.1f} ≥ {MIN_PIPS_TO_WIN} pips ? {pips_diff >= MIN_PIPS_TO_WIN}")
             else:  # PUT
-                is_winning = exit_price < entry_price
-                print(f"   🎯 PUT: Besoin que sortie < entrée")
-                print(f"   🎯 {exit_price:.5f} < {entry_price:.5f} ? {is_winning}")
+                is_winning = (exit_price < entry_price) and (pips_diff >= MIN_PIPS_TO_WIN)
+                print(f"   🎯 PUT: Besoin que sortie < entrée ET gain ≥ {MIN_PIPS_TO_WIN} pips")
+                print(f"   🎯 {exit_price:.5f} < {entry_price:.5f} ? {exit_price < entry_price}")
+                print(f"   🎯 {pips_diff:.1f} ≥ {MIN_PIPS_TO_WIN} pips ? {pips_diff >= MIN_PIPS_TO_WIN}")
             
             result = 'WIN' if is_winning else 'LOSE'
             
