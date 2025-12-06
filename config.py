@@ -5,7 +5,7 @@ load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 TWELVEDATA_API_KEY = os.getenv('TWELVEDATA_API_KEY')
-PAIRS = [p.strip() for p in os.getenv('PAIRS','EUR/USD,GBP/USD,USD/JPY').split(',')]
+PAIRS = [p.strip() for p in os.getenv('PAIRS','EUR/USD,GBP/USD,USD/JPY,BTC/USD').split(',')]
 TIMEFRAME_M5 = os.getenv('TIMEFRAME_M5','5min')
 SIGNALS_PER_DAY = int(os.getenv('SIGNALS_PER_DAY','40'))
 START_HOUR_UTC = int(os.getenv('START_HOUR_UTC','9'))
