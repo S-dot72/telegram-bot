@@ -16,7 +16,7 @@ from utils import compute_indicators, rule_signal_ultra_strict
 from ml_predictor import MLSignalPredictor
 from auto_verifier import AutoResultVerifier
 from ml_continuous_learning import ContinuousLearning, scheduled_retraining
-from backtest import BacktesterM5
+from backtester import BacktesterM5
 
 # Configuration
 HAITI_TZ = ZoneInfo("America/Port-au-Prince")
