@@ -20,20 +20,44 @@ class BacktesterM5:
         """Récupère les données historiques M5"""
         try:
             symbol = pair.replace('/', '')
+            
+            # Calculer la date de fin (dernier vendredi si week-end)
+            from datetime import datetime, timedelta, timezone
+            now_utc = datetime.now(timezone.utc)
+            
+            # Si week-end, utiliser le vendredi précédent 21h UTC
+            if now_utc.weekday() == 5:  # Samedi
+                end_date = now_utc.replace(hour=21, minute=0) - timedelta(days=1)
+            elif now_utc.weekday() == 6:  # Dimanche
+                end_date = now_utc.replace(hour=21, minute=0) - timedelta(days=2)
+            elif now_utc.weekday() == 4 and now_utc.hour >= 22:  # Vendredi après 22h
+                end_date = now_utc.replace(hour=21, minute=0)
+            else:
+                # En semaine, utiliser maintenant
+                end_date = now_utc
+            
+            # Date de début : 15 jours avant
+            start_date = end_date - timedelta(days=15)
+            
             params = {
                 'symbol': symbol,
                 'interval': interval,
                 'outputsize': outputsize,
                 'apikey': TWELVEDATA_API_KEY,
-                'format': 'JSON'
+                'format': 'JSON',
+                'start_date': start_date.strftime('%Y-%m-%d %H:%M:%S'),
+                'end_date': end_date.strftime('%Y-%m-%d %H:%M:%S')
             }
             
-            print(f"   📥 Téléchargement {outputsize} bougies M5...")
+            print(f"   📥 Téléchargement données M5...")
+            print(f"   📅 Période: {start_date.strftime('%Y-%m-%d')} → {end_date.strftime('%Y-%m-%d')}")
+            
             r = requests.get(TD, params=params, timeout=30)
             r.raise_for_status()
             j = r.json()
             
             if 'values' not in j:
+                print(f"   ⚠️ Réponse API: {j}")
                 raise RuntimeError(f'TwelveData error: {j}')
             
             df = pd.DataFrame(j['values'])[::-1].reset_index(drop=True)
@@ -183,6 +207,14 @@ class BacktesterM5:
         put_winrate = (put_wins / put_total * 100) if put_total > 0 else 0
         avg_pips = total_pips / total_trades if total_trades > 0 else 0
         
+        # Ajouter info sur la période
+        if len(df) > 0:
+            period_start = df.index[0].strftime('%Y-%m-%d')
+            period_end = df.index[-1].strftime('%Y-%m-%d')
+        else:
+            period_start = "N/A"
+            period_end = "N/A"
+        
         results = {
             'pair': pair,
             'total_trades': total_trades,
@@ -201,7 +233,9 @@ class BacktesterM5:
             'avg_pips_per_trade': avg_pips,
             'trades': trades[-20:],  # Garder les 20 derniers trades
             'use_ml': use_ml,
-            'ml_threshold': self.confidence_threshold if use_ml else None
+            'ml_threshold': self.confidence_threshold if use_ml else None,
+            'period_start': period_start,
+            'period_end': period_end
         }
         
         print(f"\n   📊 Résultats:")
@@ -259,6 +293,10 @@ class BacktesterM5:
         msg += f"• 💰 Total pips: {total_pips:+.1f}\n\n"
         
         msg += f"📈 **DÉTAILS PAR PAIRE**\n\n"
+        
+        # Afficher la période si disponible
+        if results and results[0].get('period_start'):
+            msg += f"📅 Période: {results[0]['period_start']} → {results[0]['period_end']}\n\n"
         
         for r in results:
             if r.get('error'):
