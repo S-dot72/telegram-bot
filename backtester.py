@@ -16,54 +16,131 @@ class BacktesterM5:
         self.confidence_threshold = confidence_threshold
         self.ml_predictor = MLSignalPredictor()
     
+    def generate_demo_data(self, pair, num_candles=1000):
+        """Génère des données OHLC réalistes pour démo week-end"""
+        import numpy as np
+        from datetime import datetime, timedelta, timezone
+        
+        print(f"   🎭 Génération de {num_candles} bougies de démo...")
+        
+        # Prix de base selon la paire
+        base_prices = {
+            'EUR/USD': 1.0850,
+            'GBP/USD': 1.2650,
+            'USD/JPY': 149.50,
+            'BTC/USD': 42000.0,
+            'ETH/USD': 2200.0,
+            'XRP/USD': 0.60
+        }
+        
+        base_price = base_prices.get(pair, 1.0)
+        
+        # Générer des dates (7 jours en arrière)
+        end_time = datetime.now(timezone.utc) - timedelta(days=2)
+        dates = [end_time - timedelta(minutes=5*i) for i in range(num_candles)]
+        dates.reverse()
+        
+        # Générer des prix avec tendance et volatilité réalistes
+        np.random.seed(42)  # Pour reproductibilité
+        
+        prices = [base_price]
+        for i in range(1, num_candles):
+            # Mouvement aléatoire avec tendance légère
+            change_pct = np.random.normal(0, 0.0003)  # 0.03% volatilité moyenne
+            new_price = prices[-1] * (1 + change_pct)
+            prices.append(new_price)
+        
+        # Créer DataFrame
+        data = []
+        for i, (date, close) in enumerate(zip(dates, prices)):
+            # OHLC avec variations réalistes
+            volatility = close * 0.0002
+            high = close + np.random.uniform(0, volatility)
+            low = close - np.random.uniform(0, volatility)
+            open_price = prices[i-1] if i > 0 else close
+            
+            data.append({
+                'datetime': date.strftime('%Y-%m-%d %H:%M:%S'),
+                'open': round(open_price, 5),
+                'high': round(high, 5),
+                'low': round(low, 5),
+                'close': round(close, 5),
+                'volume': int(np.random.uniform(1000, 5000))
+            })
+        
+        df = pd.DataFrame(data)
+        df.index = pd.to_datetime(df['datetime'])
+        
+        print(f"   ✅ Données de démo générées")
+        return df
+    
     def fetch_historical_data(self, pair, interval='5min', outputsize=10000):
         """Récupère les données historiques M5"""
         try:
-            symbol = pair.replace('/', '')
-            
-            # Calculer la date de fin (dernier vendredi si week-end)
             from datetime import datetime, timedelta, timezone
             now_utc = datetime.now(timezone.utc)
+            is_weekend = now_utc.weekday() in [5, 6] or (now_utc.weekday() == 4 and now_utc.hour >= 22)
             
-            # Si week-end, utiliser le vendredi précédent 21h UTC
-            if now_utc.weekday() == 5:  # Samedi
-                end_date = now_utc.replace(hour=21, minute=0) - timedelta(days=1)
-            elif now_utc.weekday() == 6:  # Dimanche
-                end_date = now_utc.replace(hour=21, minute=0) - timedelta(days=2)
-            elif now_utc.weekday() == 4 and now_utc.hour >= 22:  # Vendredi après 22h
-                end_date = now_utc.replace(hour=21, minute=0)
-            else:
-                # En semaine, utiliser maintenant
-                end_date = now_utc
+            # MODE DÉMO WEEK-END
+            if is_weekend:
+                print(f"   🏖️ Week-end détecté - Mode DÉMO activé")
+                return self.generate_demo_data(pair, num_candles=2000)
             
-            # Date de début : 15 jours avant
-            start_date = end_date - timedelta(days=15)
+            # MODE NORMAL (semaine)
+            symbol = pair.replace('/', '')
+            
+            end_date = now_utc
+            start_date = end_date - timedelta(days=7)
             
             params = {
                 'symbol': symbol,
                 'interval': interval,
-                'outputsize': outputsize,
                 'apikey': TWELVEDATA_API_KEY,
                 'format': 'JSON',
                 'start_date': start_date.strftime('%Y-%m-%d %H:%M:%S'),
                 'end_date': end_date.strftime('%Y-%m-%d %H:%M:%S')
             }
             
-            print(f"   📥 Téléchargement données M5...")
-            print(f"   📅 Période: {start_date.strftime('%Y-%m-%d')} → {end_date.strftime('%Y-%m-%d')}")
+            print(f"   📥 Téléchargement données M5 ({symbol})...")
             
             r = requests.get(TD, params=params, timeout=30)
             r.raise_for_status()
             j = r.json()
             
-            if 'values' not in j:
-                print(f"   ⚠️ Réponse API: {j}")
-                raise RuntimeError(f'TwelveData error: {j}')
+            # Vérifier les erreurs API
+            if 'status' in j and j['status'] == 'error':
+                print(f"   ⚠️ Erreur API: {j.get('message', 'Unknown')}")
+                print(f"   🎭 Basculement en mode DÉMO")
+                return self.generate_demo_data(pair, num_candles=2000)
+            
+            if 'values' not in j or not j['values']:
+                print(f"   ⚠️ Aucune valeur retournée")
+                print(f"   🔄 Tentative sans plage de dates...")
+                
+                params_simple = {
+                    'symbol': symbol,
+                    'interval': interval,
+                    'outputsize': 2000,
+                    'apikey': TWELVEDATA_API_KEY,
+                    'format': 'JSON'
+                }
+                r = requests.get(TD, params=params_simple, timeout=30)
+                r.raise_for_status()
+                j = r.json()
+                
+                if 'values' not in j or not j['values']:
+                    print(f"   ❌ Échec API - Basculement mode DÉMO")
+                    return self.generate_demo_data(pair, num_candles=2000)
             
             df = pd.DataFrame(j['values'])[::-1].reset_index(drop=True)
             
+            if len(df) == 0:
+                print(f"   ❌ DataFrame vide - Mode DÉMO")
+                return self.generate_demo_data(pair, num_candles=2000)
+            
             for col in ['open', 'high', 'low', 'close']:
-                df[col] = df[col].astype(float)
+                if col in df.columns:
+                    df[col] = df[col].astype(float)
             
             if 'volume' in df.columns:
                 df['volume'] = df['volume'].astype(float)
@@ -75,7 +152,8 @@ class BacktesterM5:
             
         except Exception as e:
             print(f"   ❌ Erreur: {e}")
-            return None
+            print(f"   🎭 Basculement en mode DÉMO")
+            return self.generate_demo_data(pair, num_candles=2000)
     
     def run_backtest(self, pair, outputsize=5000, use_ml=True):
         """
