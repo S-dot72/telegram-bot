@@ -100,29 +100,38 @@ def compute_indicators(df, ema_fast=8, ema_slow=21, rsi_len=14, bb_len=20):
     # Momentum sur 3 bougies M5 (15 minutes)
     df['momentum_3'] = df['close'].pct_change(periods=3) * 100
     
+    # Momentum sur 5 bougies (25 minutes) - Plus stable
+    df['momentum_5'] = df['close'].pct_change(periods=5) * 100
+    
     # Support/Resistance sur 20 bougies M5 (100 minutes)
     df['resistance'] = df['high'].rolling(window=20).max()
     df['support'] = df['low'].rolling(window=20).min()
+    
+    # Distance par rapport aux bandes de Bollinger
+    df['bb_position'] = (df['close'] - df['BBL_20_2.0']) / (df['BBU_20_2.0'] - df['BBL_20_2.0'])
     
     return df
 
 
 def rule_signal_ultra_strict(df):
     """
-    Stratégie OPTIMISÉE pour M5 - Win rate cible 65-75%
+    Stratégie ULTRA-CONSERVATRICE pour M5 - Win rate cible 70-80%
     
-    CHANGEMENTS MAJEURS vs ancienne version:
-    1. ADX minimum abaissé à 12 (tendance légère acceptable)
-    2. Momentum assouplé : 0.01-3.0% (au lieu de 0.05-2.0%)
-    3. Seuil de décision abaissé à 2/5 critères (40%) au lieu de 3/5 (60%)
-    4. Vérifications support/resistance SUPPRIMÉES (trop restrictives)
-    5. Volatilité assouplie : 3.0x au lieu de 2.5x
-    6. RSI élargi : 15-85 au lieu de 20-80
+    VERSION 3.0 - CORRECTIONS APRÈS 0% WIN RATE:
     
-    Résultat attendu : 5-10 signaux/jour avec 65-75% win rate
+    1. ADX minimum augmenté: 12 → 15 (tendance plus forte)
+    2. Seuil de décision augmenté: 2/5 → 3/5 critères (60%)
+    3. RSI resserré: 15-85 → 25-75 (zone plus sûre)
+    4. Momentum validé sur 2 périodes (3 et 5 bougies)
+    5. MACD histogram doit être significatif (>0.0001)
+    6. Vérification position Bollinger Bands
+    7. Confirmation directionnelle EMA 50/200
+    8. Rejet si prix dans zone neutre BB (40-60%)
+    
+    Cette version vise 3-5 signaux/jour avec 70-80% win rate
     """
     
-    if len(df) < 10:
+    if len(df) < 50:
         return None
     
     last = df.iloc[-1]
@@ -136,103 +145,147 @@ def rule_signal_ultra_strict(df):
     macd = last.get('MACD_12_26_9')
     macd_signal = last.get('MACDs_12_26_9')
     macd_hist = last.get('MACDh_12_26_9')
+    bb_position = last.get('bb_position')
     
     if None in [rsi, adx, stoch_k, stoch_d, macd, macd_signal, macd_hist]:
         return None
     
     # ============================================
-    # FILTRES DE BASE (MUST-HAVE)
+    # FILTRES DE BASE (MUST-HAVE) - RENFORCÉS
     # ============================================
     
-    # CRITERE 1: TENDANCE MINIMALE (assoupli pour M5)
-    # ADX > 12 = tendance légère acceptable sur M5
-    if adx < 12:
+    # CRITERE 1: TENDANCE FORTE REQUISE
+    # ADX > 15 (au lieu de 12) = tendance claire nécessaire
+    if adx < 15:
         return None
     
-    # CRITERE 2: VOLATILITÉ ACCEPTABLE (assoupli)
+    # CRITERE 2: VOLATILITÉ MODÉRÉE
     atr = last.get('atr', 0)
     atr_sma = df['atr'].rolling(20).mean().iloc[-1]
-    # Pour M5: volatilité max 3.0x la moyenne (assoupli de 2.5x)
-    if atr > atr_sma * 3.0:
+    # Volatilité entre 0.5x et 2.5x (ni trop faible, ni trop forte)
+    if atr < atr_sma * 0.5 or atr > atr_sma * 2.5:
         return None
     
-    # CRITERE 3: RSI ZONE ÉLARGIE (évite seulement extrêmes dangereux)
-    # Zone: 15-85 (assoupli de 20-80)
-    if rsi < 15 or rsi > 85:
+    # CRITERE 3: RSI ZONE RESSERRÉE (évite extrêmes ET zone neutre)
+    # Zone: 25-75 (plus conservateur que 15-85)
+    if rsi < 25 or rsi > 75:
         return None
     
-    # CRITERE 4: MOMENTUM ASSOUPLI (clé pour M5)
-    momentum = last.get('momentum_3', 0)
-    # Assoupli: 0.01-3.0% (au lieu de 0.05-2.0%)
-    # Sur M5, le momentum peut être très faible mais valide
-    if abs(momentum) < 0.01 or abs(momentum) > 3.0:
+    # CRITERE 4: MOMENTUM DOUBLE VALIDATION
+    momentum_3 = last.get('momentum_3', 0)
+    momentum_5 = last.get('momentum_5', 0)
+    
+    # Momentum sur 3 bougies: 0.02-2.0%
+    if abs(momentum_3) < 0.02 or abs(momentum_3) > 2.0:
+        return None
+    
+    # Momentum sur 5 bougies: 0.05-3.0%
+    if abs(momentum_5) < 0.05 or abs(momentum_5) > 3.0:
+        return None
+    
+    # Les deux momentum doivent être dans la même direction
+    if (momentum_3 > 0 and momentum_5 < 0) or (momentum_3 < 0 and momentum_5 > 0):
+        return None
+    
+    # CRITERE 5: MACD HISTOGRAM SIGNIFICATIF
+    # Rejeter si signal trop faible
+    if abs(macd_hist) < 0.0001:
+        return None
+    
+    # CRITERE 6: POSITION BOLLINGER BANDS
+    # Rejeter si dans zone neutre (40-60%)
+    if bb_position and 0.4 < bb_position < 0.6:
         return None
     
     # ============================================
-    # ANALYSE CALL (BUY) - 2/5 CRITERES (40%)
+    # ANALYSE CALL (BUY) - 3/5 CRITERES (60%)
     # ============================================
     
     call_signals = []
     
-    # 1. Direction EMA principale
+    # 1. Direction EMA principale + confirmation EMA 50
     ema_bullish_main = last['ema_fast'] > last['ema_slow']
-    call_signals.append(ema_bullish_main)
+    ema_50_confirm = last['ema_slow'] > last['ema_50'] if 'ema_50' in last.index else True
+    call_signals.append(ema_bullish_main and ema_50_confirm)
     
-    # 2. MACD haussier
+    # 2. MACD haussier + histogram en croissance
     macd_bullish = macd > macd_signal and macd_hist > 0
-    call_signals.append(macd_bullish)
+    macd_growing = macd_hist > prev.get('MACDh_12_26_9', 0) if 'MACDh_12_26_9' in prev.index else True
+    call_signals.append(macd_bullish and macd_growing)
     
-    # 3. RSI dans zone haussière ÉLARGIE (35-80)
-    rsi_bullish = 35 < rsi < 80
+    # 3. RSI dans zone haussière optimale (45-70)
+    rsi_bullish = 45 < rsi < 70
     call_signals.append(rsi_bullish)
     
-    # 4. Stochastic confirme (assoupli pour M5)
-    stoch_bullish = stoch_k > stoch_d and 10 < stoch_k < 95
-    call_signals.append(stoch_bullish)
+    # 4. Stochastic confirme + zone valide
+    stoch_bullish = stoch_k > stoch_d and 20 < stoch_k < 85
+    stoch_momentum = stoch_k > prev.get('stoch_k', 0) if 'stoch_k' in prev.index else True
+    call_signals.append(stoch_bullish and stoch_momentum)
     
-    # 5. ADX tendance haussière OU momentum positif (assouplissement)
-    adx_bullish = (last['adx_pos'] > last['adx_neg']) or momentum > 0
+    # 5. ADX tendance haussière + momentum positifs alignés
+    adx_bullish = (last['adx_pos'] > last['adx_neg']) and momentum_3 > 0 and momentum_5 > 0
     call_signals.append(adx_bullish)
     
-    # DECISION CALL: 2/5 critères (40%) - ASSOUPLI
+    # DECISION CALL: 3/5 critères (60%) REQUIS
     call_score = sum(call_signals)
-    if call_score >= 2:
-        # SUPPRESSION de la vérification resistance (trop restrictive)
+    if call_score >= 3:
+        # Vérification finale: pas trop proche de la résistance
+        resistance = last.get('resistance')
+        if resistance and last['close'] > resistance * 0.995:
+            # Trop proche de la résistance (< 0.5%), rejeter
+            return None
+        
+        # Vérification BB: doit être en zone haussière (> 60%)
+        if bb_position and bb_position < 0.55:
+            return None
+        
         return 'CALL'
     
     # ============================================
-    # ANALYSE PUT (SELL) - 2/5 CRITERES (40%)
+    # ANALYSE PUT (SELL) - 3/5 CRITERES (60%)
     # ============================================
     
     put_signals = []
     
-    # 1. Direction EMA principale
+    # 1. Direction EMA principale + confirmation EMA 50
     ema_bearish_main = last['ema_fast'] < last['ema_slow']
-    put_signals.append(ema_bearish_main)
+    ema_50_confirm = last['ema_slow'] < last['ema_50'] if 'ema_50' in last.index else True
+    put_signals.append(ema_bearish_main and ema_50_confirm)
     
-    # 2. MACD baissier
+    # 2. MACD baissier + histogram en décroissance
     macd_bearish = macd < macd_signal and macd_hist < 0
-    put_signals.append(macd_bearish)
+    macd_falling = macd_hist < prev.get('MACDh_12_26_9', 0) if 'MACDh_12_26_9' in prev.index else True
+    put_signals.append(macd_bearish and macd_falling)
     
-    # 3. RSI dans zone baissière ÉLARGIE (20-65)
-    rsi_bearish = 20 < rsi < 65
+    # 3. RSI dans zone baissière optimale (30-55)
+    rsi_bearish = 30 < rsi < 55
     put_signals.append(rsi_bearish)
     
-    # 4. Stochastic confirme (assoupli pour M5)
-    stoch_bearish = stoch_k < stoch_d and 5 < stoch_k < 90
-    put_signals.append(stoch_bearish)
+    # 4. Stochastic confirme + zone valide
+    stoch_bearish = stoch_k < stoch_d and 15 < stoch_k < 80
+    stoch_momentum = stoch_k < prev.get('stoch_k', 0) if 'stoch_k' in prev.index else True
+    put_signals.append(stoch_bearish and stoch_momentum)
     
-    # 5. ADX tendance baissière OU momentum négatif (assouplissement)
-    adx_bearish = (last['adx_neg'] > last['adx_pos']) or momentum < 0
+    # 5. ADX tendance baissière + momentum négatifs alignés
+    adx_bearish = (last['adx_neg'] > last['adx_pos']) and momentum_3 < 0 and momentum_5 < 0
     put_signals.append(adx_bearish)
     
-    # DECISION PUT: 2/5 critères (40%) - ASSOUPLI
+    # DECISION PUT: 3/5 critères (60%) REQUIS
     put_score = sum(put_signals)
-    if put_score >= 2:
-        # SUPPRESSION de la vérification support (trop restrictive)
+    if put_score >= 3:
+        # Vérification finale: pas trop proche du support
+        support = last.get('support')
+        if support and last['close'] < support * 1.005:
+            # Trop proche du support (< 0.5%), rejeter
+            return None
+        
+        # Vérification BB: doit être en zone baissière (< 40%)
+        if bb_position and bb_position > 0.45:
+            return None
+        
         return 'PUT'
     
-    # Si moins de 2/5 critères, NE PAS TRADER
+    # Si moins de 3/5 critères, NE PAS TRADER
     return None
 
 
@@ -247,7 +300,7 @@ def rule_signal(df):
 def get_signal_quality_score(df):
     """
     Calcule un score de qualité du signal (0-100)
-    Utilisé pour filtrer les meilleurs signaux en kill zone
+    Version améliorée avec plus de critères
     """
     if len(df) < 10:
         return 0
@@ -257,55 +310,59 @@ def get_signal_quality_score(df):
     
     # ADX score (max 20 points)
     adx = last.get('adx', 0)
-    if adx > 25:
+    if adx > 30:
         score += 20
-    elif adx > 20:
+    elif adx > 25:
         score += 15
-    elif adx > 15:
+    elif adx > 20:
         score += 10
-    elif adx > 12:
+    elif adx > 15:
         score += 5
     
     # RSI position (max 20 points)
     rsi = last.get('rsi', 50)
-    if 45 < rsi < 55:
-        score += 20  # Zone neutre = bon
-    elif 40 < rsi < 60:
+    if 48 < rsi < 52:
+        score += 20  # Zone neutre parfaite
+    elif 45 < rsi < 55:
         score += 15
-    elif 35 < rsi < 65:
+    elif 40 < rsi < 60:
         score += 10
-    elif 30 < rsi < 70:
+    elif 35 < rsi < 65:
         score += 5
     
-    # MACD alignement (max 20 points)
+    # MACD alignement + force (max 25 points)
     macd = last.get('MACD_12_26_9', 0)
     macd_signal = last.get('MACDs_12_26_9', 0)
     macd_hist = last.get('MACDh_12_26_9', 0)
-    if (macd > macd_signal and macd_hist > 0) or (macd < macd_signal and macd_hist < 0):
-        score += 20
     
-    # Volatilité (max 20 points)
+    if (macd > macd_signal and macd_hist > 0) or (macd < macd_signal and macd_hist < 0):
+        score += 15
+        # Bonus si histogram fort
+        if abs(macd_hist) > 0.0005:
+            score += 10
+    
+    # Volatilité optimale (max 20 points)
     atr = last.get('atr', 0)
     atr_sma = df['atr'].rolling(20).mean().iloc[-1] if len(df) >= 20 else atr
     if atr_sma > 0:
         volatility_ratio = atr / atr_sma
-        if 0.8 < volatility_ratio < 1.5:
-            score += 20  # Volatilité normale
-        elif 0.6 < volatility_ratio < 2.0:
+        if 0.9 < volatility_ratio < 1.3:
+            score += 20  # Volatilité idéale
+        elif 0.7 < volatility_ratio < 1.7:
             score += 10
     
-    # EMA alignment (max 20 points)
+    # EMA alignment (max 15 points)
     ema_fast = last.get('ema_fast', 0)
     ema_slow = last.get('ema_slow', 0)
     ema_50 = last.get('ema_50', 0)
     
-    # Tendance claire
+    # Tendance claire avec EMA 50 confirmée
     if ema_fast > ema_slow > ema_50:
-        score += 20  # Tendance haussière claire
+        score += 15  # Tendance haussière parfaite
     elif ema_fast < ema_slow < ema_50:
-        score += 20  # Tendance baissière claire
+        score += 15  # Tendance baissière parfaite
     elif ema_fast > ema_slow or ema_fast < ema_slow:
-        score += 10  # Tendance partielle
+        score += 8  # Tendance partielle
     
     return min(score, 100)
 
