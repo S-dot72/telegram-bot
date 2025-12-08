@@ -1,5 +1,6 @@
 """
-Bot de trading M5 avec Kill Zones optimisées
+Bot de trading M5 avec Sessions Planifiées
+Envoie des signaux à horaires fixes avec 30 min d'intervalle
 """
 
 import os, json, asyncio
@@ -21,26 +22,61 @@ from backtester import BacktesterM5
 # Configuration
 HAITI_TZ = ZoneInfo("America/Port-au-Prince")
 
-# Kill Zones optimisées (en UTC)
-KILL_ZONES = {
-    'london_open': {'start': 7, 'end': 10, 'name': 'London Open', 'priority': 3},
-    'ny_open': {'start': 13, 'end': 16, 'name': 'New York Open', 'priority': 3},
-    'asian_session': {'start': 0, 'end': 3, 'name': 'Asian Session', 'priority': 1},
-    'london_ny_overlap': {'start': 12, 'end': 14, 'name': 'London/NY Overlap', 'priority': 5}
-}
+# SESSIONS PLANIFIÉES (en heure Haïti)
+SCHEDULED_SESSIONS = [
+    {
+        'name': 'London Kill Zone',
+        'start_hour': 2,
+        'start_minute': 0,
+        'end_hour': 5,
+        'end_minute': 0,
+        'signals_count': 3,
+        'interval_minutes': 30,
+        'priority': 3
+    },
+    {
+        'name': 'London/NY Overlap',
+        'start_hour': 9,
+        'start_minute': 0,
+        'end_hour': 11,
+        'end_minute': 0,
+        'signals_count': 4,
+        'interval_minutes': 30,
+        'priority': 5
+    },
+    {
+        'name': 'NY Session',
+        'start_hour': 14,
+        'start_minute': 0,
+        'end_hour': 17,
+        'end_minute': 0,
+        'signals_count': 4,
+        'interval_minutes': 30,
+        'priority': 3
+    },
+    {
+        'name': 'Evening Session',
+        'start_hour': 18,
+        'start_minute': 0,
+        'end_hour': 21,
+        'end_minute': 0,
+        'signals_count': 3,
+        'interval_minutes': 30,
+        'priority': 2
+    }
+]
 
 # Paramètres M5
 TIMEFRAME_M5 = "5min"
 DELAY_BEFORE_ENTRY_MIN = 5
 VERIFICATION_WAIT_MIN = 5
-MAX_SIGNALS_PER_SESSION = 3
 CONFIDENCE_THRESHOLD = 0.65
 
 engine = create_engine(DB_URL, connect_args={'check_same_thread': False})
 sched = AsyncIOScheduler(timezone=HAITI_TZ)
 ml_predictor = MLSignalPredictor()
 auto_verifier = None
-signal_queue_running = False
+active_sessions = {}  # Tracking des sessions en cours
 
 BEST_PARAMS = {}
 if os.path.exists(BEST_PARAMS_FILE):
@@ -74,28 +110,33 @@ def is_forex_open():
     
     return True
 
-def get_current_kill_zone():
-    """Détermine la kill zone active avec priorité"""
-    now_utc = get_utc_now()
-    hour = now_utc.hour
+def get_current_session():
+    """Retourne la session active actuellement (basée sur heure Haïti)"""
+    now_haiti = get_haiti_now()
+    current_time = now_haiti.hour * 60 + now_haiti.minute
     
-    active_zones = []
-    for zone_name, zone_info in KILL_ZONES.items():
-        if zone_info['start'] <= hour < zone_info['end']:
-            active_zones.append({
-                'name': zone_name,
-                'display_name': zone_info['name'],
-                'priority': zone_info['priority']
-            })
+    for session in SCHEDULED_SESSIONS:
+        start_time = session['start_hour'] * 60 + session['start_minute']
+        end_time = session['end_hour'] * 60 + session['end_minute']
+        
+        if start_time <= current_time < end_time:
+            return session
     
-    if not active_zones:
-        return None
-    
-    return max(active_zones, key=lambda x: x['priority'])
+    return None
 
-def is_kill_zone_active():
-    """Vérifie si nous sommes dans une kill zone"""
-    return get_current_kill_zone() is not None
+def get_next_session():
+    """Retourne la prochaine session à venir"""
+    now_haiti = get_haiti_now()
+    current_time = now_haiti.hour * 60 + now_haiti.minute
+    
+    for session in SCHEDULED_SESSIONS:
+        start_time = session['start_hour'] * 60 + session['start_minute']
+        
+        if start_time > current_time:
+            return session
+    
+    # Si aucune session aujourd'hui, retourner la première de demain
+    return SCHEDULED_SESSIONS[0]
 
 def fetch_ohlc_td(pair, interval, outputsize=300):
     if not is_forex_open():
@@ -215,18 +256,28 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 conn.execute(text("INSERT INTO subscribers (user_id, username) VALUES (:uid, :uname)"),
                 {"uid": user_id, "uname": username})
+                
+                next_session = get_next_session()
+                next_time = f"{next_session['start_hour']:02d}h{next_session['start_minute']:02d}"
+                
                 await update.message.reply_text(
-                    f"✅ Bienvenue au Bot Trading M5 !\n\n"
-                    f"🎯 Kill Zones optimisées:\n"
-                    f"• London Open: 07h-10h UTC (priorité 3)\n"
-                    f"• NY Open: 13h-16h UTC (priorité 3)\n"
-                    f"• London/NY Overlap: 12h-14h UTC (priorité 5)\n"
-                    f"• Asian Session: 00h-03h UTC (priorité 1)\n\n"
+                    f"✅ Bienvenue au Bot Trading M5 - Sessions Planifiées !\n\n"
+                    f"📅 **SESSIONS QUOTIDIENNES:**\n\n"
+                    f"🌅 **02h-05h** (London Kill Zone)\n"
+                    f"   • 3 signaux à 30 min d'intervalle\n"
+                    f"   • Priorité: 3/5\n\n"
+                    f"🔥 **09h-11h** (London/NY Overlap)\n"
+                    f"   • 4 signaux à 30 min d'intervalle\n"
+                    f"   • Priorité: 5/5 ⭐\n\n"
+                    f"📈 **14h-17h** (NY Session)\n"
+                    f"   • 4 signaux à 30 min d'intervalle\n"
+                    f"   • Priorité: 3/5\n\n"
+                    f"🌆 **18h-21h** (Evening Session)\n"
+                    f"   • 3 signaux à 30 min d'intervalle\n"
+                    f"   • Priorité: 2/5\n\n"
                     f"📍 Timeframe: M5 (5 minutes)\n"
-                    f"⚡ Max 3 signaux par kill zone\n"
-                    f"💪 Win rate cible: 70-80%\n"
-                    f"⏰ Signal: 5 min avant entrée\n"
-                    f"🔍 Vérification: 5 min après entrée\n\n"
+                    f"💪 Total: 14 signaux par jour\n"
+                    f"⏰ Prochaine session: {next_session['name']} à {next_time}\n\n"
                     f"📋 Tapez /menu pour toutes les commandes"
                 )
     except Exception as e:
@@ -240,7 +291,7 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /stats - Voir les statistiques générales\n"
         "• /status - État actuel du bot\n"
         "• /rapport - Rapport du jour en cours\n"
-        "• /killzones - Info sur les kill zones\n\n"
+        "• /sessions - Planning des sessions\n\n"
         "🤖 **Machine Learning:**\n"
         "• /mlstats - Statistiques ML\n"
         "• /retrain - Réentraîner le modèle ML\n\n"
@@ -252,34 +303,43 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /menu - Afficher ce menu\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"🎯 Timeframe: M5\n"
-        f"💪 Win rate cible: 70-80%"
+        f"💪 14 signaux/jour (4 sessions)"
     )
     await update.message.reply_text(menu_text)
 
-async def cmd_killzones(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    now_utc = get_utc_now()
-    current_zone = get_current_kill_zone()
+async def cmd_sessions(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    now_haiti = get_haiti_now()
+    current_session = get_current_session()
+    next_session = get_next_session()
     
-    msg = "🎯 **KILL ZONES ACTIVES**\n"
+    msg = "📅 **PLANNING DES SESSIONS**\n"
     msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
-    msg += f"🕐 Heure UTC: {now_utc.strftime('%H:%M')}\n\n"
+    msg += f"🕐 Heure actuelle: {now_haiti.strftime('%H:%M')} (Haïti)\n\n"
     
-    if current_zone:
-        msg += f"✅ **Zone active:** {current_zone['display_name']}\n"
-        msg += f"🔥 Priorité: {current_zone['priority']}/5\n\n"
+    if current_session:
+        msg += f"✅ **Session active:** {current_session['name']}\n"
+        msg += f"🔥 Priorité: {current_session['priority']}/5\n"
+        msg += f"⚡ Signaux restants: À venir\n\n"
     else:
-        msg += "⏸️ Aucune kill zone active\n\n"
+        msg += "⏸️ Aucune session active\n\n"
     
-    msg += "📋 **Planning des Kill Zones:**\n\n"
-    msg += "🔥 **London/NY Overlap** (12h-14h UTC)\n"
-    msg += "   Priorité: 5/5 - Volatilité maximale\n\n"
-    msg += "📈 **London Open** (07h-10h UTC)\n"
-    msg += "   Priorité: 3/5 - Bon volume\n\n"
-    msg += "📉 **NY Open** (13h-16h UTC)\n"
-    msg += "   Priorité: 3/5 - Bon volume\n\n"
-    msg += "🌙 **Asian Session** (00h-03h UTC)\n"
-    msg += "   Priorité: 1/5 - Volume faible\n\n"
-    msg += "━━━━━━━━━━━━━━━━━━━━"
+    msg += "📋 **Planning quotidien:**\n\n"
+    
+    for session in SCHEDULED_SESSIONS:
+        start = f"{session['start_hour']:02d}h{session['start_minute']:02d}"
+        end = f"{session['end_hour']:02d}h{session['end_minute']:02d}"
+        priority_stars = "⭐" * session['priority']
+        
+        msg += f"**{session['name']}** ({start}-{end})\n"
+        msg += f"   • {session['signals_count']} signaux (intervalle: {session['interval_minutes']}min)\n"
+        msg += f"   • Priorité: {priority_stars}\n\n"
+    
+    if next_session and not current_session:
+        next_time = f"{next_session['start_hour']:02d}h{next_session['start_minute']:02d}"
+        msg += f"⏰ Prochaine: {next_session['name']} à {next_time}\n\n"
+    
+    msg += "━━━━━━━━━━━━━━━━━━━━\n"
+    msg += "💪 Total: 14 signaux par jour"
     
     await update.message.reply_text(msg)
 
@@ -303,7 +363,8 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"⏳ En attente: {pending}\n"
         msg += f"📈 Win rate: {winrate:.1f}%\n"
         msg += f"👥 Abonnés: {subs}\n\n"
-        msg += f"📍 Timeframe: M5"
+        msg += f"📍 Timeframe: M5\n"
+        msg += f"💪 14 signaux/jour planifiés"
         
         await update.message.reply_text(msg)
 
@@ -315,24 +376,27 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         now_haiti = get_haiti_now()
         now_utc = get_utc_now()
         forex_open = is_forex_open()
-        current_zone = get_current_kill_zone()
+        current_session = get_current_session()
+        next_session = get_next_session()
         
         msg = f"🤖 **État du Bot**\n\n"
         msg += f"🇭🇹 Haïti: {now_haiti.strftime('%a %H:%M:%S')}\n"
         msg += f"🌍 UTC: {now_utc.strftime('%a %H:%M:%S')}\n"
-        msg += f"📈 Forex: {'🟢 OUVERT' if forex_open else '🔴 FERMÉ'}\n"
-        msg += f"🔄 Session: {'✅ Active' if signal_queue_running else '⏸️ Inactive'}\n\n"
+        msg += f"📈 Forex: {'🟢 OUVERT' if forex_open else '🔴 FERMÉ'}\n\n"
         
-        if current_zone:
-            msg += f"🎯 **Kill Zone:** {current_zone['display_name']}\n"
-            msg += f"🔥 Priorité: {current_zone['priority']}/5\n\n"
+        if current_session:
+            msg += f"✅ **Session Active:** {current_session['name']}\n"
+            msg += f"🔥 Priorité: {current_session['priority']}/5\n"
+            msg += f"⚡ Signaux prévus: {current_session['signals_count']}\n"
+            msg += f"⏱️ Intervalle: {current_session['interval_minutes']} min\n\n"
         else:
-            msg += f"⏸️ Aucune kill zone active\n\n"
+            msg += f"⏸️ Aucune session active\n\n"
+            if next_session:
+                next_time = f"{next_session['start_hour']:02d}h{next_session['start_minute']:02d}"
+                msg += f"⏰ Prochaine: {next_session['name']} à {next_time}\n\n"
         
         msg += f"📍 Timeframe: M5\n"
-        msg += f"⚡ Max 3 signaux/zone\n"
-        msg += f"⏰ Signal: 5 min avant entrée\n"
-        msg += f"🔍 Vérification: 5 min après entrée\n"
+        msg += f"💪 14 signaux/jour planifiés"
         
         await update.message.reply_text(msg)
     except Exception as e:
@@ -441,7 +505,7 @@ async def cmd_rapport(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• ✅ Gagnés: {wins}\n"
             f"• ❌ Perdus: {losses}\n"
             f"• 📊 Win rate: **{winrate:.1f}%**\n\n"
-            f"📍 Timeframe: M5\n\n"
+            f"📍 14 signaux planifiés/jour\n\n"
             f"━━━━━━━━━━━━━━━━━━━━"
         )
         
@@ -452,18 +516,22 @@ async def cmd_rapport(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_test_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        global signal_queue_running
+        msg = await update.message.reply_text("🚀 Test de signal...")
         
-        if signal_queue_running:
-            await update.message.reply_text("⚠️ Une session est déjà en cours")
+        current_session = get_current_session()
+        if not current_session:
+            next_session = get_next_session()
+            next_time = f"{next_session['start_hour']:02d}h{next_session['start_minute']:02d}"
+            await msg.edit_text(
+                f"⏸️ Aucune session active\n\n"
+                f"⏰ Prochaine: {next_session['name']} à {next_time}"
+            )
             return
         
-        msg = await update.message.reply_text("🚀 Démarrage session de test...")
-        
         app = context.application
-        asyncio.create_task(process_signal_queue(app))
+        asyncio.create_task(send_single_signal(app, current_session))
         
-        await msg.edit_text("✅ Session de test lancée !")
+        await msg.edit_text(f"✅ Signal de test lancé pour {current_session['name']} !")
         
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {e}")
@@ -477,11 +545,9 @@ async def cmd_backtest(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Cela peut prendre 1-2 minutes."
         )
         
-        # Vérifier si une paire spécifique est demandée
-        pairs_to_test = PAIRS[:3]  # Par défaut: top 3
+        pairs_to_test = PAIRS[:3]
         
         if context.args and len(context.args) > 0:
-            # Paire spécifique demandée
             requested_pair = context.args[0].upper().replace('-', '/')
             if requested_pair in PAIRS:
                 pairs_to_test = [requested_pair]
@@ -492,17 +558,15 @@ async def cmd_backtest(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
         
-        # Lancer le backtest
         backtester = BacktesterM5(confidence_threshold=CONFIDENCE_THRESHOLD)
         
         print(f"\n[BACKTEST] Lancement pour {len(pairs_to_test)} paire(s)")
         
         results = backtester.run_full_backtest(
             pairs=pairs_to_test,
-            outputsize=3000  # 3000 bougies M5 = ~10 jours de données
+            outputsize=3000
         )
         
-        # Formater et envoyer les résultats
         result_msg = backtester.format_results_for_telegram(results)
         
         await msg.edit_text(result_msg)
@@ -516,18 +580,23 @@ async def cmd_backtest(update: Update, context: ContextTypes.DEFAULT_TYPE):
         import traceback
         traceback.print_exc()
 
-async def send_pre_signal(pair, entry_time_haiti, app, kill_zone_name):
-    if not is_forex_open():
-        print("[SIGNAL] 🏖️ Marché fermé")
-        return None
-    
-    now_haiti = get_haiti_now()
-    print(f"\n[SIGNAL] 📤 Tentative {pair} - {now_haiti.strftime('%H:%M:%S')}")
-
+async def send_single_signal(app, session):
+    """Envoie un signal unique pour une session"""
     try:
+        if not is_forex_open():
+            print("[SIGNAL] 🏖️ Marché fermé")
+            return None
+        
+        now_haiti = get_haiti_now()
+        print(f"\n[SIGNAL] 📤 Session: {session['name']} - {now_haiti.strftime('%H:%M:%S')}")
+        
+        # Rotation des paires
+        active_pairs = PAIRS[:3]
+        pair = active_pairs[len(active_sessions.get(session['name'], [])) % len(active_pairs)]
+        
         params = BEST_PARAMS.get(pair, {})
         df = get_cached_ohlc(pair, TIMEFRAME_M5, outputsize=400)
-
+        
         if df is None or len(df) < 50:
             print("[SIGNAL] ❌ Pas de données")
             return None
@@ -554,9 +623,12 @@ async def send_pre_signal(pair, entry_time_haiti, app, kill_zone_name):
         print(f"[SIGNAL] 📤 Signal trouvé ! Entrée: {entry_time_haiti.strftime('%H:%M')} (dans {DELAY_BEFORE_ENTRY_MIN} min)")
         
         payload = {
-            'pair': pair, 'direction': ml_signal, 'reason': f'ML {ml_conf:.1%} - {kill_zone_name}',
-            'ts_enter': entry_time_utc.isoformat(), 'ts_send': get_utc_now().isoformat(),
-            'confidence': ml_conf, 'payload': json.dumps({'pair': pair, 'kill_zone': kill_zone_name}),
+            'pair': pair, 'direction': ml_signal, 
+            'reason': f'ML {ml_conf:.1%} - {session["name"]}',
+            'ts_enter': entry_time_utc.isoformat(), 
+            'ts_send': get_utc_now().isoformat(),
+            'confidence': ml_conf, 
+            'payload': json.dumps({'pair': pair, 'session': session['name']}),
             'max_gales': 0
         }
         signal_id = persist_signal(payload)
@@ -565,7 +637,7 @@ async def send_pre_signal(pair, entry_time_haiti, app, kill_zone_name):
             with engine.begin() as conn:
                 conn.execute(
                     text("UPDATE signals SET kill_zone = :kz WHERE id = :sid"),
-                    {'kz': kill_zone_name, 'sid': signal_id}
+                    {'kz': session['name'], 'sid': signal_id}
                 )
         except:
             pass
@@ -577,7 +649,8 @@ async def send_pre_signal(pair, entry_time_haiti, app, kill_zone_name):
         
         msg = (
             f"🎯 SIGNAL — {pair}\n\n"
-            f"🎯 Kill Zone: {kill_zone_name}\n"
+            f"📅 Session: {session['name']}\n"
+            f"🔥 Priorité: {session['priority']}/5\n"
             f"🕐 Entrée: {entry_time_haiti.strftime('%H:%M')} (Haïti)\n"
             f"📍 Timeframe: M5 (5 minutes)\n\n"
             f"📈 Direction: **{direction_text}**\n"
@@ -592,10 +665,29 @@ async def send_pre_signal(pair, entry_time_haiti, app, kill_zone_name):
                 print(f"[SIGNAL] ❌ Envoi à {uid}: {e}")
         
         print(f"[SIGNAL] ✅ Envoyé ({ml_signal}, {ml_conf:.1%})")
+        
+        # Tracking
+        if session['name'] not in active_sessions:
+            active_sessions[session['name']] = []
+        active_sessions[session['name']].append(signal_id)
+        
+        # Attendre et vérifier
+        await asyncio.sleep(DELAY_BEFORE_ENTRY_MIN * 60 + VERIFICATION_WAIT_MIN * 60)
+        
+        try:
+            result = await auto_verifier.verify_single_signal(signal_id)
+            if result:
+                print(f"[SIGNAL] ✅ Résultat: {result}")
+                await send_verification_briefing(signal_id, app)
+        except Exception as e:
+            print(f"[SIGNAL] ❌ Erreur vérif: {e}")
+        
         return signal_id
-
+        
     except Exception as e:
         print(f"[SIGNAL] ❌ Erreur: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 async def send_verification_briefing(signal_id, app):
@@ -633,7 +725,7 @@ async def send_verification_briefing(signal_id, app):
         )
         
         if kill_zone:
-            briefing += f"🎯 Kill Zone: {kill_zone}\n"
+            briefing += f"📅 Session: {kill_zone}\n"
         
         briefing += f"\n🎲 Résultat: **{status}**\n\n"
         briefing += f"━━━━━━━━━━━━━━━━━━━━"
@@ -710,7 +802,7 @@ async def send_daily_report(app):
             f"• ✅ Gagnés: {wins}\n"
             f"• ❌ Perdus: {losses}\n"
             f"• 📊 Win rate: **{winrate:.1f}%**\n\n"
-            f"📍 Timeframe: M5\n\n"
+            f"📍 14 signaux planifiés/jour\n\n"
         )
         
         if len(signals_list) > 0:
@@ -726,7 +818,7 @@ async def send_daily_report(app):
         
         report += (
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"📅 Prochaine session: Prochaine kill zone"
+            f"📅 Prochaine session: Demain 02h00"
         )
         
         sent_count = 0
@@ -744,136 +836,50 @@ async def send_daily_report(app):
         import traceback
         traceback.print_exc()
 
-async def process_signal_queue(app):
-    global signal_queue_running
-
-    print("\n[SESSION] 🔍 Vérification...")
-    print(f"[SESSION] - Marché: {is_forex_open()}")
-    print(f"[SESSION] - Running: {signal_queue_running}")
-    
+async def run_scheduled_session(app, session):
+    """Exécute une session planifiée avec intervalles fixes"""
     if not is_forex_open():
-        print("[SESSION] 🏖️ Marché fermé")
+        print(f"[SESSION] 🏖️ Marché fermé - {session['name']}")
         return
-
-    if signal_queue_running:
-        print("[SESSION] ⚠️ Déjà en cours")
-        return
-
-    signal_queue_running = True
-
-    try:
-        current_zone = get_current_kill_zone()
+    
+    print(f"\n[SESSION] 🚀 DÉBUT - {session['name']}")
+    print(f"[SESSION] 🔥 Priorité: {session['priority']}/5")
+    print(f"[SESSION] ⚡ {session['signals_count']} signaux à {session['interval_minutes']}min d'intervalle")
+    
+    # Réinitialiser tracking
+    active_sessions[session['name']] = []
+    
+    for i in range(session['signals_count']):
+        if not is_forex_open():
+            print(f"[SESSION] 🏖️ Marché fermé - Arrêt session")
+            break
         
-        if not current_zone:
-            print("[SESSION] ⏸️ Pas de kill zone active")
-            signal_queue_running = False
-            return
+        print(f"\n[SESSION] 📍 Signal {i+1}/{session['signals_count']}")
         
-        print(f"\n[SESSION] 🚀 DÉBUT - Kill Zone: {current_zone['display_name']}")
-        print(f"[SESSION] 🔥 Priorité: {current_zone['priority']}/5")
-        print(f"[SESSION] ⚡ Max {MAX_SIGNALS_PER_SESSION} signaux pour cette zone")
-        print(f"[SESSION] 📍 Timeframe M5 - Vérification 5 min après entrée")
-        
-        active_pairs = PAIRS[:3]
-        signals_sent = 0
-        
-        for i in range(MAX_SIGNALS_PER_SESSION):
-            if not is_kill_zone_active():
-                print(f"\n[SESSION] ⏰ Kill zone terminée - Arrêt session")
+        # Tenter d'envoyer signal (max 3 tentatives)
+        signal_sent = False
+        for attempt in range(3):
+            signal_id = await send_single_signal(app, session)
+            if signal_id:
+                signal_sent = True
                 break
             
-            if not is_forex_open():
-                break
-            
-            pair = active_pairs[i % len(active_pairs)]
-            
-            print(f"\n[SESSION] 📍 Signal {i+1}/{MAX_SIGNALS_PER_SESSION} - {pair}")
-            print(f"[SESSION] ⏰ Analyse du marché en temps réel...")
-            
-            now_haiti = get_haiti_now()
-            entry_time_haiti = now_haiti + timedelta(minutes=DELAY_BEFORE_ENTRY_MIN)
-            
-            print(f"[SESSION] 🎯 Signal sera envoyé pour entrée à {entry_time_haiti.strftime('%H:%M')}")
-            
-            signal_id = None
-            for attempt in range(3):
-                print(f"[SESSION] 🔍 Tentative {attempt+1}/3 d'analyse...")
-                signal_id = await send_pre_signal(pair, entry_time_haiti, app, current_zone['display_name'])
-                if signal_id:
-                    signals_sent += 1
-                    print(f"[SESSION] ✅ Signal trouvé et envoyé !")
-                    break
-                
-                if attempt < 2:
-                    print(f"[SESSION] ⏳ Attente 20s avant nouvelle tentative...")
-                    await asyncio.sleep(20)
-            
-            if not signal_id:
-                print(f"[SESSION] ❌ Aucun signal après 3 tentatives")
-                print(f"[SESSION] 📊 Marché non favorable pour {pair}")
-                continue
-            
-            wait_to_entry = (entry_time_haiti - get_haiti_now()).total_seconds()
-            if wait_to_entry > 0:
-                print(f"[SESSION] ⏳ Attente entrée: {wait_to_entry/60:.1f} min")
-                await asyncio.sleep(wait_to_entry)
-            
-            verification_time_haiti = entry_time_haiti + timedelta(minutes=VERIFICATION_WAIT_MIN)
-            wait_to_verify = (verification_time_haiti - get_haiti_now()).total_seconds()
-            
-            if wait_to_verify > 0:
-                print(f"[SESSION] ⏳ Attente vérification M5: {wait_to_verify:.0f}s (1 bougie M5)")
-                await asyncio.sleep(wait_to_verify)
-            
-            print(f"[SESSION] 🔍 Vérification signal #{signal_id} (M5)...")
-            
-            try:
-                result = await auto_verifier.verify_single_signal(signal_id)
-                if result:
-                    print(f"[SESSION] ✅ Résultat: {result}")
-                else:
-                    print(f"[SESSION] ⚠️ Vérification en attente")
-            except Exception as e:
-                print(f"[SESSION] ❌ Erreur vérif: {e}")
-            
-            await send_verification_briefing(signal_id, app)
-            
-            print(f"[SESSION] ✅ Cycle {i+1} terminé")
-            
-            if i < MAX_SIGNALS_PER_SESSION - 1:
-                print(f"[SESSION] ⏸️ Pause 10 min avant prochain signal...")
-                await asyncio.sleep(60 * 10)
+            if attempt < 2:
+                print(f"[SESSION] ⏳ Attente 20s avant nouvelle tentative...")
+                await asyncio.sleep(20)
         
-        print(f"\n[SESSION] 🏁 FIN Kill Zone - {signals_sent} signaux envoyés")
-
-    except Exception as e:
-        print(f"[SESSION] ❌ Erreur: {e}")
-        import traceback
-        traceback.print_exc()
-    finally:
-        signal_queue_running = False
-
-async def start_kill_zone_session(app):
-    now_utc = get_utc_now()
-    current_zone = get_current_kill_zone()
+        if not signal_sent:
+            print(f"[SESSION] ⚠️ Signal {i+1} non envoyé (marché non favorable)")
+        
+        # Attendre intervalle avant prochain signal (sauf pour le dernier)
+        if i < session['signals_count'] - 1:
+            wait_time = session['interval_minutes'] * 60
+            print(f"[SESSION] ⏸️ Pause {session['interval_minutes']}min avant prochain signal...")
+            await asyncio.sleep(wait_time)
     
-    print(f"\n[SCHEDULER] Déclenchement kill zone à {now_utc.strftime('%H:%M')} UTC")
-    
-    if now_utc.weekday() > 4:
-        print("[SCHEDULER] 🏖️ Week-end")
-        return
-    
-    if not is_forex_open():
-        print("[SCHEDULER] 🏖️ Marché fermé")
-        return
-    
-    if not current_zone:
-        print("[SCHEDULER] ⏸️ Pas de kill zone active")
-        return
-    
-    print(f"[SCHEDULER] 🎯 Kill Zone: {current_zone['display_name']} (Priorité: {current_zone['priority']}/5)")
-
-    asyncio.create_task(process_signal_queue(app))
+    signals_sent = len(active_sessions.get(session['name'], []))
+    print(f"\n[SESSION] 🏁 FIN - {session['name']}")
+    print(f"[SESSION] 📊 {signals_sent}/{session['signals_count']} signaux envoyés")
 
 async def main():
     global auto_verifier
@@ -882,28 +888,30 @@ async def main():
     now_utc = get_utc_now()
 
     print("\n" + "="*60)
-    print("🤖 BOT DE TRADING M5 - KILL ZONES")
+    print("🤖 BOT DE TRADING M5 - SESSIONS PLANIFIÉES")
     print("="*60)
     print(f"🇭🇹 Haïti: {now_haiti.strftime('%H:%M:%S %Z')}")
     print(f"🌍 UTC: {now_utc.strftime('%H:%M:%S %Z')}")
     print(f"📈 Forex: {'🟢 OUVERT' if is_forex_open() else '🔴 FERMÉ'}")
     
-    current_zone = get_current_kill_zone()
-    if current_zone:
-        print(f"🎯 Kill Zone active: {current_zone['display_name']} (Priorité: {current_zone['priority']}/5)")
+    current_session = get_current_session()
+    if current_session:
+        print(f"✅ Session active: {current_session['name']} (Priorité: {current_session['priority']}/5)")
     else:
-        print(f"⏸️ Aucune kill zone active")
+        next_session = get_next_session()
+        next_time = f"{next_session['start_hour']:02d}h{next_session['start_minute']:02d}"
+        print(f"⏸️ Aucune session active")
+        print(f"⏰ Prochaine: {next_session['name']} à {next_time}")
     
-    print(f"\n🎯 Kill Zones configurées:")
-    print(f"• London/NY Overlap: 12h-14h UTC (Priorité 5)")
-    print(f"• London Open: 07h-10h UTC (Priorité 3)")
-    print(f"• NY Open: 13h-16h UTC (Priorité 3)")
-    print(f"• Asian Session: 00h-03h UTC (Priorité 1)")
+    print(f"\n📅 SESSIONS PLANIFIÉES:")
+    for session in SCHEDULED_SESSIONS:
+        start = f"{session['start_hour']:02d}h{session['start_minute']:02d}"
+        end = f"{session['end_hour']:02d}h{session['end_minute']:02d}"
+        print(f"• {session['name']}: {start}-{end} ({session['signals_count']} signaux)")
+    
     print(f"\n📍 Timeframe: M5 (5 minutes)")
-    print(f"⚡ Max 3 signaux par kill zone")
-    print(f"⏰ Signal: 5 min avant entrée")
-    print(f"🔍 Vérification: 5 min après entrée")
-    print(f"💪 Seuil ML: 65%")
+    print(f"💪 Total: 14 signaux par jour")
+    print(f"⏰ Intervalle: 30 minutes")
     print("="*60 + "\n")
 
     ensure_db()
@@ -915,7 +923,7 @@ async def main():
     app.add_handler(CommandHandler('stats', cmd_stats))
     app.add_handler(CommandHandler('status', cmd_status))
     app.add_handler(CommandHandler('rapport', cmd_rapport))
-    app.add_handler(CommandHandler('killzones', cmd_killzones))
+    app.add_handler(CommandHandler('sessions', cmd_sessions))
     app.add_handler(CommandHandler('mlstats', cmd_mlstats))
     app.add_handler(CommandHandler('retrain', cmd_retrain))
     app.add_handler(CommandHandler('backtest', cmd_backtest))
@@ -925,69 +933,46 @@ async def main():
 
     admin_ids = []
     
+    # Réentraînement ML nocturne
     sched.add_job(
         scheduled_retraining,
         'cron',
-        hour=2,
+        hour=1,
         minute=0,
         timezone=HAITI_TZ,
         args=[engine, app, admin_ids],
         id='ml_retraining'
     )
-
-    sched.add_job(
-        start_kill_zone_session,
-        'cron',
-        hour=7,
-        minute=0,
-        timezone=timezone.utc,
-        args=[app],
-        id='london_open'
-    )
     
-    sched.add_job(
-        start_kill_zone_session,
-        'cron',
-        hour=12,
-        minute=0,
-        timezone=timezone.utc,
-        args=[app],
-        id='london_ny_overlap'
-    )
+    # SESSIONS PLANIFIÉES
+    for session in SCHEDULED_SESSIONS:
+        job_id = f"session_{session['name'].lower().replace(' ', '_').replace('/', '_')}"
+        sched.add_job(
+            run_scheduled_session,
+            'cron',
+            hour=session['start_hour'],
+            minute=session['start_minute'],
+            timezone=HAITI_TZ,
+            args=[app, session],
+            id=job_id
+        )
+        print(f"✅ Session planifiée: {session['name']} à {session['start_hour']:02d}h{session['start_minute']:02d}")
     
-    sched.add_job(
-        start_kill_zone_session,
-        'cron',
-        hour=13,
-        minute=0,
-        timezone=timezone.utc,
-        args=[app],
-        id='ny_open'
-    )
-    
-    sched.add_job(
-        start_kill_zone_session,
-        'cron',
-        hour=0,
-        minute=0,
-        timezone=timezone.utc,
-        args=[app],
-        id='asian_session'
-    )
-    
+    # Rapport quotidien
     sched.add_job(
         send_daily_report,
         'cron',
-        hour=18,
+        hour=22,
         minute=0,
         timezone=HAITI_TZ,
         args=[app],
         id='daily_report'
     )
 
-    if current_zone and now_utc.weekday() <= 4 and not signal_queue_running and is_forex_open():
-        print(f"🚀 Démarrage immédiat - Kill Zone: {current_zone['display_name']}")
-        asyncio.create_task(process_signal_queue(app))
+    # Si session active au démarrage, la lancer
+    if current_session and is_forex_open():
+        print(f"\n🚀 Démarrage immédiat - Session: {current_session['name']}")
+        asyncio.create_task(run_scheduled_session(app, current_session))
 
     await app.initialize()
     await app.start()
