@@ -1,7 +1,6 @@
 """
-Bot de trading M5 avec Sessions Planifiées
-Evening Session: Signaux toutes les 10 minutes jusqu'à 02h00
-+ Vérification automatique toutes les 15 minutes
+Bot de trading M5 - Version Finale
+Evening Session Intensive + Vérification Auto + Briefings Auto
 """
 
 import os, json, asyncio
@@ -17,13 +16,13 @@ from config import *
 from utils import compute_indicators, rule_signal_ultra_strict
 from ml_predictor import MLSignalPredictor
 from auto_verifier import AutoResultVerifier
-from ml_continuous_learning import ContinuousLearning, scheduled_retraining
+from ml_continuous_learning import ContinuousLearning
 from backtester import BacktesterM5
 
 # Configuration
 HAITI_TZ = ZoneInfo("America/Port-au-Prince")
 
-# SESSIONS PLANIFIÉES (en heure Haïti)
+# SESSIONS
 SCHEDULED_SESSIONS = [
     {
         'name': 'London Kill Zone',
@@ -59,16 +58,16 @@ SCHEDULED_SESSIONS = [
         'name': 'Evening Session',
         'start_hour': 18,
         'start_minute': 0,
-        'end_hour': 2,  # Jusqu'à 02h00 (prochaine session London)
+        'end_hour': 2,
         'end_minute': 0,
-        'signals_count': -1,  # Illimité (jusqu'à fin session)
-        'interval_minutes': 10,  # Toutes les 10 minutes
+        'signals_count': -1,
+        'interval_minutes': 10,
         'priority': 2,
-        'continuous': True  # Flag pour session continue
+        'continuous': True
     }
 ]
 
-# Paramètres M5
+# Paramètres
 TIMEFRAME_M5 = "5min"
 DELAY_BEFORE_ENTRY_MIN = 5
 VERIFICATION_WAIT_MIN = 5
@@ -79,7 +78,8 @@ sched = AsyncIOScheduler(timezone=HAITI_TZ)
 ml_predictor = MLSignalPredictor()
 auto_verifier = None
 active_sessions = {}
-signal_verification_queue = []
+session_running = {}
+pending_verifications = []
 
 BEST_PARAMS = {}
 if os.path.exists(BEST_PARAMS_FILE):
@@ -99,7 +99,6 @@ def get_utc_now():
     return datetime.now(timezone.utc)
 
 def is_forex_open():
-    """Vérifie si le marché Forex est ouvert"""
     now_utc = get_utc_now()
     weekday = now_utc.weekday()
     hour = now_utc.hour
@@ -114,7 +113,6 @@ def is_forex_open():
     return True
 
 def get_current_session():
-    """Retourne la session active actuellement (basée sur heure Haïti)"""
     now_haiti = get_haiti_now()
     current_time = now_haiti.hour * 60 + now_haiti.minute
     
@@ -122,9 +120,7 @@ def get_current_session():
         start_time = session['start_hour'] * 60 + session['start_minute']
         end_time = session['end_hour'] * 60 + session['end_minute']
         
-        # Gérer Evening Session qui traverse minuit
         if session.get('continuous') and session['end_hour'] < session['start_hour']:
-            # Session traverse minuit (ex: 18h -> 02h)
             if current_time >= start_time or current_time < end_time:
                 return session
         else:
@@ -134,7 +130,6 @@ def get_current_session():
     return None
 
 def get_next_session():
-    """Retourne la prochaine session à venir"""
     now_haiti = get_haiti_now()
     current_time = now_haiti.hour * 60 + now_haiti.minute
     
@@ -252,6 +247,8 @@ def ensure_db():
     except Exception as e:
         print(f"⚠️ Erreur DB: {e}")
 
+# ===== COMMANDES TELEGRAM =====
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     username = update.effective_user.username or "Unknown"
@@ -260,7 +257,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             existing = conn.execute(text("SELECT user_id FROM subscribers WHERE user_id = :uid"),
             {"uid": user_id}).fetchone()
             if existing:
-                await update.message.reply_text("✅ Vous êtes déjà abonné aux signaux !")
+                await update.message.reply_text("✅ Vous êtes déjà abonné !")
             else:
                 conn.execute(text("INSERT INTO subscribers (user_id, username) VALUES (:uid, :uname)"),
                 {"uid": user_id, "uname": username})
@@ -269,97 +266,72 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 next_time = f"{next_session['start_hour']:02d}h{next_session['start_minute']:02d}"
                 
                 await update.message.reply_text(
-                    f"✅ Bienvenue au Bot Trading M5 - Sessions Planifiées !\n\n"
-                    f"📅 **SESSIONS QUOTIDIENNES:**\n\n"
-                    f"🌅 **02h-05h** (London Kill Zone)\n"
-                    f"   • 3 signaux à 30 min d'intervalle\n"
-                    f"   • Priorité: 3/5\n\n"
-                    f"🔥 **09h-11h** (London/NY Overlap)\n"
-                    f"   • 4 signaux à 30 min d'intervalle\n"
-                    f"   • Priorité: 5/5 ⭐\n\n"
-                    f"📈 **14h-17h** (NY Session)\n"
-                    f"   • 4 signaux à 30 min d'intervalle\n"
-                    f"   • Priorité: 3/5\n\n"
-                    f"🌆 **18h-02h** (Evening Session) 🔥\n"
-                    f"   • Signaux toutes les 10 minutes\n"
-                    f"   • Session intensive jusqu'à 02h\n"
-                    f"   • Priorité: 2/5\n\n"
-                    f"📍 Timeframe: M5 (5 minutes)\n"
-                    f"💪 Total: 40-50 signaux par jour\n"
-                    f"🔍 Vérification auto toutes les 15 min\n"
-                    f"⏰ Prochaine session: {next_session['name']} à {next_time}\n\n"
-                    f"📋 Tapez /menu pour toutes les commandes"
+                    f"✅ Bienvenue au Bot Trading M5 !\n\n"
+                    f"📅 **SESSIONS:**\n\n"
+                    f"🌅 02h-05h London Kill Zone\n"
+                    f"🔥 09h-11h London/NY Overlap\n"
+                    f"📈 14h-17h NY Session\n"
+                    f"🌆 18h-02h Evening Intensive\n\n"
+                    f"📍 M5 | 40-50 signaux/jour\n"
+                    f"🔍 Vérif + Briefings auto\n\n"
+                    f"⏰ Prochaine: {next_session['name']} à {next_time}\n\n"
+                    f"📋 /menu pour commandes"
                 )
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {e}")
 
 async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     menu_text = (
-        "📋 **MENU DES COMMANDES**\n"
+        "📋 **MENU**\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "📊 **Statistiques & Info:**\n"
-        "• /stats - Voir les statistiques générales\n"
-        "• /status - État actuel du bot\n"
-        "• /rapport - Rapport du jour en cours\n"
-        "• /sessions - Planning des sessions\n\n"
-        "🤖 **Machine Learning:**\n"
-        "• /mlstats - Statistiques ML\n"
-        "• /retrain - Réentraîner le modèle ML\n\n"
-        "🔬 **Backtesting:**\n"
-        "• /backtest - Lancer un backtest M5\n"
-        "• /backtest <paire> - Backtest sur une paire\n\n"
-        "🔧 **Contrôles:**\n"
-        "• /testsignal - Forcer un signal de test\n"
-        "• /verify - Forcer vérification signaux\n"
-        "• /menu - Afficher ce menu\n\n"
+        "📊 **Info:**\n"
+        "• /stats - Statistiques\n"
+        "• /status - État bot\n"
+        "• /rapport - Rapport jour\n"
+        "• /sessions - Planning\n\n"
+        "🤖 **ML:**\n"
+        "• /mlstats - Stats ML\n"
+        "• /retrain - Réentraîner\n\n"
+        "🔬 **Tests:**\n"
+        "• /backtest - Backtest M5\n"
+        "• /testsignal - Test signal\n"
+        "• /verify - Vérifier signaux\n"
+        "• /forcesession - Force session\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        f"🎯 Timeframe: M5\n"
-        f"💪 40-50 signaux/jour\n"
-        f"🔍 Vérif auto: 15 min"
+        f"🎯 M5 | Briefings auto"
     )
     await update.message.reply_text(menu_text)
 
 async def cmd_sessions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now_haiti = get_haiti_now()
     current_session = get_current_session()
-    next_session = get_next_session()
     
-    msg = "📅 **PLANNING DES SESSIONS**\n"
-    msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
-    msg += f"🕐 Heure actuelle: {now_haiti.strftime('%H:%M')} (Haïti)\n\n"
+    msg = "📅 **PLANNING**\n━━━━━━━━━━━━━━━━━━━━\n\n"
+    msg += f"🕐 {now_haiti.strftime('%H:%M')} (Haïti)\n\n"
     
     if current_session:
-        msg += f"✅ **Session active:** {current_session['name']}\n"
+        is_running = session_running.get(current_session['name'], False)
+        msg += f"✅ **Active:** {current_session['name']}\n"
         msg += f"🔥 Priorité: {current_session['priority']}/5\n"
+        msg += f"⚙️ État: {'🟢 Running' if is_running else '⚠️ Stopped'}\n"
         if current_session.get('continuous'):
-            msg += f"⚡ Mode intensif: Signal toutes les {current_session['interval_minutes']}min\n\n"
+            msg += f"⚡ Intensif (10min)\n\n"
         else:
-            msg += f"⚡ Signaux restants: À venir\n\n"
+            msg += f"⚡ {current_session['signals_count']} signaux\n\n"
     else:
-        msg += "⏸️ Aucune session active\n\n"
+        msg += "⏸️ Aucune session\n\n"
     
-    msg += "📋 **Planning quotidien:**\n\n"
-    
+    msg += "📋 **Planning:**\n\n"
     for session in SCHEDULED_SESSIONS:
         start = f"{session['start_hour']:02d}h{session['start_minute']:02d}"
         end = f"{session['end_hour']:02d}h{session['end_minute']:02d}"
-        priority_stars = "⭐" * session['priority']
-        
         msg += f"**{session['name']}** ({start}-{end})\n"
         if session.get('continuous'):
-            msg += f"   • Mode intensif: Signal toutes les {session['interval_minutes']}min\n"
-            msg += f"   • Durée: 8h continues\n"
+            msg += f"   Intensif 10min\n\n"
         else:
-            msg += f"   • {session['signals_count']} signaux (intervalle: {session['interval_minutes']}min)\n"
-        msg += f"   • Priorité: {priority_stars}\n\n"
+            msg += f"   {session['signals_count']} signaux\n\n"
     
-    if next_session and not current_session:
-        next_time = f"{next_session['start_hour']:02d}h{next_session['start_minute']:02d}"
-        msg += f"⏰ Prochaine: {next_session['name']} à {next_time}\n\n"
-    
-    msg += "━━━━━━━━━━━━━━━━━━━━\n"
-    msg += "💪 Total: 40-50 signaux par jour\n"
-    msg += "🔍 Vérification auto: toutes les 15 min"
+    msg += "━━━━━━━━━━━━━━━━━━━━\n💪 40-50 signaux/jour"
     
     await update.message.reply_text(msg)
 
@@ -376,16 +348,14 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         winrate = (wins/verified*100) if verified > 0 else 0
 
         msg = f"📊 **Statistiques**\n\n"
-        msg += f"Total signaux: {total}\n"
+        msg += f"Total: {total}\n"
         msg += f"Vérifiés: {verified}\n"
-        msg += f"✅ Réussis: {wins}\n"
-        msg += f"❌ Échoués: {losses}\n"
+        msg += f"✅ Wins: {wins}\n"
+        msg += f"❌ Losses: {losses}\n"
         msg += f"⏳ En attente: {pending}\n"
         msg += f"📈 Win rate: {winrate:.1f}%\n"
         msg += f"👥 Abonnés: {subs}\n\n"
-        msg += f"📍 Timeframe: M5\n"
-        msg += f"💪 40-50 signaux/jour planifiés\n"
-        msg += f"🔍 Vérif auto: 15 min"
+        msg += f"📍 M5 | Briefings auto"
         
         await update.message.reply_text(msg)
 
@@ -398,51 +368,75 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         now_utc = get_utc_now()
         forex_open = is_forex_open()
         current_session = get_current_session()
-        next_session = get_next_session()
         
-        msg = f"🤖 **État du Bot**\n\n"
-        msg += f"🇭🇹 Haïti: {now_haiti.strftime('%a %H:%M:%S')}\n"
-        msg += f"🌍 UTC: {now_utc.strftime('%a %H:%M:%S')}\n"
+        msg = f"🤖 **État Bot**\n\n"
+        msg += f"🇭🇹 {now_haiti.strftime('%a %H:%M:%S')}\n"
+        msg += f"🌍 {now_utc.strftime('%a %H:%M:%S')}\n"
         msg += f"📈 Forex: {'🟢 OUVERT' if forex_open else '🔴 FERMÉ'}\n\n"
         
         if current_session:
-            msg += f"✅ **Session Active:** {current_session['name']}\n"
+            is_running = session_running.get(current_session['name'], False)
+            msg += f"✅ **Session:** {current_session['name']}\n"
             msg += f"🔥 Priorité: {current_session['priority']}/5\n"
+            msg += f"⚙️ État: {'🟢 Running' if is_running else '⚠️ Stopped'}\n"
             if current_session.get('continuous'):
-                msg += f"⚡ Mode: Intensif (toutes les {current_session['interval_minutes']}min)\n"
+                msg += f"⚡ Intensif (10min)\n\n"
             else:
-                msg += f"⚡ Signaux prévus: {current_session['signals_count']}\n"
-                msg += f"⏱️ Intervalle: {current_session['interval_minutes']} min\n"
-            msg += "\n"
+                msg += f"⚡ {current_session['signals_count']} signaux\n\n"
+            
+            # Suggérer /forcesession si stopped
+            if not is_running:
+                msg += "💡 Utilisez /forcesession pour lancer\n\n"
         else:
-            msg += f"⏸️ Aucune session active\n\n"
-            if next_session:
-                next_time = f"{next_session['start_hour']:02d}h{next_session['start_minute']:02d}"
-                msg += f"⏰ Prochaine: {next_session['name']} à {next_time}\n\n"
+            next_session = get_next_session()
+            next_time = f"{next_session['start_hour']:02d}h{next_session['start_minute']:02d}"
+            msg += f"⏸️ Aucune session\n"
+            msg += f"⏰ Prochaine: {next_session['name']} à {next_time}\n\n"
         
-        msg += f"📍 Timeframe: M5\n"
-        msg += f"💪 40-50 signaux/jour\n"
-        msg += f"🔍 Vérif auto: 15 min"
+        msg += f"📍 M5 | Briefings auto: 15min"
         
         await update.message.reply_text(msg)
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {e}")
 
 async def cmd_verify(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Commande pour forcer la vérification des signaux"""
     try:
-        msg = await update.message.reply_text("🔍 Vérification forcée des signaux en attente...")
+        msg = await update.message.reply_text("🔍 Vérification forcée...")
         
+        # Récupérer IDs avant vérif
+        with engine.connect() as conn:
+            pending_ids = [r[0] for r in conn.execute(
+                text("SELECT id FROM signals WHERE result IS NULL")
+            ).fetchall()]
+        
+        if not pending_ids:
+            await msg.edit_text("ℹ️ Aucun signal à vérifier")
+            return
+        
+        # Vérifier
         await auto_verifier.verify_pending_signals()
         
-        await msg.edit_text("✅ Vérification terminée ! Consultez /stats pour les résultats.")
+        # Envoyer briefings
+        app = context.application
+        with engine.connect() as conn:
+            verified = conn.execute(
+                text("SELECT id, result FROM signals WHERE id IN ({}) AND result IS NOT NULL".format(
+                    ','.join('?' * len(pending_ids))
+                )),
+                pending_ids
+            ).fetchall()
+        
+        for signal_id, result in verified:
+            await send_verification_briefing(signal_id, app)
+        
+        await msg.edit_text(f"✅ {len(verified)} signaux vérifiés et briefings envoyés ! /stats pour détails.")
         
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {e}")
 
 async def cmd_retrain(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        msg = await update.message.reply_text("🤖 Réentraînement en cours...")
+        msg = await update.message.reply_text("🤖 Réentraînement...")
         
         learner = ContinuousLearning(engine)
         result = learner.retrain_model(min_signals=30, min_accuracy_improvement=0.00)
@@ -450,7 +444,7 @@ async def cmd_retrain(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if result['success']:
             if result['accepted']:
                 response = (
-                    f"✅ **Modèle réentraîné avec succès**\n\n"
+                    f"✅ **Modèle réentraîné**\n\n"
                     f"📊 Signaux: {result['signals_count']}\n"
                     f"🎯 Accuracy: {result['accuracy']*100:.2f}%\n"
                     f"📈 Amélioration: {result['improvement']*100:+.2f}%"
@@ -460,8 +454,7 @@ async def cmd_retrain(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"⚠️ **Modèle rejeté**\n\n"
                     f"📊 Signaux: {result['signals_count']}\n"
                     f"🎯 Accuracy: {result['accuracy']*100:.2f}%\n"
-                    f"📉 Amélioration: {result['improvement']*100:+.2f}%\n"
-                    f"ℹ️ Amélioration trop faible"
+                    f"📉 Amélioration: {result['improvement']*100:+.2f}%"
                 )
         else:
             response = f"❌ Erreur: {result['reason']}"
@@ -477,22 +470,20 @@ async def cmd_mlstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         stats = learner.get_training_stats()
         
         msg = (
-            f"🤖 **Statistiques ML**\n"
+            f"🤖 **Stats ML**\n"
             f"━━━━━━━━━━━━━━━━━━━━\n\n"
             f"📊 Entraînements: {stats['total_trainings']}\n"
-            f"🎯 Meilleure accuracy: {stats['best_accuracy']*100:.2f}%\n"
-            f"📈 Signaux entraînés: {stats['total_signals']}\n"
-            f"📅 Dernier entraînement: {stats['last_training']}\n\n"
+            f"🎯 Best accuracy: {stats['best_accuracy']*100:.2f}%\n"
+            f"📈 Signaux: {stats['total_signals']}\n"
+            f"📅 Dernier: {stats['last_training']}\n"
         )
         
         if stats['recent_trainings']:
-            msg += "📋 **Derniers entraînements:**\n\n"
-            for t in reversed(stats['recent_trainings']):
+            msg += "\n📋 **Derniers:**\n\n"
+            for t in reversed(stats['recent_trainings'][-3:]):
                 date = datetime.fromisoformat(t['timestamp']).strftime('%d/%m %H:%M')
                 emoji = "✅" if t.get('accepted', False) else "⚠️"
                 msg += f"{emoji} {date} - {t['accuracy']*100:.1f}%\n"
-        
-        msg += "\n━━━━━━━━━━━━━━━━━━━━"
         
         await update.message.reply_text(msg)
         
@@ -501,7 +492,7 @@ async def cmd_mlstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_rapport(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        msg = await update.message.reply_text("📊 Génération du rapport...")
+        msg = await update.message.reply_text("📊 Génération...")
         
         now_haiti = get_haiti_now()
         start_haiti = now_haiti.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -535,15 +526,13 @@ async def cmd_rapport(update: Update, context: ContextTypes.DEFAULT_TYPE):
         winrate = (wins / verified * 100) if verified > 0 else 0
         
         report = (
-            f"📊 **RAPPORT DU JOUR**\n"
+            f"📊 **RAPPORT**\n"
             f"━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"📅 {now_haiti.strftime('%d/%m/%Y %H:%M')}\n\n"
-            f"📈 **PERFORMANCE**\n"
+            f"📅 {now_haiti.strftime('%d/%m/%Y')}\n\n"
             f"• Total: {total}\n"
-            f"• ✅ Gagnés: {wins}\n"
-            f"• ❌ Perdus: {losses}\n"
-            f"• 📊 Win rate: **{winrate:.1f}%**\n\n"
-            f"📍 40-50 signaux planifiés/jour\n\n"
+            f"• ✅ Wins: {wins}\n"
+            f"• ❌ Losses: {losses}\n"
+            f"• 📊 WR: **{winrate:.1f}%**\n\n"
             f"━━━━━━━━━━━━━━━━━━━━"
         )
         
@@ -554,34 +543,53 @@ async def cmd_rapport(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_test_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        msg = await update.message.reply_text("🚀 Test de signal...")
-        
         current_session = get_current_session()
         if not current_session:
             next_session = get_next_session()
             next_time = f"{next_session['start_hour']:02d}h{next_session['start_minute']:02d}"
-            await msg.edit_text(
-                f"⏸️ Aucune session active\n\n"
-                f"⏰ Prochaine: {next_session['name']} à {next_time}"
+            await update.message.reply_text(
+                f"⏸️ Aucune session\n⏰ Prochaine: {next_session['name']} à {next_time}"
             )
             return
         
-        app = context.application
-        asyncio.create_task(send_single_signal(app, current_session))
+        msg = await update.message.reply_text(f"🚀 Test {current_session['name']}...")
         
-        await msg.edit_text(f"✅ Signal de test lancé pour {current_session['name']} !")
+        app = context.application
+        signal_id = await send_single_signal(app, current_session)
+        
+        if signal_id:
+            await msg.edit_text(f"✅ Signal #{signal_id} envoyé !")
+        else:
+            await msg.edit_text("⚠️ Aucun signal (conditions non remplies)")
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur: {e}")
+
+async def cmd_forcesession(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Force lancement session active"""
+    try:
+        current_session = get_current_session()
+        if not current_session:
+            await update.message.reply_text("⏸️ Aucune session à forcer")
+            return
+        
+        if session_running.get(current_session['name'], False):
+            await update.message.reply_text(f"⚠️ {current_session['name']} déjà en cours")
+            return
+        
+        msg = await update.message.reply_text(f"🚀 Force {current_session['name']}...")
+        
+        app = context.application
+        asyncio.create_task(run_scheduled_session(app, current_session))
+        
+        await msg.edit_text(f"✅ {current_session['name']} lancée !")
         
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {e}")
 
 async def cmd_backtest(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Lance un backtest M5 et envoie les résultats"""
     try:
-        msg = await update.message.reply_text(
-            "🔬 **Lancement du backtest M5**\n\n"
-            "⏳ Analyse en cours...\n"
-            "Cela peut prendre 1-2 minutes."
-        )
+        msg = await update.message.reply_text("🔬 Backtest...\n⏳ 1-2 min...")
         
         pairs_to_test = PAIRS[:3]
         
@@ -590,49 +598,38 @@ async def cmd_backtest(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if requested_pair in PAIRS:
                 pairs_to_test = [requested_pair]
             else:
-                await msg.edit_text(
-                    f"❌ Paire non reconnue: {requested_pair}\n\n"
-                    f"Paires disponibles:\n" + "\n".join(f"• {p}" for p in PAIRS[:5])
-                )
+                await msg.edit_text(f"❌ Paire inconnue: {requested_pair}")
                 return
         
         backtester = BacktesterM5(confidence_threshold=CONFIDENCE_THRESHOLD)
-        
-        print(f"\n[BACKTEST] Lancement pour {len(pairs_to_test)} paire(s)")
-        
-        results = backtester.run_full_backtest(
-            pairs=pairs_to_test,
-            outputsize=3000
-        )
-        
+        results = backtester.run_full_backtest(pairs=pairs_to_test, outputsize=3000)
         result_msg = backtester.format_results_for_telegram(results)
         
         await msg.edit_text(result_msg)
         
-        print(f"[BACKTEST] ✅ Résultats envoyés")
-        
     except Exception as e:
-        error_msg = f"❌ **Erreur backtest**\n\n{str(e)[:200]}"
-        await update.message.reply_text(error_msg)
-        print(f"[BACKTEST] ❌ Erreur: {e}")
-        import traceback
-        traceback.print_exc()
+        await update.message.reply_text(f"❌ Erreur: {str(e)[:200]}")
+
+# ===== FONCTIONS SIGNAL =====
 
 async def send_single_signal(app, session):
-    """Envoie un signal unique pour une session"""
+    """Envoie signal avec debug"""
     try:
         if not is_forex_open():
             print("[SIGNAL] 🏖️ Marché fermé")
             return None
         
         now_haiti = get_haiti_now()
-        print(f"\n[SIGNAL] 📤 Session: {session['name']} - {now_haiti.strftime('%H:%M:%S')}")
+        print(f"\n[SIGNAL] 📤 {session['name']} - {now_haiti.strftime('%H:%M:%S')}")
         
-        # Rotation des paires
+        # Rotation paires
         active_pairs = PAIRS[:3]
         session_signals = active_sessions.get(session['name'], [])
         pair = active_pairs[len(session_signals) % len(active_pairs)]
         
+        print(f"[SIGNAL] 🔍 {pair}...")
+        
+        # Données
         params = BEST_PARAMS.get(pair, {})
         df = get_cached_ohlc(pair, TIMEFRAME_M5, outputsize=400)
         
@@ -640,27 +637,36 @@ async def send_single_signal(app, session):
             print("[SIGNAL] ❌ Pas de données")
             return None
         
+        print(f"[SIGNAL] ✅ {len(df)} bougies")
+        
+        # Indicateurs
         df = compute_indicators(df, ema_fast=params.get('ema_fast',8),
                                 ema_slow=params.get('ema_slow',21),
                                 rsi_len=params.get('rsi',14),
                                 bb_len=params.get('bb',20))
         
-        # Passer la priorité de session à la stratégie
+        # Stratégie
         base_signal = rule_signal_ultra_strict(df, session_priority=session['priority'])
         
         if not base_signal:
-            print("[SIGNAL] ⏭️ Pas de signal (stratégie)")
+            print("[SIGNAL] ⏭️ Rejeté (stratégie)")
+            last = df.iloc[-1]
+            print(f"[DEBUG] ADX:{last.get('adx',0):.1f} RSI:{last.get('rsi',0):.1f}")
             return None
         
+        print(f"[SIGNAL] ✅ Stratégie: {base_signal}")
+        
+        # ML
         ml_signal, ml_conf = ml_predictor.predict_signal(df, base_signal)
         if ml_signal is None or ml_conf < CONFIDENCE_THRESHOLD:
-            print(f"[SIGNAL] ❌ Rejeté par ML ({ml_conf:.1%})")
+            print(f"[SIGNAL] ❌ ML ({ml_conf:.1%})")
             return None
         
+        print(f"[SIGNAL] ✅ ML: {ml_signal} ({ml_conf:.1%})")
+        
+        # Persister
         entry_time_haiti = now_haiti + timedelta(minutes=DELAY_BEFORE_ENTRY_MIN)
         entry_time_utc = entry_time_haiti.astimezone(timezone.utc)
-        
-        print(f"[SIGNAL] 📤 Signal trouvé ! Entrée: {entry_time_haiti.strftime('%H:%M')} (dans {DELAY_BEFORE_ENTRY_MIN} min)")
         
         payload = {
             'pair': pair, 'direction': ml_signal, 
@@ -682,6 +688,7 @@ async def send_single_signal(app, session):
         except:
             pass
         
+        # Envoyer abonnés
         with engine.connect() as conn:
             user_ids = [r[0] for r in conn.execute(text("SELECT user_id FROM subscribers")).fetchall()]
         
@@ -691,31 +698,34 @@ async def send_single_signal(app, session):
             f"🎯 SIGNAL — {pair}\n\n"
             f"📅 Session: {session['name']}\n"
             f"🔥 Priorité: {session['priority']}/5\n"
-            f"🕐 Entrée: {entry_time_haiti.strftime('%H:%M')} (Haïti)\n"
-            f"📍 Timeframe: M5 (5 minutes)\n\n"
+            f"🕐 Entrée: {entry_time_haiti.strftime('%H:%M')}\n"
+            f"📍 Timeframe: M5\n\n"
             f"📈 Direction: **{direction_text}**\n"
             f"💪 Confiance: **{int(ml_conf*100)}%**\n\n"
-            f"🔍 Vérification: 5 min après entrée"
+            f"🔍 Briefing auto dans 10-15 min"
         )
         
+        sent = 0
         for uid in user_ids:
             try:
                 await app.bot.send_message(chat_id=uid, text=msg)
+                sent += 1
             except Exception as e:
-                print(f"[SIGNAL] ❌ Envoi à {uid}: {e}")
+                print(f"[SIGNAL] ❌ {uid}: {e}")
         
-        print(f"[SIGNAL] ✅ Envoyé ({ml_signal}, {ml_conf:.1%})")
+        print(f"[SIGNAL] ✅ Envoyé à {sent} abonnés")
         
         # Tracking
         if session['name'] not in active_sessions:
             active_sessions[session['name']] = []
         active_sessions[session['name']].append(signal_id)
         
-        # Ajouter à la queue de vérification (ne pas bloquer)
-        verification_time = entry_time_utc + timedelta(minutes=VERIFICATION_WAIT_MIN)
-        signal_verification_queue.append({
+        # Ajouter à queue vérif avec timestamp
+        verification_time_utc = entry_time_utc + timedelta(minutes=VERIFICATION_WAIT_MIN)
+        pending_verifications.append({
             'signal_id': signal_id,
-            'verification_time': verification_time
+            'verification_time': verification_time_utc,
+            'app': app
         })
         
         return signal_id
@@ -727,6 +737,7 @@ async def send_single_signal(app, session):
         return None
 
 async def send_verification_briefing(signal_id, app):
+    """Envoie briefing pour un signal vérifié"""
     try:
         with engine.connect() as conn:
             signal = conn.execute(
@@ -747,122 +758,153 @@ async def send_verification_briefing(signal_id, app):
         direction_emoji = "📈" if direction == "CALL" else "📉"
         
         briefing = (
-            f"{emoji} **BRIEFING SIGNAL**\n"
+            f"{emoji} **BRIEFING**\n"
             f"━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"{direction_emoji} Paire: **{pair}**\n"
-            f"📊 Direction: **{direction}**\n"
-            f"💪 Confiance: {int(confidence*100)}%\n"
+            f"{direction_emoji} {pair}\n"
+            f"📊 {direction}\n"
+            f"💪 {int(confidence*100)}%\n"
         )
         
         if kill_zone:
-            briefing += f"📅 Session: {kill_zone}\n"
+            briefing += f"📅 {kill_zone}\n"
         
-        briefing += f"\n🎲 Résultat: **{status}**\n\n"
-        briefing += f"━━━━━━━━━━━━━━━━━━━━"
+        briefing += f"\n🎲 **{status}**\n\n━━━━━━━━━━━━━━━━━━━━"
         
+        sent = 0
         for uid in user_ids:
             try:
                 await app.bot.send_message(chat_id=uid, text=briefing)
+                sent += 1
             except:
                 pass
         
-        print(f"[BRIEFING] ✅ Envoyé: {status}")
+        print(f"[BRIEFING] ✅ #{signal_id} {status} → {sent} abonnés")
 
     except Exception as e:
-        print(f"[BRIEFING] ❌ Erreur: {e}")
+        print(f"[BRIEFING] ❌ #{signal_id}: {e}")
 
 async def run_scheduled_session(app, session):
-    """Exécute une session planifiée"""
+    """Exécute session planifiée"""
     if not is_forex_open():
-        print(f"[SESSION] 🏖️ Marché fermé - {session['name']}")
+        print(f"[SESSION] 🏖️ Fermé - {session['name']}")
         return
+    
+    if session_running.get(session['name'], False):
+        print(f"[SESSION] ⚠️ {session['name']} déjà running")
+        return
+    
+    session_running[session['name']] = True
     
     print(f"\n[SESSION] 🚀 DÉBUT - {session['name']}")
     print(f"[SESSION] 🔥 Priorité: {session['priority']}/5")
     
-    # Réinitialiser tracking
     active_sessions[session['name']] = []
     
-    if session.get('continuous'):
-        # Mode continu (Evening Session)
-        print(f"[SESSION] ⚡ Mode INTENSIF - Signaux toutes les {session['interval_minutes']}min jusqu'à {session['end_hour']:02d}h")
-        
-        signal_count = 0
-        while True:
-            # Vérifier si on est toujours dans la session
-            current_session = get_current_session()
-            if not current_session or current_session['name'] != session['name']:
-                print(f"[SESSION] ⏰ Fin de session atteinte")
-                break
+    try:
+        if session.get('continuous'):
+            # Continu
+            print(f"[SESSION] ⚡ INTENSIF - 10min → {session['end_hour']:02d}h")
             
-            if not is_forex_open():
-                print(f"[SESSION] 🏖️ Marché fermé - Arrêt")
-                break
-            
-            signal_count += 1
-            print(f"\n[SESSION] 📍 Signal #{signal_count}")
-            
-            # Tenter d'envoyer signal (1 seule tentative en mode intensif)
-            signal_id = await send_single_signal(app, session)
-            
-            if signal_id:
-                print(f"[SESSION] ✅ Signal #{signal_count} envoyé")
-            else:
-                print(f"[SESSION] ⏭️ Signal #{signal_count} non généré (conditions non remplies)")
-            
-            # Attendre intervalle avant prochain signal
-            print(f"[SESSION] ⏸️ Pause {session['interval_minutes']}min avant prochain signal...")
-            await asyncio.sleep(session['interval_minutes'] * 60)
-        
-        signals_sent = len(active_sessions.get(session['name'], []))
-        print(f"\n[SESSION] 🏁 FIN - {session['name']}")
-        print(f"[SESSION] 📊 {signals_sent} signaux envoyés (mode intensif)")
-        
-    else:
-        # Mode standard (sessions à nombre fixe)
-        print(f"[SESSION] ⚡ {session['signals_count']} signaux à {session['interval_minutes']}min d'intervalle")
-        
-        for i in range(session['signals_count']):
-            if not is_forex_open():
-                print(f"[SESSION] 🏖️ Marché fermé - Arrêt session")
-                break
-            
-            print(f"\n[SESSION] 📍 Signal {i+1}/{session['signals_count']}")
-            
-            # Tenter d'envoyer signal (max 3 tentatives)
-            signal_sent = False
-            for attempt in range(3):
-                signal_id = await send_single_signal(app, session)
-                if signal_id:
-                    signal_sent = True
+            signal_count = 0
+            while True:
+                current_session = get_current_session()
+                if not current_session or current_session['name'] != session['name']:
+                    print(f"[SESSION] ⏰ Fin")
                     break
                 
-                if attempt < 2:
-                    print(f"[SESSION] ⏳ Attente 20s avant nouvelle tentative...")
-                    await asyncio.sleep(20)
+                if not is_forex_open():
+                    print(f"[SESSION] 🏖️ Fermé")
+                    break
+                
+                signal_count += 1
+                print(f"\n[SESSION] 📍 Signal #{signal_count}")
+                
+                signal_id = await send_single_signal(app, session)
+                
+                if signal_id:
+                    print(f"[SESSION] ✅ #{signal_count} envoyé")
+                else:
+                    print(f"[SESSION] ⏭️ #{signal_count} non généré")
+                
+                print(f"[SESSION] ⏸️ Pause 10min...")
+                await asyncio.sleep(600)
             
-            if not signal_sent:
-                print(f"[SESSION] ⚠️ Signal {i+1} non envoyé (marché non favorable)")
+            sent = len(active_sessions.get(session['name'], []))
+            print(f"\n[SESSION] 🏁 FIN - {sent} signaux")
             
-            # Attendre intervalle avant prochain signal (sauf pour le dernier)
-            if i < session['signals_count'] - 1:
-                wait_time = session['interval_minutes'] * 60
-                print(f"[SESSION] ⏸️ Pause {session['interval_minutes']}min avant prochain signal...")
-                await asyncio.sleep(wait_time)
-        
-        signals_sent = len(active_sessions.get(session['name'], []))
-        print(f"\n[SESSION] 🏁 FIN - {session['name']}")
-        print(f"[SESSION] 📊 {signals_sent}/{session['signals_count']} signaux envoyés")
+        else:
+            # Standard
+            print(f"[SESSION] ⚡ {session['signals_count']} signaux")
+            
+            for i in range(session['signals_count']):
+                if not is_forex_open():
+                    break
+                
+                print(f"\n[SESSION] 📍 {i+1}/{session['signals_count']}")
+                
+                signal_sent = False
+                for attempt in range(3):
+                    signal_id = await send_single_signal(app, session)
+                    if signal_id:
+                        signal_sent = True
+                        break
+                    
+                    if attempt < 2:
+                        await asyncio.sleep(20)
+                
+                if not signal_sent:
+                    print(f"[SESSION] ⚠️ #{i+1} non envoyé")
+                
+                if i < session['signals_count'] - 1:
+                    await asyncio.sleep(session['interval_minutes'] * 60)
+            
+            sent = len(active_sessions.get(session['name'], []))
+            print(f"\n[SESSION] 🏁 FIN - {sent}/{session['signals_count']}")
+    
+    finally:
+        session_running[session['name']] = False
 
 async def automated_verification_check(app):
-    """Vérification automatique programmée toutes les 15 minutes"""
+    """Vérif auto + briefings"""
     try:
-        print("\n[AUTO-VERIF] 🔍 Vérification automatique programmée...")
+        print("\n[AUTO-VERIF] 🔍 Programmée...")
         
-        # Appeler le vérificateur automatique
+        # IDs avant vérif
+        with engine.connect() as conn:
+            pending_before = conn.execute(
+                text("SELECT id FROM signals WHERE result IS NULL")
+            ).fetchall()
+            pending_ids = [row[0] for row in pending_before]
+        
+        if not pending_ids:
+            print(f"[AUTO-VERIF] ℹ️ Aucun signal à vérifier")
+            return
+        
+        print(f"[AUTO-VERIF] 📊 {len(pending_ids)} à vérifier")
+        
+        # Vérifier
         await auto_verifier.verify_pending_signals()
         
-        print("[AUTO-VERIF] ✅ Vérification terminée")
+        # IDs vérifiés
+        with engine.connect() as conn:
+            verified = conn.execute(
+                text("SELECT id, result FROM signals WHERE id IN ({}) AND result IS NOT NULL".format(
+                    ','.join('?' * len(pending_ids))
+                )),
+                pending_ids
+            ).fetchall()
+        
+        print(f"[AUTO-VERIF] ✅ {len(verified)} vérifiés")
+        
+        # Briefings
+        for signal_id, result in verified:
+            try:
+                await send_verification_briefing(signal_id, app)
+            except Exception as e:
+                print(f"[AUTO-VERIF] ⚠️ Briefing #{signal_id}: {e}")
+        
+        print(f"[AUTO-VERIF] 📧 {len(verified)} briefings envoyés")
+        print("[AUTO-VERIF] ✅ Terminée")
         
     except Exception as e:
         print(f"[AUTO-VERIF] ❌ Erreur: {e}")
@@ -872,7 +914,7 @@ async def automated_verification_check(app):
 async def send_daily_report(app):
     """Rapport quotidien"""
     try:
-        print("\n[RAPPORT] 📊 Génération rapport du jour...")
+        print("\n[RAPPORT] 📊 Génération...")
         
         now_haiti = get_haiti_now()
         start_haiti = now_haiti.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -900,7 +942,7 @@ async def send_daily_report(app):
             user_ids = [r[0] for r in conn.execute(text("SELECT user_id FROM subscribers")).fetchall()]
         
         if not stats or stats[0] == 0:
-            print("[RAPPORT] ⚠️ Aucun signal aujourd'hui")
+            print("[RAPPORT] ⚠️ Aucun signal")
             return
         
         total, wins, losses = stats
@@ -910,16 +952,12 @@ async def send_daily_report(app):
         report = (
             f"📊 **RAPPORT QUOTIDIEN**\n"
             f"━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"📅 {now_haiti.strftime('%d/%m/%Y %H:%M')}\n\n"
-            f"📈 **PERFORMANCE**\n"
+            f"📅 {now_haiti.strftime('%d/%m/%Y')}\n\n"
             f"• Total: {total}\n"
-            f"• ✅ Gagnés: {wins}\n"
-            f"• ❌ Perdus: {losses}\n"
-            f"• 📊 Win rate: **{winrate:.1f}%**\n\n"
-            f"📍 40-50 signaux/jour planifiés\n"
-            f"🌆 Evening Session: Intensive\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"📅 Prochaine session: Demain 02h00"
+            f"• ✅ Wins: {wins}\n"
+            f"• ❌ Losses: {losses}\n"
+            f"• 📊 WR: **{winrate:.1f}%**\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━"
         )
         
         for uid in user_ids:
@@ -928,7 +966,7 @@ async def send_daily_report(app):
             except:
                 pass
         
-        print(f"[RAPPORT] ✅ Envoyé (Win rate: {winrate:.1f}%)")
+        print(f"[RAPPORT] ✅ Envoyé ({winrate:.1f}% WR)")
         
     except Exception as e:
         print(f"[RAPPORT] ❌ Erreur: {e}")
@@ -940,42 +978,35 @@ async def main():
     now_utc = get_utc_now()
 
     print("\n" + "="*60)
-    print("🤖 BOT DE TRADING M5 - EVENING SESSION INTENSIVE")
+    print("🤖 BOT M5 - VERSION FINALE")
     print("="*60)
-    print(f"🇭🇹 Haïti: {now_haiti.strftime('%H:%M:%S %Z')}")
-    print(f"🌍 UTC: {now_utc.strftime('%H:%M:%S %Z')}")
+    print(f"🇭🇹 {now_haiti.strftime('%H:%M:%S %Z')}")
+    print(f"🌍 {now_utc.strftime('%H:%M:%S %Z')}")
     print(f"📈 Forex: {'🟢 OUVERT' if is_forex_open() else '🔴 FERMÉ'}")
     
     current_session = get_current_session()
     if current_session:
-        print(f"✅ Session active: {current_session['name']} (Priorité: {current_session['priority']}/5)")
+        print(f"✅ Session: {current_session['name']} (P:{current_session['priority']}/5)")
         if current_session.get('continuous'):
-            print(f"🔥 Mode INTENSIF: Signal toutes les {current_session['interval_minutes']}min")
+            print(f"🔥 INTENSIF - 10min")
     else:
         next_session = get_next_session()
-        next_time = f"{next_session['start_hour']:02d}h{next_session['start_minute']:02d}"
-        print(f"⏸️ Aucune session active")
-        print(f"⏰ Prochaine: {next_session['name']} à {next_time}")
+        print(f"⏸️ Prochaine: {next_session['name']} à {next_session['start_hour']:02d}h")
     
-    print(f"\n📅 SESSIONS PLANIFIÉES:")
-    for session in SCHEDULED_SESSIONS:
-        start = f"{session['start_hour']:02d}h{session['start_minute']:02d}"
-        end = f"{session['end_hour']:02d}h{session['end_minute']:02d}"
-        if session.get('continuous'):
-            print(f"• 🔥 {session['name']}: {start}-{end} (INTENSIF - toutes les {session['interval_minutes']}min)")
-        else:
-            print(f"• {session['name']}: {start}-{end} ({session['signals_count']} signaux)")
+    print(f"\n📅 SESSIONS:")
+    for s in SCHEDULED_SESSIONS:
+        mode = "INTENSIF" if s.get('continuous') else f"{s['signals_count']} sig"
+        print(f"• {s['name']}: {s['start_hour']:02d}h ({mode})")
     
-    print(f"\n📍 Timeframe: M5 (5 minutes)")
-    print(f"💪 Total: 40-50 signaux par jour")
-    print(f"⏰ Intervalle Evening: 10 minutes")
-    print(f"🔍 Vérification auto: 15 minutes")
+    print(f"\n📍 M5 | Briefings auto: 15min")
     print("="*60 + "\n")
 
     ensure_db()
     auto_verifier = AutoResultVerifier(engine, TWELVEDATA_API_KEY)
 
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    
+    # Commandes
     app.add_handler(CommandHandler('start', cmd_start))
     app.add_handler(CommandHandler('menu', cmd_menu))
     app.add_handler(CommandHandler('stats', cmd_stats))
@@ -986,11 +1017,12 @@ async def main():
     app.add_handler(CommandHandler('mlstats', cmd_mlstats))
     app.add_handler(CommandHandler('rapport', cmd_rapport))
     app.add_handler(CommandHandler('testsignal', cmd_test_signal))
+    app.add_handler(CommandHandler('forcesession', cmd_forcesession))
     app.add_handler(CommandHandler('backtest', cmd_backtest))
 
     sched.start()
 
-    # SESSIONS PLANIFIÉES
+    # Sessions
     for session in SCHEDULED_SESSIONS:
         job_id = f"session_{session['name'].lower().replace(' ', '_').replace('/', '_')}"
         sched.add_job(
@@ -1002,20 +1034,20 @@ async def main():
             args=[app, session],
             id=job_id
         )
-        print(f"✅ Session planifiée: {session['name']} à {session['start_hour']:02d}h{session['start_minute']:02d}")
+        print(f"✅ Planifié: {session['name']} à {session['start_hour']:02d}h{session['start_minute']:02d}")
     
-    # VÉRIFICATION AUTOMATIQUE TOUTES LES 15 MINUTES
+    # Vérif auto
     sched.add_job(
         automated_verification_check,
         'cron',
-        minute='*/15',  # Toutes les 15 minutes
+        minute='*/15',
         timezone=HAITI_TZ,
         args=[app],
         id='auto_verification'
     )
-    print(f"✅ Vérification auto planifiée: Toutes les 15 minutes")
+    print(f"✅ Vérif + Briefings auto: 15min")
     
-    # Rapport quotidien
+    # Rapport
     sched.add_job(
         send_daily_report,
         'cron',
@@ -1026,9 +1058,9 @@ async def main():
         id='daily_report'
     )
 
-    # Si session active au démarrage, la lancer
+    # Lancement immédiat si session active
     if current_session and is_forex_open():
-        print(f"\n🚀 Démarrage immédiat - Session: {current_session['name']}")
+        print(f"\n🚀 LANCEMENT IMMÉDIAT - {current_session['name']}")
         asyncio.create_task(run_scheduled_session(app, current_session))
 
     await app.initialize()
