@@ -632,8 +632,8 @@ async def send_single_signal(app, session):
         # ===== VÉRIFIER SIGNAUX PRÉCÉDENTS AVANT NOUVEAU SIGNAL =====
         print("[SIGNAL] 🔍 Vérification signaux précédents...")
         try:
-            # Récupérer signaux en attente (plus vieux que 10 min)
-            verification_cutoff = now_haiti - timedelta(minutes=10)
+            # Récupérer signaux en attente (plus vieux que 7 min pour données fraîches TwelveData)
+            verification_cutoff = now_haiti - timedelta(minutes=7)
             verification_cutoff_utc = verification_cutoff.astimezone(timezone.utc)
             
             with engine.connect() as conn:
@@ -761,7 +761,7 @@ async def send_single_signal(app, session):
             f"📍 Timeframe: M5\n\n"
             f"📈 Direction: **{direction_text}**\n"
             f"💪 Confiance: **{int(ml_conf*100)}%**\n\n"
-            f"🔍 Briefing avant prochain signal"
+            f"🔍 Briefing après 6-7 min"
         )
         
         sent = 0
@@ -1158,16 +1158,16 @@ async def main():
         )
         print(f"✅ Planifié: {session['name']} à {session['start_hour']:02d}h{session['start_minute']:02d}")
     
-    # Vérif auto
+    # Vérif auto - TOUTES LES 7 MINUTES pour données fraîches TwelveData
     sched.add_job(
         automated_verification_check,
         'cron',
-        minute='*/15',
+        minute='*/7',
         timezone=HAITI_TZ,
         args=[app],
         id='auto_verification'
     )
-    print(f"✅ Vérif + Briefings auto: 15min")
+    print(f"✅ Vérif + Briefings auto: 7min")
     
     # Rapport
     sched.add_job(
