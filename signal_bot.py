@@ -297,7 +297,8 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /backtest - Backtest M5\n"
         "• /testsignal - Test signal\n"
         "• /verify - Vérifier signaux\n"
-        "• /forcesession - Force session\n\n"
+        "• /forcesession - Force session\n"
+        "• /cleanup - Nettoyer DB\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"🎯 M5 | Briefings auto"
     )
@@ -616,6 +617,36 @@ async def cmd_backtest(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {str(e)[:200]}")
+
+async def cmd_cleanup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Nettoie les anciens signaux en attente"""
+    try:
+        msg = await update.message.reply_text("🧹 Nettoyage en cours...")
+        
+        # Compter signaux en attente
+        with engine.connect() as conn:
+            pending_count = conn.execute(
+                text("SELECT COUNT(*) FROM signals WHERE result IS NULL")
+            ).scalar()
+        
+        if pending_count == 0:
+            await msg.edit_text("✅ Aucun signal à nettoyer !")
+            return
+        
+        # Marquer tous comme LOSE (anciens signaux invalides)
+        with engine.begin() as conn:
+            conn.execute(
+                text("UPDATE signals SET result = 'LOSE', reason = 'Nettoyage manuel' WHERE result IS NULL")
+            )
+        
+        await msg.edit_text(
+            f"✅ Nettoyage terminé !\n\n"
+            f"🧹 {pending_count} anciens signaux marqués comme LOSE\n"
+            f"📊 /stats pour voir résultat"
+        )
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur: {e}")
 
 # ===== FONCTIONS SIGNAL =====
 
@@ -1141,6 +1172,7 @@ async def main():
     app.add_handler(CommandHandler('testsignal', cmd_test_signal))
     app.add_handler(CommandHandler('forcesession', cmd_forcesession))
     app.add_handler(CommandHandler('backtest', cmd_backtest))
+    app.add_handler(CommandHandler('cleanup', cmd_cleanup))
 
     sched.start()
 
