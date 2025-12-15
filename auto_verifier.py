@@ -16,6 +16,11 @@ class AutoResultVerifier:
         self.default_timeframe = 5  # 5 minutes (M5)
         self.default_max_gales = 0
         self._session = requests.Session()
+        
+        # RATE LIMITING pour éviter dépassement API
+        self.api_calls_count = 0
+        self.api_calls_reset_time = datetime.now()
+        self.MAX_API_CALLS_PER_MINUTE = 6  # Limite sécuritaire (< 8 limite TwelveData)
 
     def set_bot(self, bot):
         """Configure le bot pour les notifications"""
@@ -27,6 +32,29 @@ class AutoResultVerifier:
         if chat_id not in self.admin_chat_ids:
             self.admin_chat_ids.append(chat_id)
             print(f"✅ Admin {chat_id} ajouté")
+
+    async def _wait_if_rate_limited(self):
+        """Attend si limite API atteinte"""
+        now = datetime.now()
+        
+        # Reset compteur toutes les minutes
+        if (now - self.api_calls_reset_time).total_seconds() >= 60:
+            self.api_calls_count = 0
+            self.api_calls_reset_time = now
+            print(f"   🔄 Reset compteur API")
+        
+        # Si limite atteinte, attendre
+        if self.api_calls_count >= self.MAX_API_CALLS_PER_MINUTE:
+            wait_time = 60 - (now - self.api_calls_reset_time).total_seconds()
+            if wait_time > 0:
+                print(f"   ⏳ Limite API atteinte ({self.api_calls_count} appels), attente {wait_time:.0f}s...")
+                await asyncio.sleep(wait_time + 1)
+                self.api_calls_count = 0
+                self.api_calls_reset_time = datetime.now()
+
+    def _increment_api_call(self):
+        """Incrémente compteur appels API"""
+        self.api_calls_count += 1
 
     def _is_weekend(self, timestamp):
         """Vérifie si le timestamp tombe le week-end (marché fermé)"""
@@ -140,7 +168,7 @@ class AutoResultVerifier:
                 SELECT id, pair, direction, ts_enter, confidence, kill_zone
                 FROM signals
                 WHERE result IS NULL
-                ORDER BY ts_enter DESC
+                ORDER BY ts_enter ASC
                 LIMIT 50
             """)
             
@@ -157,7 +185,20 @@ class AutoResultVerifier:
                     await self._send_no_pending_report()
                 return
             
-            print(f"📊 {len(pending)} signaux à vérifier")
+            # LIMITE API: Max 3 signaux par cycle pour éviter dépassement
+            # 3 signaux × 2 appels (open+close) = 6 appels < 8 limite TwelveData
+            MAX_VERIFY_PER_CYCLE = 3
+            
+            if len(pending) > MAX_VERIFY_PER_CYCLE:
+                print(f"⚠️ {len(pending)} signaux en attente")
+                print(f"📊 Vérification de {MAX_VERIFY_PER_CYCLE} les plus anciens (limite API)")
+                pending_to_verify = pending[:MAX_VERIFY_PER_CYCLE]
+                skipped_total = len(pending) - MAX_VERIFY_PER_CYCLE
+            else:
+                print(f"📊 {len(pending)} signaux à vérifier")
+                pending_to_verify = pending
+                skipped_total = 0
+            
             print("-"*60)
             
             results = []
@@ -165,7 +206,7 @@ class AutoResultVerifier:
             skipped_count = 0
             error_count = 0
             
-            for signal_row in pending:
+            for signal_row in pending_to_verify:
                 try:
                     signal_id = signal_row[0]
                     pair = signal_row[1]
@@ -209,7 +250,7 @@ class AutoResultVerifier:
                     
                     print(f"✅ Signal M5 prêt pour vérification")
                     
-                    # Vérifier le signal M5
+                    # Vérifier le signal M5 avec rate limiting
                     result, details = await self._verify_signal_m5(
                         signal_id, pair, direction, ts_enter
                     )
@@ -235,7 +276,8 @@ class AutoResultVerifier:
                         error_count += 1
                         print(f"⚠️  Impossible de vérifier #{signal_id}")
                     
-                    await asyncio.sleep(1.5)
+                    # Délai entre signaux pour respecter rate limit
+                    await asyncio.sleep(2)
                     
                 except Exception as e:
                     error_count += 1
@@ -244,12 +286,14 @@ class AutoResultVerifier:
                     traceback.print_exc()
             
             print("\n" + "-"*60)
-            print(f"📈 RÉSUMÉ: {verified_count} vérifiés, {skipped_count} en attente, {error_count} erreurs")
+            print(f"📈 RÉSUMÉ: {verified_count} vérifiés, {skipped_count + skipped_total} en attente, {error_count} erreurs")
+            if skipped_total > 0:
+                print(f"   ℹ️ {skipped_total} signaux reportés au prochain cycle (limite API)")
             print("="*60 + "\n")
             
             if self.bot and self.admin_chat_ids:
                 print(f"📤 Envoi rapport à {len(self.admin_chat_ids)} admin(s)")
-                await self._send_verification_report(results, skipped_count, error_count)
+                await self._send_verification_report(results, skipped_count + skipped_total, error_count)
         
         except Exception as e:
             print(f"❌ ERREUR GLOBALE: {e}")
@@ -362,7 +406,7 @@ class AutoResultVerifier:
                 print(f"   ⚠️  Prix d'entrée M5 non disponible")
                 return None, None
             
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(2)  # Délai entre appels API
             
             # Récupérer prix de sortie (fermeture de la bougie M5)
             exit_price = await self._get_price_at_time(pair, entry_candle_start, price_type='close')
@@ -416,6 +460,9 @@ class AutoResultVerifier:
         price_type: 'open' ou 'close'
         """
         try:
+            # Rate limiting
+            await self._wait_if_rate_limited()
+            
             if timestamp.tzinfo is None:
                 timestamp = timestamp.replace(tzinfo=timezone.utc)
 
@@ -446,15 +493,21 @@ class AutoResultVerifier:
                 'end_date': end_str
             }
             
-            print(f"   🔍 API M5: {pair} {price_type} à {ts_utc.strftime('%H:%M')} UTC")
+            print(f"   🔍 API M5: {pair} {price_type} à {ts_utc.strftime('%H:%M')} UTC (appel #{self.api_calls_count + 1})")
             
             resp = self._session.get(self.base_url, params=params, timeout=12)
+            self._increment_api_call()
+            
             resp.raise_for_status()
             data = resp.json()
             
             # Vérifier limite API
             if 'code' in data and data['code'] == 429:
                 print(f"   ⚠️  LIMITE API ATTEINTE")
+                # Attendre 1 minute et réessayer
+                await asyncio.sleep(60)
+                self.api_calls_count = 0
+                self.api_calls_reset_time = datetime.now()
                 return None
             
             if 'values' in data and len(data['values']) > 0:
