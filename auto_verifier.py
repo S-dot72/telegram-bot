@@ -4,6 +4,7 @@ from sqlalchemy import text
 import requests
 import pandas as pd
 import json
+from otc_provider import OTCDataProvider
 
 class AutoResultVerifier:
     def __init__(self, engine, twelvedata_api_key):
@@ -11,6 +12,7 @@ class AutoResultVerifier:
         self.api_key = twelvedata_api_key
         self.base_url = 'https://api.twelvedata.com/time_series'
         self._session = requests.Session()
+        self.otc_provider = OTCDataProvider(twelvedata_api_key)
         
         # Rate limiting
         self.api_calls_count = 0
@@ -124,14 +126,13 @@ class AutoResultVerifier:
             
             # Vérifier signal M1
             if is_otc:
-                print(f"⚠️ Mode OTC - Vérification limitée (pas d'API crypto)")
-                # En mode OTC, on ne peut pas vérifier via TwelveData
-                # On pourrait implémenter une vérification manuelle ou via autre API
-                result = None
-                details = {'reason': 'Vérification OTC non disponible'}
+                print(f"🔧 Mode OTC - Vérification avec données crypto...")
+                result, details = await self._verify_signal_m1_otc(
+                    signal_id, pair, direction, ts_enter
+                )
             else:
-                # Mode Forex - vérifier via TwelveData
-                result, details = await self._verify_signal_m1(
+                print(f"📈 Mode Forex - Vérification avec TwelveData...")
+                result, details = await self._verify_signal_m1_forex(
                     signal_id, pair, direction, ts_enter
                 )
             
@@ -141,7 +142,9 @@ class AutoResultVerifier:
                 print(f"{emoji} Résultat M1: {result}")
                 return result
             else:
-                print(f"⚠️ Impossible de vérifier")
+                print(f"⚠️ Impossible de vérifier automatiquement")
+                # Proposer vérification manuelle
+                print(f"💡 Utilisez /manualresult {signal_id} WIN/LOSE pour marquer manuellement")
                 return None
                 
         except Exception as e:
@@ -150,8 +153,8 @@ class AutoResultVerifier:
             traceback.print_exc()
             return None
 
-    def _is_signal_complete_m1(self, ts_enter):
-        """Vérifie si signal M1 est complet (1 minute écoulée)"""
+    async def _verify_signal_m1_otc(self, signal_id, pair, direction, ts_enter):
+        """Vérifie bougie M1 pour Crypto (OTC)"""
         try:
             if isinstance(ts_enter, str):
                 ts_clean = ts_enter.replace('Z', '').replace('+00:00', '').split('.')[0]
@@ -165,28 +168,83 @@ class AutoResultVerifier:
             if entry_time_utc.tzinfo is None:
                 entry_time_utc = entry_time_utc.replace(tzinfo=timezone.utc)
             
-            # Arrondir à la minute
-            entry_time_utc = self._round_to_m1_candle(entry_time_utc)
+            # Arrondir à la bougie M1
+            entry_candle_start, entry_candle_end = self._get_m1_candle_range(entry_time_utc)
             
-            # M1: vérifier 1 minute après l'entrée
-            end_time_utc = entry_time_utc + timedelta(minutes=1)
+            print(f"   📍 Crypto M1: {entry_candle_start.strftime('%H:%M')}-{entry_candle_end.strftime('%H:%M')}")
+            print(f"   📈 Direction: {direction}")
             
-            now_utc = datetime.now(timezone.utc)
-            is_complete = now_utc >= end_time_utc
+            # Obtenir les données crypto
+            df = self.otc_provider.get_otc_data(pair, '1min', outputsize=10)
             
-            if is_complete:
-                print(f"   ✅ COMPLET M1 (attendu: {end_time_utc.strftime('%H:%M:%S')})")
+            if df is None or len(df) == 0:
+                print(f"   ⚠️ Pas de données crypto, essai synthétique...")
+                df = self.otc_provider.generate_synthetic_data(pair, '1min', outputsize=10)
+                
+                if df is None:
+                    print(f"   ❌ Impossible d'obtenir des données crypto")
+                    return None, None
+            
+            # Chercher la bougie correspondante
+            entry_price = None
+            exit_price = None
+            
+            # Convertir l'index en datetime si nécessaire
+            df.index = pd.to_datetime(df.index)
+            
+            # Trouver la bougie d'entrée (open)
+            for idx in df.index:
+                if abs((idx - entry_candle_start).total_seconds()) <= 60:  # Tolérance 1 minute
+                    entry_price = df.loc[idx, 'open']
+                    exit_price = df.loc[idx, 'close']
+                    print(f"   ✅ Bougie trouvée: {idx.strftime('%H:%M')}")
+                    break
+            
+            if entry_price is None or exit_price is None:
+                print(f"   ⚠️ Bougie non trouvée, utilisation des dernières données")
+                if len(df) > 0:
+                    entry_price = df.iloc[-1]['open'] if len(df) > 1 else df.iloc[0]['open']
+                    exit_price = df.iloc[-1]['close']
+            
+            if entry_price is None or exit_price is None:
+                print(f"   ❌ Prix non disponibles")
+                return None, None
+            
+            # Calculer résultat
+            price_diff = exit_price - entry_price
+            
+            print(f"   💰 Entrée (open): ${entry_price:.2f}")
+            print(f"   💰 Sortie (close): ${exit_price:.2f}")
+            print(f"   📊 Diff: ${price_diff:+.2f}")
+            
+            if direction == 'CALL':
+                is_winning = exit_price > entry_price
+                print(f"   🎯 CALL: ${exit_price:.2f} > ${entry_price:.2f} ? {is_winning}")
             else:
-                remaining = (end_time_utc - now_utc).total_seconds()
-                print(f"   ⏳ PAS COMPLET - {remaining:.0f}s restants")
+                is_winning = exit_price < entry_price
+                print(f"   🎯 PUT: ${exit_price:.2f} < ${entry_price:.2f} ? {is_winning}")
             
-            return is_complete
+            result = 'WIN' if is_winning else 'LOSE'
+            details = {
+                'entry_price': float(entry_price),
+                'exit_price': float(exit_price),
+                'pips': float(abs(price_diff)),
+                'gale_level': 0,
+                'reason': f'OTC Crypto M1 - Diff: ${price_diff:+.2f}'
+            }
+            
+            emoji = "✅" if is_winning else "❌"
+            print(f"   {emoji} {result} Crypto M1 (${price_diff:+.2f})")
+            
+            return result, details
             
         except Exception as e:
-            print(f"❌ Erreur _is_signal_complete_m1: {e}")
-            return False
+            print(f"❌ Erreur _verify_signal_m1_otc: {e}")
+            import traceback
+            traceback.print_exc()
+            return None, None
 
-    async def _verify_signal_m1(self, signal_id, pair, direction, ts_enter):
+    async def _verify_signal_m1_forex(self, signal_id, pair, direction, ts_enter):
         """Vérifie bougie M1 pour Forex"""
         try:
             if isinstance(ts_enter, str):
@@ -209,7 +267,7 @@ class AutoResultVerifier:
             # Arrondir à la bougie M1
             entry_candle_start, entry_candle_end = self._get_m1_candle_range(entry_time_utc)
             
-            print(f"   📍 M1: {entry_candle_start.strftime('%H:%M')}-{entry_candle_end.strftime('%H:%M')}")
+            print(f"   📍 Forex M1: {entry_candle_start.strftime('%H:%M')}-{entry_candle_end.strftime('%H:%M')}")
             print(f"   📈 Direction: {direction}")
             
             # Prix d'entrée (open de la bougie M1)
@@ -251,22 +309,58 @@ class AutoResultVerifier:
                 'exit_price': float(exit_price),
                 'pips': float(pips_diff),
                 'gale_level': 0,
-                'reason': f'M1 vérifié - Diff: {price_diff:+.5f}'
+                'reason': f'Forex M1 vérifié - Diff: {price_diff:+.5f}'
             }
             
             emoji = "✅" if is_winning else "❌"
-            print(f"   {emoji} {result} M1 ({pips_diff:+.1f} pips)")
+            print(f"   {emoji} {result} Forex M1 ({pips_diff:+.1f} pips)")
             
             return result, details
             
         except Exception as e:
-            print(f"❌ Erreur _verify_signal_m1: {e}")
+            print(f"❌ Erreur _verify_signal_m1_forex: {e}")
             import traceback
             traceback.print_exc()
             return None, None
 
+    def _is_signal_complete_m1(self, ts_enter):
+        """Vérifie si signal M1 est complet (1 minute écoulée)"""
+        try:
+            if isinstance(ts_enter, str):
+                ts_clean = ts_enter.replace('Z', '').replace('+00:00', '').split('.')[0]
+                try:
+                    entry_time_utc = datetime.fromisoformat(ts_clean)
+                except:
+                    entry_time_utc = datetime.strptime(ts_clean, '%Y-%m-%d %H:%M:%S')
+            else:
+                entry_time_utc = ts_enter
+            
+            if entry_time_utc.tzinfo is None:
+                entry_time_utc = entry_time_utc.replace(tzinfo=timezone.utc)
+            
+            # Arrondir à la minute
+            entry_time_utc = self._round_to_m1_candle(entry_time_utc)
+            
+            # M1: vérifier 1 minute après l'entrée
+            end_time_utc = entry_time_utc + timedelta(minutes=1)
+            
+            now_utc = datetime.now(timezone.utc)
+            is_complete = now_utc >= end_time_utc
+            
+            if is_complete:
+                print(f"   ✅ COMPLET M1 (attendu: {end_time_utc.strftime('%H:%M:%S')})")
+            else:
+                remaining = (end_time_utc - now_utc).total_seconds()
+                print(f"   ⏳ PAS COMPLET - {remaining:.0f}s restants")
+            
+            return is_complete
+            
+        except Exception as e:
+            print(f"❌ Erreur _is_signal_complete_m1: {e}")
+            return False
+
     async def _get_price_at_time(self, pair, timestamp, price_type='close'):
-        """Récupère prix à un moment donné (M1)"""
+        """Récupère prix à un moment donné (M1) pour Forex"""
         try:
             await self._wait_if_rate_limited()
             
@@ -293,7 +387,7 @@ class AutoResultVerifier:
                 'format': 'JSON'
             }
             
-            print(f"   🔍 API M1: {pair} {price_type} à {ts_utc.strftime('%H:%M')}")
+            print(f"   🔍 API Forex M1: {pair} {price_type} à {ts_utc.strftime('%H:%M')}")
             
             try:
                 resp = self._session.get(self.base_url, params=params, timeout=12)
@@ -336,7 +430,7 @@ class AutoResultVerifier:
                                 except:
                                     return None
                 
-                print(f"   ⚠️ Bougie M1 à {ts_utc.strftime('%H:%M')} non trouvée")
+                print(f"   ⚠️ Bougie Forex M1 à {ts_utc.strftime('%H:%M')} non trouvée")
                 return None
                 
             except requests.exceptions.RequestException as e:
@@ -391,7 +485,8 @@ class AutoResultVerifier:
                 })
             
             print(f"💾 Résultat M1 sauvegardé: #{signal_id} = {result}")
-            print(f"   📊 Entry: {entry_price}, Exit: {exit_price}, Pips: {pips}")
+            if entry_price and exit_price:
+                print(f"   📊 Entry: {entry_price}, Exit: {exit_price}, Diff: {exit_price - entry_price}")
             
         except Exception as e:
             print(f"❌ Erreur _update_signal_result: {e}")
@@ -406,7 +501,7 @@ class AutoResultVerifier:
             # Récupérer les infos du signal
             with self.engine.connect() as conn:
                 signal = conn.execute(
-                    text("SELECT pair, direction, ts_enter FROM signals WHERE id = :sid"),
+                    text("SELECT pair, direction, ts_enter, payload_json FROM signals WHERE id = :sid"),
                     {"sid": signal_id}
                 ).fetchone()
             
@@ -414,13 +509,32 @@ class AutoResultVerifier:
                 print(f"❌ Signal #{signal_id} non trouvé")
                 return False
             
-            pair, direction, ts_enter = signal
+            pair, direction, ts_enter, payload_json = signal
+            
+            # Analyser le payload pour le mode
+            is_otc = False
+            if payload_json:
+                try:
+                    payload = json.loads(payload_json)
+                    mode = payload.get('mode', 'Forex')
+                    if mode == 'OTC':
+                        is_otc = True
+                except:
+                    pass
+            
+            # Calculer les pips
+            pips = 0
+            if entry_price and exit_price:
+                if is_otc:
+                    pips = abs(exit_price - entry_price)  # Pour crypto, en dollars
+                else:
+                    pips = abs(exit_price - entry_price) * 10000  # Pour forex, en pips
             
             details = {
                 'reason': f'Vérification manuelle - {result}',
                 'entry_price': entry_price,
                 'exit_price': exit_price,
-                'pips': abs(exit_price - entry_price) * 10000 if entry_price and exit_price else 0,
+                'pips': pips,
                 'gale_level': 0
             }
             
@@ -430,6 +544,8 @@ class AutoResultVerifier:
             
         except Exception as e:
             print(f"❌ Erreur manual_verify_signal: {e}")
+            import traceback
+            traceback.print_exc()
             return False
     
     def get_signal_status(self, signal_id):
@@ -439,7 +555,7 @@ class AutoResultVerifier:
                 signal = conn.execute(
                     text("""
                         SELECT id, pair, direction, result, ts_enter, ts_exit, 
-                               entry_price, exit_price, pips, reason
+                               entry_price, exit_price, pips, reason, payload_json
                         FROM signals
                         WHERE id = :sid
                     """),
@@ -459,9 +575,41 @@ class AutoResultVerifier:
                 'entry_price': signal[6],
                 'exit_price': signal[7],
                 'pips': signal[8],
-                'reason': signal[9]
+                'reason': signal[9],
+                'payload_json': signal[10]
             }
             
         except Exception as e:
             print(f"❌ Erreur get_signal_status: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
+    async def force_verify_signal(self, signal_id):
+        """Force la vérification d'un signal"""
+        try:
+            print(f"⚡ Forcer vérification signal #{signal_id}")
+            
+            # D'abord, marquer comme non vérifié pour forcer une nouvelle vérification
+            with self.engine.begin() as conn:
+                conn.execute(
+                    text("UPDATE signals SET result = NULL WHERE id = :id"),
+                    {"id": signal_id}
+                )
+            
+            # Attendre un peu
+            await asyncio.sleep(2)
+            
+            # Vérifier à nouveau
+            result = await self.verify_single_signal(signal_id)
+            
+            if result:
+                print(f"✅ Vérification forcée réussie: {result}")
+                return result
+            else:
+                print(f"⚠️ Vérification forcée échouée")
+                return None
+                
+        except Exception as e:
+            print(f"❌ Erreur force_verify_signal: {e}")
             return None
