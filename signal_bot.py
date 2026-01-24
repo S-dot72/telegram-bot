@@ -1,7 +1,7 @@
 """
 Bot de trading M1 - Version Interactive
 8 signaux par session avec bouton Generate Signal
-Support OTC (crypto) le week-end
+Support OTC (crypto) le week-end via TwelveData
 """
 
 import os, json, asyncio
@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 import requests
 import pandas as pd
+import numpy as np
 from sqlalchemy import create_engine, text
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
@@ -17,30 +18,28 @@ from config import *
 from utils import compute_indicators, rule_signal_ultra_strict
 from ml_predictor import MLSignalPredictor
 from auto_verifier import AutoResultVerifier
-from otc_provider import OTCDataProvider, get_otc_or_forex_data
+from otc_provider import OTCDataProvider
 
-# Configuration
+# ================= CONFIGURATION =================
 HAITI_TZ = ZoneInfo("America/Port-au-Prince")
 TIMEFRAME_M1 = "1min"
 SIGNALS_PER_SESSION = 8
-VERIFICATION_WAIT_MIN = 2  # M1: vérifier après 2 minutes
+VERIFICATION_WAIT_MIN = 2
 CONFIDENCE_THRESHOLD = 0.65
 
+# Initialisation des composants
 engine = create_engine(DB_URL, connect_args={'check_same_thread': False})
 ml_predictor = MLSignalPredictor()
 auto_verifier = None
-
-# Initialiser OTC provider
 otc_provider = OTCDataProvider(TWELVEDATA_API_KEY)
 
-# Sessions actives (user_id -> session_data)
+# Variables globales
 active_sessions = {}
-
 TWELVE_TS_URL = 'https://api.twelvedata.com/time_series'
 ohlc_cache = {}
-
-# Liste pour stocker les erreurs récentes
 last_error_logs = []
+
+# ================= FONCTIONS UTILITAIRES =================
 
 def add_error_log(message):
     """Ajoute un message d'erreur à la liste des logs"""
@@ -49,7 +48,6 @@ def add_error_log(message):
     log_entry = f"{timestamp} - {message}"
     print(log_entry)
     last_error_logs.append(log_entry)
-    # Garder seulement les 20 derniers messages
     if len(last_error_logs) > 20:
         last_error_logs.pop(0)
 
@@ -60,61 +58,54 @@ def get_utc_now():
     return datetime.now(timezone.utc)
 
 def is_forex_open():
-    """Vérifie si marché Forex OU OTC est ouvert"""
+    """Vérifie si marché Forex est ouvert"""
     now_utc = get_utc_now()
-    
-    # Si week-end -> OTC disponible (crypto 24/7)
-    if otc_provider.is_weekend():
-        return True  # OTC toujours ouvert le week-end
-    
-    # Vérification Forex standard (semaine)
     weekday = now_utc.weekday()
     hour = now_utc.hour
     
-    # Forex fermé le samedi
-    if weekday == 5:
+    if weekday == 5:  # Samedi
         return False
-    # Forex fermé le dimanche avant 22h UTC
-    if weekday == 6 and hour < 22:
+    if weekday == 6 and hour < 22:  # Dimanche avant 22h UTC
         return False
-    # Forex fermé le vendredi après 22h UTC
-    if weekday == 4 and hour >= 22:
+    if weekday == 4 and hour >= 22:  # Vendredi après 22h UTC
         return False
     
     return True
 
 def get_current_pair(pair):
-    """Retourne la paire à utiliser (Forex ou OTC) en fonction du jour"""
+    """Retourne la paire à utiliser (Forex ou Crypto) en fonction du jour"""
     if otc_provider.is_weekend():
-        # Mapping Forex -> Crypto pour le week-end
         forex_to_crypto = {
             'EUR/USD': 'BTC/USD',
             'GBP/USD': 'ETH/USD',
             'USD/JPY': 'XRP/USD',
             'AUD/USD': 'LTC/USD',
-            'BTC/USD': 'BTC/USD',  # Déjà crypto
+            'BTC/USD': 'BTC/USD',
             'ETH/USD': 'ETH/USD'
         }
         return forex_to_crypto.get(pair, 'BTC/USD')
     return pair
 
 def check_api_availability():
-    """Vérifie la disponibilité des APIs (Forex et OTC)"""
+    """Vérifie la disponibilité de TwelveData pour Forex et Crypto"""
     results = {
         'forex_available': False,
-        'otc_available': False,
+        'crypto_available': False,
+        'synthetic_available': True,
         'current_mode': None,
         'test_pairs': []
     }
     
     now_utc = get_utc_now()
     is_weekend = otc_provider.is_weekend()
-    results['current_mode'] = 'OTC' if is_weekend else 'Forex'
+    results['current_mode'] = 'OTC (Crypto)' if is_weekend else 'Forex'
     
     try:
-        # Tester l'API Forex (TwelveData)
-        if not is_weekend:
-            test_pair = 'EUR/USD'
+        test_pairs = ['EUR/USD']
+        if is_weekend:
+            test_pairs.append('BTC/USD')
+        
+        for test_pair in test_pairs:
             params = {
                 'symbol': test_pair,
                 'interval': '1min',
@@ -122,65 +113,56 @@ def check_api_availability():
                 'apikey': TWELVEDATA_API_KEY,
                 'format': 'JSON'
             }
+            
             try:
                 r = requests.get(TWELVE_TS_URL, params=params, timeout=10)
                 
                 if r.status_code == 200:
                     j = r.json()
+                    
                     if 'values' in j and len(j['values']) > 0:
-                        results['forex_available'] = True
+                        status = 'OK'
+                        market_type = 'Crypto' if is_weekend and test_pair in ['BTC/USD', 'ETH/USD', 'XRP/USD', 'LTC/USD'] else 'Forex'
+                        
+                        if market_type == 'Forex':
+                            results['forex_available'] = True
+                        else:
+                            results['crypto_available'] = True
+                        
                         results['test_pairs'].append({
                             'pair': test_pair,
-                            'status': 'OK',
+                            'status': status,
+                            'market': market_type,
                             'data_points': len(j['values']),
-                            'last_price': j['values'][0].get('close', 'N/A')
+                            'last_price': j['values'][0].get('close', 'N/A'),
+                            'source': 'TwelveData'
                         })
                     else:
-                        error_msg = j.get('message', 'No values in response') if 'message' in j else 'Response empty'
+                        error_msg = j.get('message', 'No values') if 'message' in j else 'Empty response'
                         results['test_pairs'].append({
                             'pair': test_pair,
                             'status': 'NO_DATA',
-                            'error': error_msg
+                            'market': 'Crypto' if is_weekend else 'Forex',
+                            'error': error_msg,
+                            'source': 'TwelveData'
                         })
                 else:
                     results['test_pairs'].append({
                         'pair': test_pair,
                         'status': 'ERROR',
-                        'error': f'HTTP {r.status_code}'
+                        'market': 'Crypto' if is_weekend else 'Forex',
+                        'error': f'HTTP {r.status_code}',
+                        'source': 'TwelveData'
                     })
+                    
             except Exception as e:
                 results['test_pairs'].append({
                     'pair': test_pair,
                     'status': 'ERROR',
-                    'error': str(e)[:100]
+                    'market': 'Crypto' if is_weekend else 'Forex',
+                    'error': str(e)[:100],
+                    'source': 'TwelveData'
                 })
-        
-        # Tester l'API OTC (Binance)
-        if is_weekend:
-            test_pairs = ['BTC/USD', 'ETH/USD', 'XRP/USD']
-            for pair in test_pairs:
-                try:
-                    df = otc_provider.get_otc_data(pair, '1m', 5)
-                    if df is not None and len(df) > 0:
-                        results['otc_available'] = True
-                        results['test_pairs'].append({
-                            'pair': pair,
-                            'status': 'OK',
-                            'data_points': len(df),
-                            'last_price': df.iloc[-1]['close']
-                        })
-                    else:
-                        results['test_pairs'].append({
-                            'pair': pair,
-                            'status': 'NO_DATA',
-                            'error': 'Empty DataFrame'
-                        })
-                except Exception as e:
-                    results['test_pairs'].append({
-                        'pair': pair,
-                        'status': 'ERROR',
-                        'error': str(e)[:100]
-                    })
     
     except Exception as e:
         results['error'] = str(e)
@@ -188,40 +170,41 @@ def check_api_availability():
     return results
 
 def fetch_ohlc_td(pair, interval, outputsize=300):
-    """Version unifiée Forex + OTC"""
+    """Version unifiée utilisant TwelveData pour Forex ET Crypto"""
     
     # Vérifier si week-end
     if otc_provider.is_weekend():
-        print(f"🏖️ Week-end - Mode OTC pour {pair}")
+        print(f"🏖️ Week-end - Mode OTC (Crypto via TwelveData)")
         
-        # Mapping Forex -> Crypto
         forex_to_crypto = {
             'EUR/USD': 'BTC/USD',
             'GBP/USD': 'ETH/USD',
             'USD/JPY': 'XRP/USD',
             'AUD/USD': 'LTC/USD',
-            'BTC/USD': 'BTC/USD',  # Déjà crypto
+            'BTC/USD': 'BTC/USD',
             'ETH/USD': 'ETH/USD'
         }
         
-        otc_pair = forex_to_crypto.get(pair, 'BTC/USD')
+        crypto_pair = forex_to_crypto.get(pair, 'BTC/USD')
         
-        if otc_pair != pair:
-            print(f"   🔄 Conversion: {pair} → {otc_pair}")
+        if crypto_pair != pair:
+            print(f"   🔄 Conversion: {pair} → {crypto_pair}")
         
-        # Récupérer données OTC
-        df = otc_provider.get_otc_data(otc_pair, interval, outputsize)
+        # Essayer TwelveData pour les cryptos
+        df = otc_provider.get_twelvedata_crypto(crypto_pair, interval, outputsize)
         
         if df is not None and len(df) > 0:
+            print(f"✅ Données Crypto récupérées via TwelveData: {len(df)} bougies")
             return df
         else:
-            add_error_log(f"OTC: Pas de données pour {otc_pair}")
-            raise RuntimeError(f"Données OTC indisponibles pour {otc_pair}")
+            print("⚠️ TwelveData Crypto indisponible, basculement sur synthétique")
+            return otc_provider.generate_synthetic_data(crypto_pair, interval, outputsize)
     
     # Mode Forex normal (semaine)
     if not is_forex_open():
         raise RuntimeError("Marché Forex fermé")
     
+    # Utiliser TwelveData pour Forex
     params = {
         'symbol': pair, 
         'interval': interval, 
@@ -230,36 +213,37 @@ def fetch_ohlc_td(pair, interval, outputsize=300):
         'format': 'JSON'
     }
     
-    r = requests.get(TWELVE_TS_URL, params=params, timeout=10)
-    r.raise_for_status()
-    j = r.json()
-    
-    if 'code' in j and j['code'] == 429:
-        raise RuntimeError(f"Limite API atteinte")
-    
-    if 'values' not in j:
-        raise RuntimeError(f"TwelveData error: {j}")
-    
-    df = pd.DataFrame(j['values'])[::-1].reset_index(drop=True)
-    
-    for col in ['open','high','low','close']:
-        if col in df.columns:
-            df[col] = df[col].astype(float)
-    
-    if 'volume' in df.columns:
-        df['volume'] = df['volume'].astype(float)
-    
-    df.index = pd.to_datetime(df['datetime'])
-    
-    return df
+    try:
+        r = requests.get(TWELVE_TS_URL, params=params, timeout=10)
+        r.raise_for_status()
+        j = r.json()
+        
+        if 'code' in j and j['code'] == 429:
+            raise RuntimeError(f"Limite API TwelveData atteinte")
+        
+        if 'values' not in j:
+            raise RuntimeError(f"TwelveData error: {j}")
+        
+        df = pd.DataFrame(j['values'])[::-1].reset_index(drop=True)
+        
+        for col in ['open','high','low','close']:
+            if col in df.columns:
+                df[col] = df[col].astype(float)
+        
+        if 'volume' in df.columns:
+            df['volume'] = df['volume'].astype(float)
+        
+        df.index = pd.to_datetime(df['datetime'])
+        
+        return df
+    except Exception as e:
+        add_error_log(f"Erreur TwelveData Forex: {e}")
+        raise RuntimeError(f"Erreur TwelveData Forex: {e}")
 
 def get_cached_ohlc(pair, interval, outputsize=300):
-    """Récupère les données OHLC depuis le cache ou les APIs"""
+    """Récupère les données OHLC depuis le cache ou TwelveData"""
     current_pair = get_current_pair(pair)
     cache_key = f"{current_pair}_{interval}"
-    
-    # On ne vérifie plus is_forex_open() ici car OTC peut être actif
-    # même quand Forex est fermé
     
     current_time = get_utc_now()
     
@@ -271,6 +255,13 @@ def get_cached_ohlc(pair, interval, outputsize=300):
     try:
         df = fetch_ohlc_td(pair, interval, outputsize)
         ohlc_cache[cache_key] = (df, current_time)
+        
+        if df is not None and len(df) > 0:
+            print(f"✅ Données chargées: {len(df)} bougies pour {current_pair}")
+            print(f"   Dernière bougie: {df.index[-1]} - ${df.iloc[-1]['close']:.2f}")
+        else:
+            print(f"⚠️ Données vides pour {current_pair}")
+            
         return df
     except RuntimeError as e:
         add_error_log(f"Cache OHLC: {e}")
@@ -280,6 +271,7 @@ def get_cached_ohlc(pair, interval, outputsize=300):
         return None
 
 def persist_signal(payload):
+    """Persiste un signal en base de données"""
     q = text("""INSERT INTO signals (pair,direction,reason,ts_enter,ts_send,confidence,payload_json,max_gales,timeframe)
     VALUES (:pair,:direction,:reason,:ts_enter,:ts_send,:confidence,:payload,:max_gales,:timeframe)""")
     with engine.begin() as conn:
@@ -287,6 +279,7 @@ def persist_signal(payload):
     return result.lastrowid
 
 def ensure_db():
+    """Initialise la base de données"""
     try:
         sql = open('db_schema.sql').read()
         with engine.begin() as conn:
@@ -306,9 +299,10 @@ def ensure_db():
     except Exception as e:
         print(f"⚠️ Erreur DB: {e}")
 
-# ===== COMMANDES TELEGRAM =====
+# ================= COMMANDES TELEGRAM =================
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Commande de démarrage du bot"""
     user_id = update.effective_user.id
     username = update.effective_user.username or "Unknown"
     try:
@@ -327,7 +321,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🎯 Mode: **Interactive Session**\n"
             f"📊 8 signaux M1 par session\n"
             f"⚡ Vérification auto après 2 min\n"
-            f"🌐 Mode actuel: {mode_text}\n\n"
+            f"🌐 Mode actuel: {mode_text}\n"
+            f"🔧 Source: TwelveData unifié\n\n"
             f"**Commandes:**\n"
             f"• /startsession - Démarrer session\n"
             f"• /stats - Statistiques\n"
@@ -341,6 +336,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Erreur: {e}")
 
 async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Affiche le menu complet"""
     menu_text = (
         "📋 **MENU M1**\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -362,7 +358,8 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "━━━━━━━━━━━━━━━━━━━━\n"
         "🎯 M1 | 8 signaux/session\n"
         "⚡ Vérif auto: 2 min\n"
-        "🏖️ OTC actif le week-end"
+        "🏖️ OTC actif le week-end\n"
+        "🔧 TwelveData unifié"
     )
     await update.message.reply_text(menu_text)
 
@@ -374,7 +371,6 @@ async def cmd_start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id in active_sessions:
         session = active_sessions[user_id]
         
-        # Ajouter bouton pour continuer si session pas terminée
         if session['signal_count'] < SIGNALS_PER_SESSION:
             next_num = session['signal_count'] + 1
             keyboard = [[InlineKeyboardButton(f"🎯 Generate Signal #{next_num}", callback_data=f"gen_signal_{user_id}")]]
@@ -397,16 +393,6 @@ async def cmd_start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Utilisez /endsession pour voir le résumé"
             )
         return
-    
-    if not is_forex_open():
-        # Même si Forex est fermé, OTC peut être ouvert
-        # Vérifier si c'est le week-end (OTC)
-        if otc_provider.is_weekend():
-            # OTC est disponible, on peut démarrer une session
-            pass
-        else:
-            await update.message.reply_text("🏖️ Marché fermé (Forex fermé et pas en week-end pour OTC)")
-            return
     
     # Créer nouvelle session
     now_haiti = get_haiti_now()
@@ -432,7 +418,8 @@ async def cmd_start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📅 {now_haiti.strftime('%H:%M:%S')}\n"
         f"🌐 Mode: {mode_text}\n"
         f"🎯 Objectif: {SIGNALS_PER_SESSION} signaux M1\n"
-        f"⚡ Vérification: 2 min auto\n\n"
+        f"⚡ Vérification: 2 min auto\n"
+        f"🔧 Source: TwelveData\n\n"
         f"Cliquez pour générer signal #1 ⬇️",
         reply_markup=reply_markup
     )
@@ -564,7 +551,7 @@ async def generate_m1_signal(user_id, app):
         
         print(f"[SIGNAL] 🔍 {pair}...")
         
-        # Vérifier si on est en week-end et OTC devrait être actif
+        # Vérifier si on est en week-end
         if is_weekend:
             current_pair = get_current_pair(pair)
             print(f"[SIGNAL] 🔄 Paire convertie: {pair} → {current_pair}")
@@ -578,10 +565,15 @@ async def generate_m1_signal(user_id, app):
         
         if len(df) < 50:
             add_error_log(f"[SIGNAL] ❌ Pas assez de données: {len(df)} bougies (min 50)")
+            print(f"[SIGNAL] 📊 Nombre de bougies disponibles: {len(df)}")
             return None
         
         print(f"[SIGNAL] ✅ {len(df)} bougies M1 ({mode})")
         print(f"[SIGNAL] 📈 Dernière bougie: {df.iloc[-1]['close']:.5f} à {df.index[-1]}")
+        
+        # Vérifier si les données sont synthétiques
+        if is_weekend and 'synthetic' in str(df.iloc[-1].get('close', '')):
+            print("[SIGNAL] ℹ️ Données synthétiques utilisées")
         
         # Indicateurs
         df = compute_indicators(df)
@@ -591,16 +583,15 @@ async def generate_m1_signal(user_id, app):
         print(f"[SIGNAL] 📊 ADX: {df.iloc[-1].get('adx', 'N/A'):.2f}")
         
         # Stratégie
-        base_signal = rule_signal_ultra_strict(df, session_priority=5)
+        if is_weekend:
+            # Mode OTC - règles moins strictes
+            base_signal = rule_signal_ultra_strict(df, session_priority=3)
+        else:
+            # Mode Forex - règles normales
+            base_signal = rule_signal_ultra_strict(df, session_priority=5)
         
         if not base_signal:
-            add_error_log("[SIGNAL] ⏭️ Rejeté (stratégie ultra-stricte)")
-            # Log des dernières valeurs pour debug
-            debug_msg = "[DEBUG] Dernières 5 bougies:"
-            for i in range(-5, 0):
-                row = df.iloc[i]
-                debug_msg += f"\n  {row.name.strftime('%H:%M')}: O{row['open']:.5f} H{row['high']:.5f} L{row['low']:.5f} C{row['close']:.5f}"
-            print(debug_msg)
+            add_error_log("[SIGNAL] ⏭️ Rejeté (stratégie)")
             return None
         
         print(f"[SIGNAL] ✅ Stratégie: {base_signal}")
@@ -633,7 +624,8 @@ async def generate_m1_signal(user_id, app):
                 'user_id': user_id, 
                 'mode': mode,
                 'rsi': df.iloc[-1].get('rsi'),
-                'adx': df.iloc[-1].get('adx')
+                'adx': df.iloc[-1].get('adx'),
+                'data_source': 'synthetic' if is_weekend and df.iloc[-1].get('close', 0) > 0 else 'live'
             }),
             'max_gales': 0,
             'timeframe': 1
@@ -642,12 +634,14 @@ async def generate_m1_signal(user_id, app):
         
         # Envoyer à l'utilisateur
         direction_text = "BUY ↗️" if ml_signal == "CALL" else "SELL ↘️"
+        data_source = "Synthétique" if is_weekend and df.iloc[-1].get('close', 0) > 0 else "TwelveData"
         
         msg = (
             f"🎯 **SIGNAL M1 #{session['signal_count'] + 1}**\n"
             f"━━━━━━━━━━━━━━━━━━━━\n\n"
             f"💱 {pair}\n"
             f"🌐 Mode: {mode}\n"
+            f"📡 Source: {data_source}\n"
             f"📈 Direction: **{direction_text}**\n"
             f"💪 Confiance: **{int(ml_conf*100)}%**\n"
             f"📊 RSI: {df.iloc[-1].get('rsi', 0):.1f}\n"
@@ -791,7 +785,6 @@ async def callback_new_session(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.message.delete()
     
     # Créer update simulé
-    from telegram import Message, Chat, User
     fake_message = query.message
     fake_update = Update(update_id=0, message=fake_message)
     fake_update.effective_user = query.from_user
@@ -799,6 +792,7 @@ async def callback_new_session(update: Update, context: ContextTypes.DEFAULT_TYP
     await cmd_start_session(fake_update, context)
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Affiche les statistiques globales"""
     try:
         with engine.connect() as conn:
             total = conn.execute(text('SELECT COUNT(*) FROM signals WHERE timeframe = 1')).scalar()
@@ -942,16 +936,17 @@ async def cmd_retrain(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {e}")
 
-# ===== COMMANDES OTC =====
-
 async def cmd_otc_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Affiche le statut OTC et paires disponibles"""
     try:
         is_weekend = otc_provider.is_weekend()
         now_haiti = get_haiti_now()
         
+        # Tester la disponibilité
+        results = check_api_availability()
+        
         msg = (
-            "🌐 **STATUT OTC**\n"
+            "🌐 **STATUT TWELVEDATA**\n"
             "━━━━━━━━━━━━━━━━━━━━\n\n"
             f"📅 {now_haiti.strftime('%A %d/%m/%Y')}\n"
             f"🕐 {now_haiti.strftime('%H:%M:%S')} (Haïti)\n\n"
@@ -960,12 +955,18 @@ async def cmd_otc_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if is_weekend:
             msg += (
                 "🏖️ **Mode: OTC ACTIF**\n"
-                "💰 Source: Crypto (Binance)\n"
+                "💰 Source: TwelveData (Crypto)\n"
+                "🔧 Fallback: Mode synthétique\n"
                 "⏰ Disponible: 24/7\n\n"
-                "📊 **Paires disponibles:**\n\n"
             )
             
-            for i, pair in enumerate(otc_provider.get_available_pairs(), 1):
+            if results.get('crypto_available'):
+                msg += "✅ TwelveData Crypto: DISPONIBLE\n\n"
+            else:
+                msg += "⚠️ TwelveData Crypto: INDISPONIBLE (mode synthétique)\n\n"
+            
+            msg += "📊 **Paires Crypto disponibles:**\n\n"
+            for pair in otc_provider.get_available_pairs():
                 msg += f"• {pair}\n"
             
             msg += (
@@ -978,9 +979,17 @@ async def cmd_otc_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             msg += (
                 "📈 **Mode: FOREX STANDARD**\n"
-                "💱 Source: TwelveData\n"
+                "💱 Source: TwelveData (Forex)\n"
                 "⏰ Lun-Ven 00:00-22:00 UTC\n\n"
-                "💡 Le mode OTC s'active automatiquement\n"
+            )
+            
+            if results.get('forex_available'):
+                msg += "✅ TwelveData Forex: DISPONIBLE\n"
+            else:
+                msg += "❌ TwelveData Forex: INDISPONIBLE\n"
+            
+            msg += (
+                "\n💡 Le mode Crypto s'active automatiquement\n"
                 "   le week-end (Sam-Dim)\n"
             )
         
@@ -992,35 +1001,63 @@ async def cmd_otc_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Erreur: {e}")
 
 async def cmd_test_otc(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Teste la récupération de données OTC"""
+    """Teste la récupération de données OTC via TwelveData"""
     try:
-        msg = await update.message.reply_text("🧪 Test OTC en cours...")
+        msg = await update.message.reply_text("🧪 Test OTC (TwelveData) en cours...")
         
         # Tester récupération
         test_pair = 'BTC/USD'
-        df = otc_provider.get_otc_data(test_pair, '1m', 50)
         
-        if df is not None and len(df) > 0:
-            last = df.iloc[-1]
+        if otc_provider.is_weekend():
+            # Mode OTC - utiliser TwelveData Crypto
+            df = otc_provider.get_twelvedata_crypto(test_pair, '1min', 5)
             
-            response = (
-                f"✅ **Test OTC réussi**\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"💱 Paire: {test_pair}\n"
-                f"📊 Bougies: {len(df)}\n"
-                f"💰 Dernier prix: ${last['close']:.2f}\n"
-                f"📈 High: ${last['high']:.2f}\n"
-                f"📉 Low: ${last['low']:.2f}\n"
-                f"🕐 Timestamp: {last['datetime']}\n\n"
-                f"✅ OTC opérationnel !"
-            )
+            if df is not None and len(df) > 0:
+                last = df.iloc[-1]
+                response = (
+                    f"✅ **Test OTC réussi (TwelveData)**\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"💱 Paire: {test_pair}\n"
+                    f"📡 Source: TwelveData Crypto\n"
+                    f"📊 Bougies: {len(df)}\n"
+                    f"💰 Dernier prix: ${last['close']:.2f}\n"
+                    f"📈 High: ${last['high']:.2f}\n"
+                    f"📉 Low: ${last['low']:.2f}\n"
+                    f"🕐 Timestamp: {df.index[-1]}\n\n"
+                    f"✅ OTC via TwelveData opérationnel !"
+                )
+            else:
+                # Tester le mode synthétique
+                synthetic_df = otc_provider.generate_synthetic_data(test_pair, '1min', 5)
+                if synthetic_df is not None:
+                    last = synthetic_df.iloc[-1]
+                    response = (
+                        f"⚠️ **Test OTC avec données synthétiques**\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                        f"💱 Paire: {test_pair}\n"
+                        f"📡 Source: Synthétique\n"
+                        f"📊 Bougies: {len(synthetic_df)}\n"
+                        f"💰 Dernier prix: ${last['close']:.2f}\n"
+                        f"📈 High: ${last['high']:.2f}\n"
+                        f"📉 Low: ${last['low']:.2f}\n"
+                        f"🕐 Timestamp: {synthetic_df.index[-1]}\n\n"
+                        f"ℹ️ TwelveData Crypto indisponible, mode synthétique actif"
+                    )
+                else:
+                    response = "❌ Échec récupération données OTC et synthétique"
         else:
-            response = "❌ Échec récupération données OTC"
+            response = (
+                "ℹ️ **Mode Forex actif**\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"Nous sommes en semaine, le mode Forex est actif.\n"
+                f"Le mode OTC (Crypto) s'active automatiquement le week-end.\n\n"
+                f"💡 Utilisez /otcstatus pour plus d'informations"
+            )
         
         await msg.edit_text(response)
         
     except Exception as e:
-        await update.message.reply_text(f"❌ Erreur test: {e}")
+        await update.message.reply_text(f"❌ Erreur test OTC: {e}")
 
 async def cmd_check_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Vérifie la disponibilité des APIs"""
@@ -1030,18 +1067,29 @@ async def cmd_check_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
         results = check_api_availability()
         now_haiti = get_haiti_now()
         
-        status_emoji = "✅" if (results.get('forex_available') or results.get('otc_available')) else "❌"
+        # Déterminer le statut global
+        if results.get('forex_available') or results.get('crypto_available') or results.get('synthetic_available'):
+            status_emoji = "✅"
+            status_text = "OPÉRATIONNEL"
+        else:
+            status_emoji = "❌"
+            status_text = "INDISPONIBLE"
         
         message = (
-            f"{status_emoji} **VÉRIFICATION APIS**\n"
+            f"{status_emoji} **VÉRIFICATION APIS** - {status_text}\n"
             f"━━━━━━━━━━━━━━━━━━━━\n\n"
             f"📅 {now_haiti.strftime('%A %d/%m/%Y')}\n"
             f"🕐 {now_haiti.strftime('%H:%M:%S')}\n\n"
             f"🌐 **Mode actuel:** {results['current_mode']}\n"
         )
         
-        if results['current_mode'] == 'OTC':
-            message += f"📊 OTC disponible: {'✅ OUI' if results.get('otc_available') else '❌ NON'}\n"
+        if results['current_mode'] == 'OTC (Crypto)':
+            if results.get('crypto_available'):
+                message += f"📊 Crypto disponible: ✅ OUI (TwelveData)\n"
+            elif results.get('synthetic_available'):
+                message += f"📊 Crypto disponible: ⚠️ SYNTHÉTIQUE (Fallback)\n"
+            else:
+                message += f"📊 Crypto disponible: ❌ NON\n"
         else:
             message += f"📊 Forex disponible: {'✅ OUI' if results.get('forex_available') else '❌ NON'}\n"
         
@@ -1049,15 +1097,15 @@ async def cmd_check_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         for test in results.get('test_pairs', []):
             status = test['status']
-            emoji = "✅" if status == 'OK' else "⚠️" if status == 'NO_DATA' else "❌"
-            message += f"{emoji} {test['pair']}: {status}"
-            
             if status == 'OK':
-                message += f" ({test['data_points']} bougies, ${test['last_price']})\n"
+                emoji = "✅"
+                message += f"{emoji} {test['pair']}: {status} ({test['data_points']} bougies, ${test['last_price']}, {test.get('source', 'TwelveData')})\n"
             elif 'error' in test:
-                message += f" - {test['error'][:50]}\n"
+                emoji = "❌"
+                message += f"{emoji} {test['pair']}: ERREUR - {test['error'][:50]}\n"
             else:
-                message += "\n"
+                emoji = "⚠️"
+                message += f"{emoji} {test['pair']}: {status}\n"
         
         if 'error' in results:
             message += f"\n⚠️ **Erreur globale:** {results['error']}\n"
@@ -1065,17 +1113,26 @@ async def cmd_check_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Recommandations
         message += "\n💡 **Recommandations:**\n"
         
-        if results['current_mode'] == 'OTC' and not results.get('otc_available'):
-            message += "• Vérifiez la connexion à Binance\n"
-            message += "• Vérifiez les clés API OTC\n"
-            message += "• Essayez /testotc pour plus de détails\n"
-        elif results['current_mode'] == 'Forex' and not results.get('forex_available'):
-            message += "• Vérifiez la clé API TwelveData\n"
-            message += "• Vérifiez si le marché Forex est ouvert\n"
-            message += "• Attendez les heures d'ouverture (Lun-Ven 00:00-22:00 UTC)\n"
+        if results['current_mode'] == 'OTC (Crypto)':
+            if results.get('crypto_available'):
+                message += "• TwelveData Crypto fonctionnel ✓\n"
+                message += "• Vous pouvez démarrer une session avec /startsession\n"
+            elif results.get('synthetic_available'):
+                message += "• TwelveData bloqué, mode synthétique actif\n"
+                message += "• Les données sont simulées mais permettent de tester\n"
+                message += "• Utilisez /startsession pour tester avec données synthétiques\n"
+            else:
+                message += "• TwelveData Crypto indisponible\n"
+                message += "• Mode synthétique également indisponible\n"
+                message += "• Vérifiez votre connexion internet\n"
         else:
-            message += "• APIs fonctionnelles ✓\n"
-            message += "• Vous pouvez démarrer une session avec /startsession\n"
+            if results.get('forex_available'):
+                message += "• TwelveData Forex fonctionnel ✓\n"
+                message += "• Vous pouvez démarrer une session avec /startsession\n"
+            else:
+                message += "• TwelveData Forex indisponible\n"
+                message += "• Vérifiez la clé API TwelveData\n"
+                message += "• Attendez les heures d'ouverture (Lun-Ven 00:00-22:00 UTC)\n"
         
         message += "\n━━━━━━━━━━━━━━━━━━━━"
         
@@ -1089,7 +1146,6 @@ async def cmd_quick_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user_id = update.effective_user.id
         
-        # Vérifier si OTC est actif
         if otc_provider.is_weekend():
             await update.message.reply_text("🏖️ Week-end - Mode OTC actif\n⏳ Test en cours...")
         else:
@@ -1148,23 +1204,28 @@ async def cmd_last_errors(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for i, error in enumerate(reversed(last_error_logs[-10:]), 1):
         message += f"{i}. {error}\n\n"
     
-    message += "━━━━━━━━━━━━━━━━━━━━"
+    message += "━━━━━━━━━━━━━━━━━━━━\n"
+    message += "💡 Utilisez /checkapi pour vérifier l'état des APIs"
     
     await update.message.reply_text(message)
 
-# ===== SERVEUR HTTP =====
+# ================= SERVEUR HTTP =================
 
 async def health_check(request):
+    """Endpoint de santé pour le serveur HTTP"""
     return web.json_response({
         'status': 'ok',
         'timestamp': get_haiti_now().isoformat(),
         'forex_open': is_forex_open(),
         'otc_active': otc_provider.is_weekend(),
         'active_sessions': len(active_sessions),
-        'error_logs_count': len(last_error_logs)
+        'error_logs_count': len(last_error_logs),
+        'mode': 'OTC' if otc_provider.is_weekend() else 'Forex',
+        'api_source': 'TwelveData'
     })
 
 async def start_http_server():
+    """Démarre le serveur HTTP pour les checks de santé"""
     app = web.Application()
     app.router.add_get('/health', health_check)
     app.router.add_get('/', health_check)
@@ -1179,6 +1240,8 @@ async def start_http_server():
     print(f"✅ HTTP server running on :{port}")
     return runner
 
+# ================= POINT D'ENTRÉE =================
+
 async def main():
     global auto_verifier
 
@@ -1188,6 +1251,8 @@ async def main():
     print(f"🎯 8 signaux/session")
     print(f"⚡ Vérification: 2 min auto")
     print(f"🌐 OTC support: Week-end crypto")
+    print(f"🔧 Source: TwelveData unifié")
+    print(f"🔧 Fallback: Mode synthétique")
     print("="*60 + "\n")
 
     ensure_db()
@@ -1224,6 +1289,8 @@ async def main():
 
     bot_info = await app.bot.get_me()
     print(f"✅ BOT ACTIF: @{bot_info.username}\n")
+    print(f"🔧 Mode actuel: {'OTC (Crypto)' if otc_provider.is_weekend() else 'Forex'}")
+    print(f"🌐 API: TwelveData unifié\n")
 
     try:
         while True:
