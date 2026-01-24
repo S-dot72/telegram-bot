@@ -74,7 +74,7 @@ def get_current_pair(pair):
         forex_to_crypto = {
             'EUR/USD': 'BTC/USD',
             'GBP/USD': 'ETH/USD',
-            'USD/JPY': 'XRP/USD',
+            'USD/JPY': 'TRX/USD',
             'AUD/USD': 'LTC/USD',
             'BTC/USD': 'BTC/USD',  # Déjà crypto
             'ETH/USD': 'ETH/USD'
