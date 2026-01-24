@@ -74,7 +74,7 @@ def get_current_pair(pair):
         forex_to_crypto = {
             'EUR/USD': 'BTC/USD',
             'GBP/USD': 'ETH/USD',
-            'USD/JPY': 'TRX/USD',
+            'USD/JPY': 'XRP/USD',
             'AUD/USD': 'LTC/USD',
             'BTC/USD': 'BTC/USD',  # Déjà crypto
             'ETH/USD': 'ETH/USD'
@@ -93,7 +93,7 @@ def fetch_ohlc_td(pair, interval, outputsize=300):
         forex_to_crypto = {
             'EUR/USD': 'BTC/USD',
             'GBP/USD': 'ETH/USD',
-            'USD/JPY': 'TRX/USD',
+            'USD/JPY': 'XRP/USD',
             'AUD/USD': 'LTC/USD',
             'BTC/USD': 'BTC/USD',  # Déjà crypto
             'ETH/USD': 'ETH/USD'
@@ -260,13 +260,29 @@ async def cmd_start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Vérifier si session active
     if user_id in active_sessions:
         session = active_sessions[user_id]
-        await update.message.reply_text(
-            f"⚠️ Session déjà active !\n\n"
-            f"📊 Progression: {session['signal_count']}/{SIGNALS_PER_SESSION}\n"
-            f"✅ Wins: {session['wins']}\n"
-            f"❌ Losses: {session['losses']}\n\n"
-            f"Utilisez /endsession pour terminer"
-        )
+        
+        # Ajouter bouton pour continuer si session pas terminée
+        if session['signal_count'] < SIGNALS_PER_SESSION:
+            next_num = session['signal_count'] + 1
+            keyboard = [[InlineKeyboardButton(f"🎯 Generate Signal #{next_num}", callback_data=f"gen_signal_{user_id}")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await update.message.reply_text(
+                f"⚠️ Session déjà active !\n\n"
+                f"📊 Progression: {session['signal_count']}/{SIGNALS_PER_SESSION}\n"
+                f"✅ Wins: {session['wins']}\n"
+                f"❌ Losses: {session['losses']}\n\n"
+                f"Continuer avec signal #{next_num} ⬇️",
+                reply_markup=reply_markup
+            )
+        else:
+            await update.message.reply_text(
+                f"⚠️ Session déjà terminée !\n\n"
+                f"📊 Résultat: {session['signal_count']}/{SIGNALS_PER_SESSION}\n"
+                f"✅ Wins: {session['wins']}\n"
+                f"❌ Losses: {session['losses']}\n\n"
+                f"Utilisez /endsession pour voir le résumé"
+            )
         return
     
     if not is_forex_open():
@@ -288,14 +304,10 @@ async def cmd_start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton("🎯 Generate Signal #1", callback_data=f"gen_signal_{user_id}")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    is_weekend = otc_provider.is_weekend()
-    mode_text = "🏖️ OTC (Crypto)" if is_weekend else "📈 Forex"
-    
     await update.message.reply_text(
         "🚀 **SESSION DÉMARRÉE**\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         f"📅 {now_haiti.strftime('%H:%M:%S')}\n"
-        f"🌐 Mode: {mode_text}\n"
         f"🎯 Objectif: {SIGNALS_PER_SESSION} signaux M1\n"
         f"⚡ Vérification: 2 min auto\n\n"
         f"Cliquez pour générer signal #1 ⬇️",
@@ -409,7 +421,7 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
         await query.message.reply_text("Voulez-vous réessayer ?", reply_markup=reply_markup)
 
 async def generate_m1_signal(user_id, app):
-    """Version avec support OTC"""
+    """Génère un signal M1"""
     try:
         is_weekend = otc_provider.is_weekend()
         mode = "OTC" if is_weekend else "Forex"
@@ -423,7 +435,7 @@ async def generate_m1_signal(user_id, app):
         
         print(f"[SIGNAL] 🔍 {pair}...")
         
-        # Données M1 (maintenant supporte OTC)
+        # Données M1
         df = get_cached_ohlc(pair, TIMEFRAME_M1, outputsize=400)
         
         if df is None or len(df) < 50:
@@ -790,9 +802,19 @@ async def cmd_otc_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "🏖️ **Mode: OTC ACTIF**\n"
                 "💰 Source: Crypto (Binance)\n"
                 "⏰ Disponible: 24/7\n\n"
-                "📊 **Paires disponibles: BTC/USD, TRX/USD, ETH/USD, LTC/USD **\n\n"
+                "📊 **Paires disponibles:**\n\n"
             )
             
+            for i, pair in enumerate(otc_provider.get_available_pairs(), 1):
+                msg += f"• {pair}\n"
+            
+            msg += (
+                "\n💡 Les paires Forex sont automatiquement\n"
+                "   converties en crypto équivalentes:\n"
+                "   • EUR/USD → BTC/USD\n"
+                "   • GBP/USD → ETH/USD\n"
+                "   • USD/JPY → XRP/USD\n"
+            )
         else:
             msg += (
                 "📈 **Mode: FOREX STANDARD**\n"
