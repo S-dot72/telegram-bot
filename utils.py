@@ -6,6 +6,26 @@ from ta.momentum import RSIIndicator, StochasticOscillator
 from ta.volatility import BollingerBands, AverageTrueRange
 
 
+def round_to_m1_candle(dt):
+    """Arrondit un datetime à la bougie M1 (minute)"""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.replace(second=0, microsecond=0)
+
+
+def get_next_m1_candle(dt):
+    """Retourne le début de la PROCHAINE bougie M1"""
+    current_candle = round_to_m1_candle(dt)
+    return current_candle + timedelta(minutes=1)
+
+
+def get_m1_candle_range(dt):
+    """Retourne le début et la fin de la bougie M1"""
+    start = round_to_m1_candle(dt)
+    end = start + timedelta(minutes=1)
+    return start, end
+
+
 def round_to_m5_candle(dt):
     """Arrondit un datetime à la bougie M5 la plus proche"""
     if dt.tzinfo is None:
@@ -28,7 +48,7 @@ def get_m5_candle_range(dt):
 
 
 def compute_indicators(df, ema_fast=8, ema_slow=21, rsi_len=14, bb_len=20):
-    """Calcule des indicateurs techniques pour M5"""
+    """Calcule des indicateurs techniques pour M1 et M5"""
     df = df.copy()
     df['close'] = df['close'].astype(float)
     df['high'] = df['high'].astype(float)
@@ -92,17 +112,22 @@ def compute_indicators(df, ema_fast=8, ema_slow=21, rsi_len=14, bb_len=20):
 
 def rule_signal_ultra_strict(df, session_priority=3):
     """
-    Stratégie OPTIMISÉE V2 - PLUS PERMISSIVE pour avoir des signaux
+    Stratégie HYBRIDE V2.5 - Adaptatif selon priorité session
+    Compatible M1 et M5
     
-    CHANGEMENTS PAR RAPPORT À V1:
-    - Filtres ATR et Momentum ASSOUPLIS
-    - Score requis RÉDUIT pour sessions basse priorité
-    - Filtres finaux RETIRÉS (resistance/support)
+    VERSION 2.5 - MEILLEUR COMPROMIS QUANTITÉ/QUALITÉ:
+    
+    ADAPTABILITÉ PAR SESSION:
+    - Session priorité 5 (London/NY Overlap) : Mode STRICT (3/5 critères)
+    - Session priorité 3-4 (London, NY) : Mode MODÉRÉ (2.5/5 critères)
+    - Session priorité 1-2 (Asian, Evening) : Mode SOUPLE (2/5 critères)
     
     RÉSULTATS ATTENDUS:
-    - Signaux/jour: 6-12 (au lieu de 0-2)
+    - Signaux/jour: 8-12
     - Win rate: 65-75%
-    - Meilleur équilibre quantité/qualité
+    - Wins réels: 5-9/jour
+    
+    MEILLEUR COMPROMIS entre V2 (0% WR) et V3 (3-5 signaux/jour)
     """
     
     if len(df) < 50:
@@ -114,22 +139,22 @@ def rule_signal_ultra_strict(df, session_priority=3):
     # Déterminer mode selon priorité session
     if session_priority >= 5:
         mode = "STRICT"
-        required_score = 2.5  # Réduit de 3 → 2.5
-        adx_min = 18  # Réduit de 20 → 18
+        required_score = 3  # 3/5 critères
+        adx_min = 15
         rsi_range = (30, 70)
-        momentum_min = 0.015  # Réduit de 0.02 → 0.015
+        momentum_min = 0.02
     elif session_priority >= 3:
         mode = "MODÉRÉ"
-        required_score = 2.0  # Réduit de 2.5 → 2.0
-        adx_min = 15  # Réduit de 18 → 15
-        rsi_range = (30, 70)  # Réduit de (25,75) → (30,70) pour cohérence
-        momentum_min = 0.010  # Réduit de 0.015 → 0.010
+        required_score = 2.5  # 2.5/5 critères (arrondi dynamique)
+        adx_min = 13
+        rsi_range = (25, 75)
+        momentum_min = 0.015
     else:
         mode = "SOUPLE"
-        required_score = 1.5  # Réduit de 2 → 1.5
-        adx_min = 12  # Maintenu
-        rsi_range = (20, 80)  # Maintenu
-        momentum_min = 0.005  # Réduit de 0.01 → 0.005
+        required_score = 2  # 2/5 critères
+        adx_min = 12
+        rsi_range = (20, 80)
+        momentum_min = 0.01
     
     # Vérifications de base
     rsi = last.get('rsi')
@@ -144,80 +169,101 @@ def rule_signal_ultra_strict(df, session_priority=3):
         return None
     
     # ============================================
-    # FILTRES DE BASE (ASSOUPLIS)
+    # FILTRES DE BASE (ADAPTATIFS)
     # ============================================
     
-    # CRITERE 1: TENDANCE (assouplé)
+    # CRITERE 1: TENDANCE (adaptatif)
     if adx < adx_min:
         return None
     
-    # CRITERE 2: VOLATILITÉ (ASSOUPLI - était le problème principal)
+    # CRITERE 2: VOLATILITÉ
     atr = last.get('atr', 0)
-    if atr > 0:  # Simplement vérifier que ATR existe
-        atr_sma = df['atr'].rolling(20).mean().iloc[-1]
-        if atr_sma > 0:
-            # ASSOUPLI: 0.3x à 3.5x au lieu de 0.5x à 2.8x
-            if atr < atr_sma * 0.3 or atr > atr_sma * 3.5:
-                return None
+    atr_sma = df['atr'].rolling(20).mean().iloc[-1]
+    if atr < atr_sma * 0.5 or atr > atr_sma * 2.8:
+        return None
     
-    # CRITERE 3: RSI (maintenu)
+    # CRITERE 3: RSI (adaptatif)
     if rsi < rsi_range[0] or rsi > rsi_range[1]:
         return None
     
-    # CRITERE 4: MOMENTUM (ASSOUPLI - était un autre problème)
+    # CRITERE 4: MOMENTUM (adaptatif)
     momentum_3 = last.get('momentum_3', 0)
-    # ASSOUPLI: accepter même momentum très faible, juste rejeter extremes
-    if abs(momentum_3) > 3.0:  # Uniquement rejeter si mouvement > 3%
+    if abs(momentum_3) < momentum_min or abs(momentum_3) > 2.5:
         return None
-    # Pas de minimum requis maintenant (était 0.005-0.02)
     
-    # CRITERE 5: MACD HISTOGRAM (retiré pour tous les modes)
-    # Pas de filtre MACD minimum
+    # CRITERE 5: MACD HISTOGRAM (strict en mode STRICT uniquement)
+    if mode == "STRICT" and abs(macd_hist) < 0.0001:
+        return None
     
     # ============================================
     # ANALYSE CALL (BUY)
     # ============================================
     
     call_signals = []
-    call_weights = []
+    call_weights = []  # Poids pour mode MODÉRÉ
     
     # 1. Direction EMA (poids 1.0)
     ema_bullish = last['ema_fast'] > last['ema_slow']
-    call_signals.append(ema_bullish)
+    if mode == "STRICT":
+        ema_50_confirm = last['ema_slow'] > last.get('ema_50', 0)
+        call_signals.append(ema_bullish and ema_50_confirm)
+    else:
+        call_signals.append(ema_bullish)
     call_weights.append(1.0)
     
     # 2. MACD haussier (poids 1.0)
     macd_bullish = macd > macd_signal and macd_hist > 0
-    call_signals.append(macd_bullish)
+    if mode == "STRICT":
+        macd_growing = macd_hist > prev.get('MACDh_12_26_9', 0)
+        call_signals.append(macd_bullish and macd_growing)
+    else:
+        call_signals.append(macd_bullish)
     call_weights.append(1.0)
     
-    # 3. RSI zone haussière (poids 1.0 - augmenté de 0.8)
+    # 3. RSI zone haussière (poids 0.8)
     if mode == "STRICT":
         rsi_bullish = 45 < rsi < 70
     elif mode == "MODÉRÉ":
-        rsi_bullish = 40 < rsi < 70
+        rsi_bullish = 40 < rsi < 75
     else:
         rsi_bullish = 35 < rsi < 80
     call_signals.append(rsi_bullish)
-    call_weights.append(1.0)  # Augmenté de 0.8 → 1.0
+    call_weights.append(0.8)
     
-    # 4. Stochastic (poids 0.8 - augmenté de 0.7)
+    # 4. Stochastic (poids 0.7)
     stoch_bullish = stoch_k > stoch_d and 15 < stoch_k < 90
     call_signals.append(stoch_bullish)
-    call_weights.append(0.8)  # Augmenté de 0.7 → 0.8
+    call_weights.append(0.7)
     
-    # 5. ADX + momentum (poids 1.0, mais ASSOUPLI)
+    # 5. ADX + momentum (poids 1.0)
     momentum_5 = last.get('momentum_5', momentum_3)
-    # ASSOUPLI: juste OR maintenant, pas AND
-    adx_bullish = (last['adx_pos'] > last['adx_neg']) or (momentum_3 > 0)
+    if mode == "STRICT":
+        adx_bullish = (last['adx_pos'] > last['adx_neg']) and momentum_3 > 0 and momentum_5 > 0
+    else:
+        adx_bullish = (last['adx_pos'] > last['adx_neg']) or momentum_3 > 0
     call_signals.append(adx_bullish)
     call_weights.append(1.0)
     
     # DECISION CALL
-    call_score = sum(s * w for s, w in zip(call_signals, call_weights))
+    if mode == "MODÉRÉ":
+        # Score pondéré
+        call_score = sum(s * w for s, w in zip(call_signals, call_weights))
+        threshold = required_score
+    else:
+        # Score simple
+        call_score = sum(call_signals)
+        threshold = int(required_score)
     
-    if call_score >= required_score:
-        # FILTRES FINAUX RETIRÉS (resistance/support trop restrictifs)
+    if call_score >= threshold:
+        # Vérification finale (strict en mode STRICT)
+        if mode == "STRICT":
+            resistance = last.get('resistance')
+            if resistance and last['close'] > resistance * 0.995:
+                return None
+            bb_position = last.get('bb_position')
+            if bb_position and bb_position < 0.55:
+                return None
+        
         return 'CALL'
     
     # ============================================
@@ -229,40 +275,63 @@ def rule_signal_ultra_strict(df, session_priority=3):
     
     # 1. Direction EMA (poids 1.0)
     ema_bearish = last['ema_fast'] < last['ema_slow']
-    put_signals.append(ema_bearish)
+    if mode == "STRICT":
+        ema_50_confirm = last['ema_slow'] < last.get('ema_50', 0)
+        put_signals.append(ema_bearish and ema_50_confirm)
+    else:
+        put_signals.append(ema_bearish)
     put_weights.append(1.0)
     
     # 2. MACD baissier (poids 1.0)
     macd_bearish = macd < macd_signal and macd_hist < 0
-    put_signals.append(macd_bearish)
+    if mode == "STRICT":
+        macd_falling = macd_hist < prev.get('MACDh_12_26_9', 0)
+        put_signals.append(macd_bearish and macd_falling)
+    else:
+        put_signals.append(macd_bearish)
     put_weights.append(1.0)
     
-    # 3. RSI zone baissière (poids 1.0 - augmenté de 0.8)
+    # 3. RSI zone baissière (poids 0.8)
     if mode == "STRICT":
         rsi_bearish = 30 < rsi < 55
     elif mode == "MODÉRÉ":
-        rsi_bearish = 30 < rsi < 60
+        rsi_bearish = 25 < rsi < 60
     else:
         rsi_bearish = 20 < rsi < 65
     put_signals.append(rsi_bearish)
-    put_weights.append(1.0)  # Augmenté de 0.8 → 1.0
+    put_weights.append(0.8)
     
-    # 4. Stochastic (poids 0.8 - augmenté de 0.7)
+    # 4. Stochastic (poids 0.7)
     stoch_bearish = stoch_k < stoch_d and 10 < stoch_k < 85
     put_signals.append(stoch_bearish)
-    put_weights.append(0.8)  # Augmenté de 0.7 → 0.8
+    put_weights.append(0.7)
     
-    # 5. ADX + momentum (poids 1.0, mais ASSOUPLI)
-    # ASSOUPLI: juste OR maintenant
-    adx_bearish = (last['adx_neg'] > last['adx_pos']) or (momentum_3 < 0)
+    # 5. ADX + momentum (poids 1.0)
+    if mode == "STRICT":
+        adx_bearish = (last['adx_neg'] > last['adx_pos']) and momentum_3 < 0 and momentum_5 < 0
+    else:
+        adx_bearish = (last['adx_neg'] > last['adx_pos']) or momentum_3 < 0
     put_signals.append(adx_bearish)
     put_weights.append(1.0)
     
     # DECISION PUT
-    put_score = sum(s * w for s, w in zip(put_signals, put_weights))
+    if mode == "MODÉRÉ":
+        put_score = sum(s * w for s, w in zip(put_signals, put_weights))
+        threshold = required_score
+    else:
+        put_score = sum(put_signals)
+        threshold = int(required_score)
     
-    if put_score >= required_score:
-        # FILTRES FINAUX RETIRÉS
+    if put_score >= threshold:
+        # Vérification finale (strict en mode STRICT)
+        if mode == "STRICT":
+            support = last.get('support')
+            if support and last['close'] < support * 1.005:
+                return None
+            bb_position = last.get('bb_position')
+            if bb_position and bb_position > 0.45:
+                return None
+        
         return 'PUT'
     
     return None
@@ -367,6 +436,15 @@ def format_signal_reason(direction, confidence, indicators):
     return " | ".join(reason_parts)
 
 
+def validate_m1_timing(entry_time):
+    """Valide que l'heure d'entrée est bien alignée sur une bougie M1"""
+    if isinstance(entry_time, str):
+        entry_time = datetime.fromisoformat(entry_time.replace('Z', '+00:00'))
+    corrected = round_to_m1_candle(entry_time)
+    is_valid = (entry_time == corrected)
+    return is_valid, corrected
+
+
 def validate_m5_timing(entry_time):
     """Valide que l'heure d'entrée est bien alignée sur une bougie M5"""
     if isinstance(entry_time, str):
@@ -374,6 +452,15 @@ def validate_m5_timing(entry_time):
     corrected = round_to_m5_candle(entry_time)
     is_valid = (entry_time == corrected)
     return is_valid, corrected
+
+
+def get_m1_entry_exit_times(signal_time):
+    """Calcule les temps d'entrée et sortie M1 arrondis"""
+    if isinstance(signal_time, str):
+        signal_time = datetime.fromisoformat(signal_time.replace('Z', '+00:00'))
+    entry_time = get_next_m1_candle(signal_time)
+    exit_time = entry_time + timedelta(minutes=1)
+    return entry_time, exit_time
 
 
 def get_m5_entry_exit_times(signal_time):
