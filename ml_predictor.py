@@ -8,6 +8,11 @@ CHANGEMENTS MAJEURS:
 - Scoring manuel amélioré avec pénalités
 - Features enrichies pour meilleur ML
 - Filtres anti-faux-positifs renforcés
+
+NOUVEAU: Adaptation automatique OTC vs Forex
+- Détection auto des paires crypto
+- Seuils adaptatifs (80% Forex, 65% OTC)
+- Fallback automatique pour OTC
 """
 
 import numpy as np
@@ -17,6 +22,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import cross_val_score
 import joblib
 import os
+from datetime import datetime
 
 class MLSignalPredictor:
     def __init__(self, model_path='models/ml_model.pkl'):
@@ -25,10 +31,11 @@ class MLSignalPredictor:
         self.scaler = StandardScaler()
         self.model_fitted = False
         
-        # SEUILS STRICTS
-        self.min_confidence = 0.80          # 0.65 → 0.80 (CRITIQUE)
-        self.ultra_strict_confidence = 0.85  # 0.75 → 0.85
-        self.premium_confidence = 0.90       # Nouveau: sessions premium
+        # SEUILS ADAPTATIFS - Auto-détection OTC/Forex
+        self.min_confidence_forex = 0.80          # Forex en semaine
+        self.min_confidence_otc = 0.65           # OTC week-end (plus permissif)
+        self.ultra_strict_confidence = 0.85
+        self.premium_confidence = 0.90
         
         # Créer dossier models
         os.makedirs(os.path.dirname(model_path), exist_ok=True)
@@ -39,7 +46,43 @@ class MLSignalPredictor:
         else:
             self.model = self._create_hybrid_model()
             print("⚠️  ML: Modèle créé - En attente d'entraînement")
-            print(f"🎯 Seuil: {self.min_confidence*100:.0f}%")
+            print(f"🎯 Seuil adaptatif activé")
+            print(f"   📈 Forex: {self.min_confidence_forex*100:.0f}%")
+            print(f"   🏖️ OTC: {self.min_confidence_otc*100:.0f}%")
+    
+    def _is_weekend(self):
+        """Détecte si on est en week-end (UTC)"""
+        utc_now = datetime.utcnow()
+        return utc_now.weekday() >= 5  # Samedi=5, Dimanche=6
+    
+    def _detect_otc_pair(self, pair):
+        """Détecte si la paire est une crypto (OTC)"""
+        crypto_pairs = ['BTC/USD', 'ETH/USD', 'XRP/USD', 'LTC/USD', 
+                       'BTCUSDT', 'ETHUSDT', 'XRPUSDT', 'LTCUSDT']
+        return any(crypto in pair for crypto in crypto_pairs)
+    
+    def _get_min_confidence(self, pair=None, df=None):
+        """
+        Détermine automatiquement le seuil minimal
+        Priorité: 1. Week-end → OTC, 2. Paire crypto → OTC, 3. Sinon Forex
+        """
+        # Si on est en week-end → OTC
+        if self._is_weekend():
+            return self.min_confidence_otc
+        
+        # Si la paire est une crypto → OTC
+        if pair and self._detect_otc_pair(pair):
+            return self.min_confidence_otc
+        
+        # Vérifier les données pour détecter les cryptos
+        if df is not None and len(df) > 0:
+            last_price = df.iloc[-1].get('close', 0)
+            # Les cryptos ont généralement des prix très élevés (BTC) ou très bas (altcoins)
+            if last_price > 10000 or last_price < 10:  # Prix typiques des cryptos
+                return self.min_confidence_otc
+        
+        # Par défaut → Forex
+        return self.min_confidence_forex
     
     def _create_hybrid_model(self):
         """Modèle Gradient Boosting optimisé"""
@@ -439,12 +482,20 @@ class MLSignalPredictor:
         # Limiter entre 0.0 et 1.0
         return min(max(score, 0.0), 1.0)
     
-    def predict_signal(self, df, base_signal):
+    def predict_signal(self, df, base_signal, pair_name=None):
         """
-        Prédit avec seuils STRICTS
+        Prédit avec seuils ADAPTATIFS AUTO
+        - Détecte automatiquement OTC vs Forex
+        - Applique le seuil approprié
         
         Returns: (signal, confidence) ou (None, confidence)
         """
+        # Détection automatique du mode et seuil
+        min_confidence = self._get_min_confidence(pair_name, df)
+        
+        mode = "OTC" if min_confidence == self.min_confidence_otc else "Forex"
+        print(f"   🎯 Mode auto: {mode} (seuil: {min_confidence*100:.0f}%)")
+        
         # MODE 1: Modèle ML entraîné → Utiliser ML
         if self.model_fitted:
             try:
@@ -452,7 +503,16 @@ class MLSignalPredictor:
                 if features is None:
                     # Fallback scoring manuel
                     confidence = self.calculate_confidence_score(df, base_signal)
-                    return (base_signal, confidence) if confidence >= self.min_confidence else (None, confidence)
+                    
+                    # Adaptation OTC: être plus permissif
+                    if mode == "OTC" and confidence >= 0.55:
+                        print(f"   🏖️ OTC: Accepté avec score manuel {confidence:.1%}")
+                        return base_signal, confidence
+                    elif confidence >= min_confidence:
+                        return base_signal, confidence
+                    else:
+                        print(f"   ❌ Score manuel rejeté: {confidence:.1%} < {min_confidence:.0%}")
+                        return None, confidence
                 
                 X = pd.DataFrame([features])
                 
@@ -461,7 +521,15 @@ class MLSignalPredictor:
                 except:
                     # Scaler non prêt
                     confidence = self.calculate_confidence_score(df, base_signal)
-                    return (base_signal, confidence) if confidence >= self.min_confidence else (None, confidence)
+                    
+                    # Adaptation OTC
+                    if mode == "OTC" and confidence >= 0.55:
+                        print(f"   🏖️ OTC: Accepté sans scaler {confidence:.1%}")
+                        return base_signal, confidence
+                    elif confidence >= min_confidence:
+                        return base_signal, confidence
+                    else:
+                        return None, confidence
                 
                 # Prédiction ML
                 probas = self.model.predict_proba(X_scaled)[0]
@@ -469,27 +537,43 @@ class MLSignalPredictor:
                 
                 print(f"   🤖 ML: {ml_confidence:.1%}")
                 
-                # SEUIL STRICT: 80%
-                if ml_confidence < self.min_confidence:
-                    print(f"   ❌ ML Reject: {ml_confidence:.1%} < {self.min_confidence:.0%}")
-                    return None, ml_confidence
+                # SEUIL ADAPTATIF + Fallback OTC
+                if ml_confidence < min_confidence:
+                    # En mode OTC, être plus permissif
+                    if mode == "OTC" and ml_confidence >= 0.55:
+                        print(f"   🏖️ OTC: Accepté avec confiance réduite {ml_confidence:.1%}")
+                        return base_signal, max(ml_confidence, 0.60)
+                    else:
+                        print(f"   ❌ ML Rejeté: {ml_confidence:.1%} < {min_confidence:.0%}")
+                        return None, ml_confidence
                 
                 return base_signal, ml_confidence
                 
             except Exception as e:
-                print(f"   ⚠️  ML Error: {e}")
-                # Fallback
+                print(f"   ⚠️  ML Erreur: {e}")
+                # Fallback avec adaptation OTC
                 confidence = self.calculate_confidence_score(df, base_signal)
-                return (base_signal, confidence) if confidence >= self.min_confidence else (None, confidence)
+                
+                if mode == "OTC" and confidence >= 0.55:
+                    print(f"   🏖️ OTC Fallback: {confidence:.1%}")
+                    return base_signal, confidence
+                elif confidence >= min_confidence:
+                    return base_signal, confidence
+                else:
+                    return None, confidence
         
-        # MODE 2: Pas de ML → Scoring manuel strict
+        # MODE 2: Pas de ML → Scoring manuel avec adaptation OTC
         else:
             confidence = self.calculate_confidence_score(df, base_signal)
             
             print(f"   💪 Score manuel: {confidence:.1%}")
             
-            if confidence < self.min_confidence:
-                print(f"   ❌ Score trop bas: {confidence:.1%} < {self.min_confidence:.0%}")
+            # Adaptation OTC: être plus permissif
+            if mode == "OTC" and confidence >= 0.55:
+                print(f"   🏖️ OTC: Accepté avec score manuel")
+                return base_signal, max(confidence, 0.60)
+            elif confidence < min_confidence:
+                print(f"   ❌ Score trop bas: {confidence:.1%} < {min_confidence:.0%}")
                 return None, confidence
             
             return base_signal, confidence
@@ -529,7 +613,8 @@ class MLSignalPredictor:
                 'model': self.model,
                 'scaler': self.scaler,
                 'model_fitted': self.model_fitted,
-                'min_confidence': self.min_confidence,
+                'min_confidence_forex': self.min_confidence_forex,
+                'min_confidence_otc': self.min_confidence_otc,
                 'ultra_strict_confidence': self.ultra_strict_confidence,
                 'premium_confidence': self.premium_confidence
             }, self.model_path)
@@ -544,12 +629,14 @@ class MLSignalPredictor:
             self.model = data['model']
             self.scaler = data['scaler']
             self.model_fitted = data.get('model_fitted', False)
-            self.min_confidence = data.get('min_confidence', 0.80)
+            self.min_confidence_forex = data.get('min_confidence_forex', 0.80)
+            self.min_confidence_otc = data.get('min_confidence_otc', 0.65)
             self.ultra_strict_confidence = data.get('ultra_strict_confidence', 0.85)
             self.premium_confidence = data.get('premium_confidence', 0.90)
             
             print(f"✅ Modèle ML chargé: {self.model_path}")
-            print(f"   🎯 Seuil min: {self.min_confidence:.0%}")
+            print(f"   🎯 Seuil Forex: {self.min_confidence_forex*100:.0f}%")
+            print(f"   🏖️ Seuil OTC: {self.min_confidence_otc*100:.0f}%")
             print(f"   🔥 Seuil ultra: {self.ultra_strict_confidence:.0%}")
             print(f"   ⭐ Seuil premium: {self.premium_confidence:.0%}")
             print(f"   🤖 Entraîné: {'Oui' if self.model_fitted else 'Non'}")
@@ -564,7 +651,9 @@ class MLSignalPredictor:
             'model_loaded': self.model is not None,
             'model_fitted': self.model_fitted,
             'model_type': type(self.model).__name__ if self.model else 'None',
-            'min_confidence': self.min_confidence,
+            'min_confidence_forex': self.min_confidence_forex,
+            'min_confidence_otc': self.min_confidence_otc,
             'ultra_strict_confidence': self.ultra_strict_confidence,
-            'premium_confidence': self.premium_confidence
+            'premium_confidence': self.premium_confidence,
+            'current_mode': 'OTC' if self._is_weekend() else 'Forex'
         }
