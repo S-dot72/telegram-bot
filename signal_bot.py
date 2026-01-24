@@ -801,7 +801,7 @@ async def cmd_otc_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "   converties en crypto équivalentes:\n"
                 "   • EUR/USD → BTC/USD\n"
                 "   • GBP/USD → ETH/USD\n"
-                "   • USD/JPY → XRP/USD\n"
+                "   • USD/JPY → TRX/USD\n"
             )
         else:
             msg += (
