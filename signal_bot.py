@@ -39,6 +39,20 @@ active_sessions = {}
 TWELVE_TS_URL = 'https://api.twelvedata.com/time_series'
 ohlc_cache = {}
 
+# Liste pour stocker les erreurs récentes
+last_error_logs = []
+
+def add_error_log(message):
+    """Ajoute un message d'erreur à la liste des logs"""
+    global last_error_logs
+    timestamp = datetime.now().strftime('%H:%M:%S')
+    log_entry = f"{timestamp} - {message}"
+    print(log_entry)
+    last_error_logs.append(log_entry)
+    # Garder seulement les 20 derniers messages
+    if len(last_error_logs) > 20:
+        last_error_logs.pop(0)
+
 def get_haiti_now():
     return datetime.now(HAITI_TZ)
 
@@ -51,17 +65,19 @@ def is_forex_open():
     
     # Si week-end -> OTC disponible (crypto 24/7)
     if otc_provider.is_weekend():
-        print("   💡 Forex fermé mais OTC disponible (crypto)")
-        return True  # OTC always open
+        return True  # OTC toujours ouvert le week-end
     
-    # Vérification Forex standard
+    # Vérification Forex standard (semaine)
     weekday = now_utc.weekday()
     hour = now_utc.hour
     
+    # Forex fermé le samedi
     if weekday == 5:
         return False
+    # Forex fermé le dimanche avant 22h UTC
     if weekday == 6 and hour < 22:
         return False
+    # Forex fermé le vendredi après 22h UTC
     if weekday == 4 and hour >= 22:
         return False
     
@@ -106,29 +122,37 @@ def check_api_availability():
                 'apikey': TWELVEDATA_API_KEY,
                 'format': 'JSON'
             }
-            r = requests.get(TWELVE_TS_URL, params=params, timeout=10)
-            
-            if r.status_code == 200:
-                j = r.json()
-                if 'values' in j and len(j['values']) > 0:
-                    results['forex_available'] = True
-                    results['test_pairs'].append({
-                        'pair': test_pair,
-                        'status': 'OK',
-                        'data_points': len(j['values']),
-                        'last_price': j['values'][0].get('close', 'N/A')
-                    })
+            try:
+                r = requests.get(TWELVE_TS_URL, params=params, timeout=10)
+                
+                if r.status_code == 200:
+                    j = r.json()
+                    if 'values' in j and len(j['values']) > 0:
+                        results['forex_available'] = True
+                        results['test_pairs'].append({
+                            'pair': test_pair,
+                            'status': 'OK',
+                            'data_points': len(j['values']),
+                            'last_price': j['values'][0].get('close', 'N/A')
+                        })
+                    else:
+                        error_msg = j.get('message', 'No values in response') if 'message' in j else 'Response empty'
+                        results['test_pairs'].append({
+                            'pair': test_pair,
+                            'status': 'NO_DATA',
+                            'error': error_msg
+                        })
                 else:
                     results['test_pairs'].append({
                         'pair': test_pair,
-                        'status': 'NO_DATA',
-                        'error': j.get('message', 'No values in response')
+                        'status': 'ERROR',
+                        'error': f'HTTP {r.status_code}'
                     })
-            else:
+            except Exception as e:
                 results['test_pairs'].append({
                     'pair': test_pair,
                     'status': 'ERROR',
-                    'error': f'HTTP {r.status_code}'
+                    'error': str(e)[:100]
                 })
         
         # Tester l'API OTC (Binance)
@@ -188,10 +212,11 @@ def fetch_ohlc_td(pair, interval, outputsize=300):
         # Récupérer données OTC
         df = otc_provider.get_otc_data(otc_pair, interval, outputsize)
         
-        if df is not None:
+        if df is not None and len(df) > 0:
             return df
         else:
-            raise RuntimeError("Données OTC indisponibles")
+            add_error_log(f"OTC: Pas de données pour {otc_pair}")
+            raise RuntimeError(f"Données OTC indisponibles pour {otc_pair}")
     
     # Mode Forex normal (semaine)
     if not is_forex_open():
@@ -248,7 +273,10 @@ def get_cached_ohlc(pair, interval, outputsize=300):
         ohlc_cache[cache_key] = (df, current_time)
         return df
     except RuntimeError as e:
-        print(f"⚠️ Cache OHLC: {e}")
+        add_error_log(f"Cache OHLC: {e}")
+        return None
+    except Exception as e:
+        add_error_log(f"Erreur get_cached_ohlc: {e}")
         return None
 
 def persist_signal(payload):
@@ -329,7 +357,8 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "**🌐 OTC (Week-end):**\n"
         "• /otcstatus - Statut OTC\n"
         "• /testotc - Tester OTC\n"
-        "• /checkapi - Vérifier APIs\n\n"
+        "• /checkapi - Vérifier APIs\n"
+        "• /lasterrors - Dernières erreurs\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "🎯 M1 | 8 signaux/session\n"
         "⚡ Vérif auto: 2 min\n"
@@ -370,8 +399,14 @@ async def cmd_start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     if not is_forex_open():
-        await update.message.reply_text("🏖️ Marché fermé")
-        return
+        # Même si Forex est fermé, OTC peut être ouvert
+        # Vérifier si c'est le week-end (OTC)
+        if otc_provider.is_weekend():
+            # OTC est disponible, on peut démarrer une session
+            pass
+        else:
+            await update.message.reply_text("🏖️ Marché fermé (Forex fermé et pas en week-end pour OTC)")
+            return
     
     # Créer nouvelle session
     now_haiti = get_haiti_now()
@@ -388,10 +423,14 @@ async def cmd_start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton("🎯 Generate Signal #1", callback_data=f"gen_signal_{user_id}")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
+    is_weekend = otc_provider.is_weekend()
+    mode_text = "🏖️ OTC (Crypto)" if is_weekend else "📈 Forex"
+    
     await update.message.reply_text(
         "🚀 **SESSION DÉMARRÉE**\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         f"📅 {now_haiti.strftime('%H:%M:%S')}\n"
+        f"🌐 Mode: {mode_text}\n"
         f"🎯 Objectif: {SIGNALS_PER_SESSION} signaux M1\n"
         f"⚡ Vérification: 2 min auto\n\n"
         f"Cliquez pour générer signal #1 ⬇️",
@@ -496,7 +535,7 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
     else:
         await query.edit_message_text(
             "⚠️ Aucun signal (conditions non remplies)\n\n"
-            "Réessayez dans quelques secondes"
+            "Utilisez /lasterrors pour voir les détails d'erreur"
         )
         
         # Proposer de réessayer
@@ -512,25 +551,37 @@ async def generate_m1_signal(user_id, app):
         
         print(f"\n[SIGNAL] 📤 M1 {mode} pour user {user_id}")
         
+        # Vérifier si l'utilisateur a une session active
+        if user_id not in active_sessions:
+            add_error_log(f"User {user_id} n'a pas de session active")
+            return None
+        
+        session = active_sessions.get(user_id)
+        
         # Rotation paires
         active_pairs = PAIRS[:3]
-        session = active_sessions.get(user_id)
         pair = active_pairs[session['signal_count'] % len(active_pairs)]
         
         print(f"[SIGNAL] 🔍 {pair}...")
+        
+        # Vérifier si on est en week-end et OTC devrait être actif
+        if is_weekend:
+            current_pair = get_current_pair(pair)
+            print(f"[SIGNAL] 🔄 Paire convertie: {pair} → {current_pair}")
         
         # Données M1
         df = get_cached_ohlc(pair, TIMEFRAME_M1, outputsize=400)
         
         if df is None:
-            print(f"[SIGNAL] ❌ Pas de données {mode} (df est None)")
+            add_error_log(f"[SIGNAL] ❌ Pas de données {mode} (df est None)")
             return None
         
         if len(df) < 50:
-            print(f"[SIGNAL] ❌ Pas assez de données: {len(df)} bougies (min 50)")
+            add_error_log(f"[SIGNAL] ❌ Pas assez de données: {len(df)} bougies (min 50)")
             return None
         
         print(f"[SIGNAL] ✅ {len(df)} bougies M1 ({mode})")
+        print(f"[SIGNAL] 📈 Dernière bougie: {df.iloc[-1]['close']:.5f} à {df.index[-1]}")
         
         # Indicateurs
         df = compute_indicators(df)
@@ -543,12 +594,13 @@ async def generate_m1_signal(user_id, app):
         base_signal = rule_signal_ultra_strict(df, session_priority=5)
         
         if not base_signal:
-            print("[SIGNAL] ⏭️ Rejeté (stratégie ultra-stricte)")
+            add_error_log("[SIGNAL] ⏭️ Rejeté (stratégie ultra-stricte)")
             # Log des dernières valeurs pour debug
-            print(f"[DEBUG] Dernières 5 bougies:")
+            debug_msg = "[DEBUG] Dernières 5 bougies:"
             for i in range(-5, 0):
                 row = df.iloc[i]
-                print(f"  {row.name.strftime('%H:%M')}: O{row['open']:.5f} H{row['high']:.5f} L{row['low']:.5f} C{row['close']:.5f}")
+                debug_msg += f"\n  {row.name.strftime('%H:%M')}: O{row['open']:.5f} H{row['high']:.5f} L{row['low']:.5f} C{row['close']:.5f}"
+            print(debug_msg)
             return None
         
         print(f"[SIGNAL] ✅ Stratégie: {base_signal}")
@@ -556,10 +608,10 @@ async def generate_m1_signal(user_id, app):
         # ML
         ml_signal, ml_conf = ml_predictor.predict_signal(df, base_signal)
         if ml_signal is None:
-            print(f"[SIGNAL] ❌ ML: pas de signal")
+            add_error_log(f"[SIGNAL] ❌ ML: pas de signal")
             return None
         if ml_conf < CONFIDENCE_THRESHOLD:
-            print(f"[SIGNAL] ❌ ML: confiance trop basse ({ml_conf:.1%} < {CONFIDENCE_THRESHOLD:.0%})")
+            add_error_log(f"[SIGNAL] ❌ ML: confiance trop basse ({ml_conf:.1%} < {CONFIDENCE_THRESHOLD:.0%})")
             return None
         
         print(f"[SIGNAL] ✅ ML: {ml_signal} ({ml_conf:.1%})")
@@ -611,7 +663,8 @@ async def generate_m1_signal(user_id, app):
         return signal_id
         
     except Exception as e:
-        print(f"[SIGNAL] ❌ Erreur: {e}")
+        error_msg = f"[SIGNAL] ❌ Erreur: {e}"
+        add_error_log(error_msg)
         import traceback
         traceback.print_exc()
         return None
@@ -1068,10 +1121,36 @@ async def cmd_quick_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if signal_id:
             await update.message.reply_text(f"✅ Signal généré avec succès! ID: {signal_id}")
         else:
-            await update.message.reply_text("❌ Échec de génération du signal")
+            await update.message.reply_text(
+                "❌ Échec de génération du signal\n\n"
+                "Causes possibles:\n"
+                "1. Aucune donnée disponible (vérifiez avec /checkapi)\n"
+                "2. Conditions de trading non remplies (trop strictes)\n"
+                "3. Confiance du ML trop basse (<65%)\n"
+                "4. Problème de connexion API\n\n"
+                "Utilisez /lasterrors pour voir les détails d'erreur."
+            )
             
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {str(e)[:200]}")
+
+async def cmd_last_errors(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Affiche les dernières erreurs"""
+    global last_error_logs
+    
+    if not last_error_logs:
+        await update.message.reply_text("✅ Aucune erreur récente.")
+        return
+    
+    message = "📋 **DERNIÈRES ERREURS**\n━━━━━━━━━━━━━━━━━━━━\n\n"
+    
+    # Afficher les 10 dernières erreurs (les plus récentes en premier)
+    for i, error in enumerate(reversed(last_error_logs[-10:]), 1):
+        message += f"{i}. {error}\n\n"
+    
+    message += "━━━━━━━━━━━━━━━━━━━━"
+    
+    await update.message.reply_text(message)
 
 # ===== SERVEUR HTTP =====
 
@@ -1081,7 +1160,8 @@ async def health_check(request):
         'timestamp': get_haiti_now().isoformat(),
         'forex_open': is_forex_open(),
         'otc_active': otc_provider.is_weekend(),
-        'active_sessions': len(active_sessions)
+        'active_sessions': len(active_sessions),
+        'error_logs_count': len(last_error_logs)
     })
 
 async def start_http_server():
@@ -1132,6 +1212,7 @@ async def main():
     app.add_handler(CommandHandler('testotc', cmd_test_otc))
     app.add_handler(CommandHandler('checkapi', cmd_check_api))
     app.add_handler(CommandHandler('quicktest', cmd_quick_test))
+    app.add_handler(CommandHandler('lasterrors', cmd_last_errors))
     
     # Callbacks
     app.add_handler(CallbackQueryHandler(callback_generate_signal, pattern=r'^gen_signal_'))
