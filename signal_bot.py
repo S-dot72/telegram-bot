@@ -790,19 +790,9 @@ async def cmd_otc_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "🏖️ **Mode: OTC ACTIF**\n"
                 "💰 Source: Crypto (Binance)\n"
                 "⏰ Disponible: 24/7\n\n"
-                "📊 **Paires disponibles:**\n\n"
+                "📊 **Paires disponibles: BTC/USD, TRX/USD, ETH/USD, LTC/USD **\n\n"
             )
             
-            for i, pair in enumerate(otc_provider.get_available_pairs(), 1):
-                msg += f"• {pair}\n"
-            
-            msg += (
-                "\n💡 Les paires Forex sont automatiquement\n"
-                "   converties en crypto équivalentes:\n"
-                "   • EUR/USD → BTC/USD\n"
-                "   • GBP/USD → ETH/USD\n"
-                "   • USD/JPY → TRX/USD\n"
-            )
         else:
             msg += (
                 "📈 **Mode: FOREX STANDARD**\n"
