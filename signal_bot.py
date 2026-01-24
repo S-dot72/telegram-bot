@@ -201,30 +201,15 @@ def fetch_ohlc_td(pair, interval, outputsize=300):
     if otc_provider.is_weekend():
         print(f"🏖️ Week-end - Mode OTC (Crypto via APIs multiples)")
         
-        # Mapping Forex -> Crypto pour le week-end
-        forex_to_crypto = {
-            'EUR/USD': 'BTC/USD',
-            'GBP/USD': 'ETH/USD',
-            'USD/JPY': 'XRP/USD',
-            'AUD/USD': 'LTC/USD',
-            'BTC/USD': 'BTC/USD',
-            'ETH/USD': 'ETH/USD'
-        }
-        
-        crypto_pair = forex_to_crypto.get(pair, 'BTC/USD')
-        
-        if crypto_pair != pair:
-            print(f"   🔄 Conversion: {pair} → {crypto_pair}")
-        
         # Utiliser la méthode unifiée get_otc_data
-        df = otc_provider.get_otc_data(crypto_pair, interval, outputsize)
+        df = otc_provider.get_otc_data(pair, interval, outputsize)
         
         if df is not None and len(df) > 0:
             print(f"✅ Données Crypto récupérées: {len(df)} bougies")
             return df
         else:
             print("⚠️ APIs Crypto indisponibles, basculement sur synthétique")
-            return otc_provider.generate_synthetic_data(crypto_pair, interval, outputsize)
+            return otc_provider.generate_synthetic_data(pair, interval, outputsize)
     
     # Mode Forex normal (semaine)
     if not is_forex_open():
@@ -279,7 +264,7 @@ def get_cached_ohlc(pair, interval, outputsize=300):
             return cached_data
     
     try:
-        df = fetch_ohlc_td(pair, interval, outputsize)
+        df = fetch_ohlc_td(current_pair, interval, outputsize)
         ohlc_cache[cache_key] = (df, current_time)
         
         if df is not None and len(df) > 0:
@@ -381,6 +366,7 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /testotc - Tester OTC\n"
         "• /checkapi - Vérifier APIs\n"
         "• /debugapi - Debug APIs\n"
+        "• /debugpair - Debug conversion paires\n"
         "• /lasterrors - Dernières erreurs\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "🎯 M1 | 8 signaux/session\n"
@@ -576,18 +562,21 @@ async def generate_m1_signal(user_id, app):
         active_pairs = PAIRS[:3]
         pair = active_pairs[session['signal_count'] % len(active_pairs)]
         
-        print(f"[SIGNAL] 🔍 {pair}...")
+        print(f"[SIGNAL] 🔍 Paire originale: {pair}")
         
-        # Vérifier si on est en week-end
+        # Obtenir la paire actuelle (convertie en crypto si week-end)
+        current_pair = get_current_pair(pair)
+        
         if is_weekend:
-            current_pair = get_current_pair(pair)
-            print(f"[SIGNAL] 🔄 Paire convertie: {pair} → {current_pair}")
+            print(f"[SIGNAL] 🔄 Paire convertie pour week-end: {pair} → {current_pair}")
+        else:
+            print(f"[SIGNAL] 📈 Paire Forex: {current_pair}")
         
-        # Données M1
-        df = get_cached_ohlc(pair, TIMEFRAME_M1, outputsize=400)
+        # Données M1 - Utiliser current_pair (crypto en week-end, forex en semaine)
+        df = get_cached_ohlc(current_pair, TIMEFRAME_M1, outputsize=400)
         
         if df is None:
-            add_error_log(f"[SIGNAL] ❌ Pas de données {mode} (df est None)")
+            add_error_log(f"[SIGNAL] ❌ Pas de données {mode} (df est None) pour {current_pair}")
             return None
         
         if len(df) < 50:
@@ -598,18 +587,10 @@ async def generate_m1_signal(user_id, app):
         print(f"[SIGNAL] ✅ {len(df)} bougies M1 ({mode})")
         print(f"[SIGNAL] 📈 Dernière bougie: {df.iloc[-1]['close']:.5f} à {df.index[-1]}")
         
-        # Vérifier si les données sont synthétiques
-        if is_weekend and df.iloc[-1].get('close', 0) > 0:
-            print(f"[SIGNAL] ℹ️ Prix actuel: ${df.iloc[-1]['close']:.2f}")
-        
         # Indicateurs
         df = compute_indicators(df)
         
-        # Vérifier les indicateurs
-        print(f"[SIGNAL] 📊 RSI: {df.iloc[-1].get('rsi', 'N/A'):.2f}")
-        print(f"[SIGNAL] 📊 ADX: {df.iloc[-1].get('adx', 'N/A'):.2f}")
-        
-        # Stratégie - Beaucoup moins restrictive en mode OTC
+        # Stratégie - Règles adaptées selon le mode
         if is_weekend:
             # Mode OTC - règles très permissives
             base_signal = rule_signal_ultra_strict(df, session_priority=2)  # Priorité basse
@@ -650,14 +631,15 @@ async def generate_m1_signal(user_id, app):
         entry_time_utc = entry_time_haiti.astimezone(timezone.utc)
         
         payload = {
-            'pair': pair, 
+            'pair': current_pair,  # Stocker la paire actuelle utilisée
             'direction': ml_signal, 
             'reason': f'M1 Session {mode} - ML {ml_conf:.1%}',
             'ts_enter': entry_time_utc.isoformat(), 
             'ts_send': get_utc_now().isoformat(),
             'confidence': ml_conf, 
             'payload': json.dumps({
-                'pair': pair,
+                'original_pair': pair,  # Conserver l'original pour référence
+                'actual_pair': current_pair,  # Ajouter la paire utilisée
                 'user_id': user_id, 
                 'mode': mode,
                 'rsi': df.iloc[-1].get('rsi'),
@@ -669,21 +651,19 @@ async def generate_m1_signal(user_id, app):
         }
         signal_id = persist_signal(payload)
         
-        # Envoyer à l'utilisateur
+        # Envoyer à l'utilisateur - MESSAGE SIMPLIFIÉ
         direction_text = "BUY ↗️" if ml_signal == "CALL" else "SELL ↘️"
-        data_source = "Réelles" if df.iloc[-1].get('close', 0) > 0 else "Synthétiques"
         
+        # Format simplifié comme demandé
         msg = (
-            f"🎯 **SIGNAL M1 #{session['signal_count'] + 1}**\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"💱 {pair}\n"
+            f"🎯 **SIGNAL #{session['signal_count'] + 1}**\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"💱 {current_pair}\n"
             f"🌐 Mode: {mode}\n"
-            f"📡 Données: {data_source}\n"
+            f"🕐 Entrée: {entry_time_haiti.strftime('%H:%M')}\n"
             f"📈 Direction: **{direction_text}**\n"
             f"💪 Confiance: **{int(ml_conf*100)}%**\n"
-            f"📊 RSI: {df.iloc[-1].get('rsi', 0):.1f}\n"
-            f"🕐 Entrée: {entry_time_haiti.strftime('%H:%M')}\n\n"
-            f"🔍 Vérification auto dans 2 min..."
+            f"timeframe: 1 minute"
         )
         
         try:
@@ -1012,6 +992,7 @@ async def cmd_otc_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "   • EUR/USD → BTC/USD\n"
                 "   • GBP/USD → ETH/USD\n"
                 "   • USD/JPY → XRP/USD\n"
+                "   • AUD/USD → LTC/USD\n"
             )
         else:
             msg += (
@@ -1236,6 +1217,48 @@ async def cmd_debug_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur debug: {e}")
 
+async def cmd_debug_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Debug la conversion de paires"""
+    try:
+        is_weekend = otc_provider.is_weekend()
+        now_haiti = get_haiti_now()
+        
+        msg = f"🔧 **DEBUG CONVERSION PAIRES**\n"
+        msg += f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        msg += f"📅 {now_haiti.strftime('%A %d/%m/%Y')}\n"
+        msg += f"🕐 {now_haiti.strftime('%H:%M:%S')}\n\n"
+        msg += f"🏖️ Week-end: {'✅ OUI' if is_weekend else '❌ NON'}\n\n"
+        
+        forex_pairs = ['EUR/USD', 'GBP/USD', 'USD/JPY', 'AUD/USD', 'BTC/USD', 'ETH/USD']
+        
+        msg += "📊 **Conversion des paires:**\n\n"
+        for pair in forex_pairs:
+            current = get_current_pair(pair)
+            if pair == current:
+                msg += f"• {pair} → {current} (inchangé)\n"
+            else:
+                msg += f"• {pair} → {current} 🔄\n"
+        
+        msg += f"\n💡 **Règles de conversion:**\n"
+        msg += f"• En week-end: Forex → Crypto\n"
+        msg += f"• En semaine: Forex standard\n"
+        msg += f"\n📈 **Exemple de session:**\n"
+        
+        # Simuler une session
+        active_pairs = forex_pairs[:3]
+        for i in range(min(3, SIGNALS_PER_SESSION)):
+            pair = active_pairs[i % len(active_pairs)]
+            current = get_current_pair(pair)
+            msg += f"  Signal #{i+1}: {pair} → {current}\n"
+        
+        msg += f"\n━━━━━━━━━━━━━━━━━━━━\n"
+        msg += f"💡 Test avec /quicktest pour générer un signal"
+        
+        await update.message.reply_text(msg)
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur: {e}")
+
 async def cmd_quick_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Test rapide pour générer un signal immédiatement"""
     try:
@@ -1276,7 +1299,7 @@ async def cmd_quick_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "❌ Échec de génération du signal\n\n"
                 "Causes possibles:\n"
                 "1. Aucune donnée disponible (vérifiez avec /checkapi)\n"
-                "2. Conditions de trading non remplies (trop strictes)\n"
+                "2. Conditions de trading non remplies\n"
                 "3. Confiance du ML trop basse (<65%)\n"
                 "4. Problème de connexion API\n\n"
                 "Utilisez /lasterrors pour voir les détails d'erreur."
@@ -1372,6 +1395,7 @@ async def main():
     app.add_handler(CommandHandler('testotc', cmd_test_otc))
     app.add_handler(CommandHandler('checkapi', cmd_check_api))
     app.add_handler(CommandHandler('debugapi', cmd_debug_api))
+    app.add_handler(CommandHandler('debugpair', cmd_debug_pair))
     app.add_handler(CommandHandler('quicktest', cmd_quick_test))
     app.add_handler(CommandHandler('lasterrors', cmd_last_errors))
     
