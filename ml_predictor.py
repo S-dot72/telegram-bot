@@ -1,18 +1,12 @@
 """
-ML Predictor OPTIMISÉ - Seuils Stricts pour 75-85% Win Rate
+ML Predictor OPTIMISÉ avec adaptation automatique OTC/Forex
 =============================================================
 
-CHANGEMENTS MAJEURS:
-- Seuil minimum: 65% → 80%
-- Seuil ultra: 75% → 85%
-- Scoring manuel amélioré avec pénalités
-- Features enrichies pour meilleur ML
-- Filtres anti-faux-positifs renforcés
-
-NOUVEAU: Adaptation automatique OTC vs Forex
-- Détection auto des paires crypto
-- Seuils adaptatifs (80% Forex, 65% OTC)
-- Fallback automatique pour OTC
+FONCTIONNEMENT ADAPTATIF:
+- Mode Forex (semaine): Seuil strict 80%
+- Mode OTC (week-end/crypto): Seuil flexible 65%
+- Fallback automatique en cas d'erreur
+- Compatibilité totale avec signal_bot.py existant
 """
 
 import numpy as np
@@ -31,11 +25,15 @@ class MLSignalPredictor:
         self.scaler = StandardScaler()
         self.model_fitted = False
         
-        # SEUILS ADAPTATIFS - Auto-détection OTC/Forex
-        self.min_confidence_forex = 0.80          # Forex en semaine
-        self.min_confidence_otc = 0.65           # OTC week-end (plus permissif)
+        # SEUILS ADAPTATIFS
+        self.min_confidence_forex = 0.80          # Strict pour Forex
+        self.min_confidence_otc = 0.65            # Flexible pour OTC
         self.ultra_strict_confidence = 0.85
         self.premium_confidence = 0.90
+        
+        # Cache pour éviter recalculs
+        self.last_weekend_check = None
+        self.is_weekend_cache = None
         
         # Créer dossier models
         os.makedirs(os.path.dirname(model_path), exist_ok=True)
@@ -46,537 +44,368 @@ class MLSignalPredictor:
         else:
             self.model = self._create_hybrid_model()
             print("⚠️  ML: Modèle créé - En attente d'entraînement")
-            print(f"🎯 Seuil adaptatif activé")
-            print(f"   📈 Forex: {self.min_confidence_forex*100:.0f}%")
-            print(f"   🏖️ OTC: {self.min_confidence_otc*100:.0f}%")
-    
-    def _is_weekend(self):
-        """Détecte si on est en week-end (UTC)"""
-        utc_now = datetime.utcnow()
-        return utc_now.weekday() >= 5  # Samedi=5, Dimanche=6
-    
-    def _detect_otc_pair(self, pair):
-        """Détecte si la paire est une crypto (OTC)"""
-        crypto_pairs = ['BTC/USD', 'ETH/USD', 'XRP/USD', 'LTC/USD', 
-                       'BTCUSDT', 'ETHUSDT', 'XRPUSDT', 'LTCUSDT']
-        return any(crypto in pair for crypto in crypto_pairs)
-    
-    def _get_min_confidence(self, pair=None, df=None):
-        """
-        Détermine automatiquement le seuil minimal
-        Priorité: 1. Week-end → OTC, 2. Paire crypto → OTC, 3. Sinon Forex
-        """
-        # Si on est en week-end → OTC
-        if self._is_weekend():
-            return self.min_confidence_otc
-        
-        # Si la paire est une crypto → OTC
-        if pair and self._detect_otc_pair(pair):
-            return self.min_confidence_otc
-        
-        # Vérifier les données pour détecter les cryptos
-        if df is not None and len(df) > 0:
-            last_price = df.iloc[-1].get('close', 0)
-            # Les cryptos ont généralement des prix très élevés (BTC) ou très bas (altcoins)
-            if last_price > 10000 or last_price < 10:  # Prix typiques des cryptos
-                return self.min_confidence_otc
-        
-        # Par défaut → Forex
-        return self.min_confidence_forex
+            print(f"🎯 Seuil Forex: {self.min_confidence_forex*100:.0f}%")
+            print(f"🏖️ Seuil OTC: {self.min_confidence_otc*100:.0f}%")
     
     def _create_hybrid_model(self):
         """Modèle Gradient Boosting optimisé"""
         return GradientBoostingClassifier(
-            n_estimators=200,      # 100 → 200
-            max_depth=8,           # 6 → 8
-            learning_rate=0.05,    # 0.1 → 0.05 (plus conservateur)
-            min_samples_split=12,  # 10 → 12
-            min_samples_leaf=6,    # 5 → 6
+            n_estimators=200,
+            max_depth=8,
+            learning_rate=0.05,
+            min_samples_split=12,
+            min_samples_leaf=6,
             subsample=0.8,
             random_state=42,
             validation_fraction=0.1,
             n_iter_no_change=10
         )
     
+    def _is_weekend_cached(self):
+        """Détection week-end avec cache"""
+        now = datetime.utcnow()
+        
+        # Vérifier le cache (mise à jour toutes les minutes)
+        if (self.last_weekend_check and 
+            (now - self.last_weekend_check).total_seconds() < 60 and
+            self.is_weekend_cache is not None):
+            return self.is_weekend_cache
+        
+        # Calculer et mettre en cache
+        self.is_weekend_cache = now.weekday() >= 5  # Samedi=5, Dimanche=6
+        self.last_weekend_check = now
+        return self.is_weekend_cache
+    
+    def _detect_otc_context(self, df=None):
+        """Détecte si on est en contexte OTC"""
+        # 1. Vérifier si on est en week-end
+        if self._is_weekend_cached():
+            return True
+        
+        # 2. Analyser les données pour détecter les cryptos
+        if df is not None and len(df) > 0:
+            try:
+                last_price = df.iloc[-1].get('close', 0)
+                # Les cryptos ont des caractéristiques de prix spécifiques
+                if last_price > 0:
+                    # Vérifier la volatilité (les cryptos sont plus volatiles)
+                    if len(df) >= 20:
+                        returns = df['close'].pct_change().dropna()
+                        volatility = returns.std() * 100  # En pourcentage
+                        
+                        # Volatilité élevée typique des cryptos
+                        if volatility > 2.0:  # > 2% de volatilité quotidienne
+                            return True
+                    
+                    # Prix très élevés (BTC) ou très bas (altcoins)
+                    if last_price > 10000 or last_price < 1:
+                        return True
+            except:
+                pass
+        
+        return False
+    
     def extract_features(self, df):
         """
         Features ENRICHIES pour meilleur ML
-        +5 nouvelles features vs version originale
+        Retourne None si données insuffisantes
         """
-        if len(df) < 50:  # Besoin de plus d'historique
+        if len(df) < 30:  # Réduit de 50 à 30 pour être plus permissif
             return None
         
         last = df.iloc[-1]
-        prev = df.iloc[-2]
+        prev = df.iloc[-2] if len(df) > 1 else last
         prev5 = df.iloc[-6] if len(df) > 5 else prev
         
-        # Vérifier indicateurs requis
+        # Colonnes minimales requises
         required_cols = [
-            'ema_fast', 'ema_slow', 'ema_50', 'ema_200',  # +2 EMA
-            'rsi', 'MACD_12_26_9', 'MACDs_12_26_9', 'MACDh_12_26_9',
-            'adx', 'adx_pos', 'adx_neg',
-            'stoch_k', 'stoch_d', 'atr'
+            'open', 'high', 'low', 'close',
+            'ema_fast', 'ema_slow', 'rsi', 'MACD_12_26_9', 
+            'MACDs_12_26_9', 'MACDh_12_26_9', 'adx'
         ]
         
         for col in required_cols:
             if col not in df.columns or pd.isna(last.get(col)):
                 return None
         
+        # Construction des features avec valeurs par défaut
         features = {
-            # === EMA (enrichi) ===
-            'ema_fast': last['ema_fast'],
-            'ema_slow': last['ema_slow'],
-            'ema_50': last['ema_50'],
-            'ema_200': last['ema_200'],
-            'ema_diff': last['ema_fast'] - last['ema_slow'],
-            'ema_diff_pct': (last['ema_fast'] - last['ema_slow']) / last['ema_slow'] * 100,
-            'ema_trend': 1 if last['ema_fast'] > last['ema_slow'] else -1,
+            # Prix
+            'open': last['open'],
+            'high': last['high'],
+            'low': last['low'],
+            'close': last['close'],
+            'close_change': (last['close'] - prev['close']) / prev['close'] if prev['close'] > 0 else 0,
             
-            # NOUVEAU: Triple alignment
-            'ema_triple_bullish': int(
-                last['ema_fast'] > last['ema_slow'] > last['ema_50'] > last['ema_200']
-            ),
-            'ema_triple_bearish': int(
-                last['ema_fast'] < last['ema_slow'] < last['ema_50'] < last['ema_200']
-            ),
+            # EMA
+            'ema_fast': last.get('ema_fast', 0),
+            'ema_slow': last.get('ema_slow', 0),
+            'ema_diff': last.get('ema_fast', 0) - last.get('ema_slow', 0),
+            'ema_diff_pct': (last.get('ema_fast', 0) - last.get('ema_slow', 0)) / last.get('ema_slow', 1) * 100,
             
-            # NOUVEAU: Distance EMA
-            'distance_ema_fast': abs(last['close'] - last['ema_fast']) / last['close'] * 100,
+            # RSI
+            'rsi': last.get('rsi', 50),
+            'rsi_momentum': last.get('rsi', 50) - prev.get('rsi', 50),
             
-            # === RSI (enrichi) ===
-            'rsi': last['rsi'],
-            'rsi_momentum': last['rsi'] - prev['rsi'],
-            'rsi_momentum_5': last['rsi'] - prev5['rsi'],  # NOUVEAU
-            'rsi_optimal_call': int(40 < last['rsi'] < 60),  # NOUVEAU
-            'rsi_optimal_put': int(40 < last['rsi'] < 60),   # NOUVEAU
+            # MACD
+            'macd': last.get('MACD_12_26_9', 0),
+            'macd_signal': last.get('MACDs_12_26_9', 0),
+            'macd_hist': last.get('MACDh_12_26_9', 0),
+            'macd_trend': 1 if last.get('MACD_12_26_9', 0) > last.get('MACDs_12_26_9', 0) else -1,
             
-            # === MACD (enrichi) ===
-            'macd': last['MACD_12_26_9'],
-            'macd_signal': last['MACDs_12_26_9'],
-            'macd_hist': last['MACDh_12_26_9'],
-            'macd_hist_momentum': last['MACDh_12_26_9'] - prev['MACDh_12_26_9'],  # NOUVEAU
-            'macd_trend': 1 if last['MACD_12_26_9'] > last['MACDs_12_26_9'] else -1,
-            'macd_strength': abs(last['MACDh_12_26_9']),
+            # ADX
+            'adx': last.get('adx', 20),
+            'adx_strong': 1 if last.get('adx', 0) > 25 else 0,
             
-            # === ADX (enrichi) ===
-            'adx': last['adx'],
-            'adx_pos': last['adx_pos'],
-            'adx_neg': last['adx_neg'],
-            'adx_diff': last['adx_pos'] - last['adx_neg'],
-            'adx_strong': int(last['adx'] > 25),  # NOUVEAU
-            
-            # === Stochastic ===
-            'stoch_k': last['stoch_k'],
-            'stoch_d': last['stoch_d'],
-            'stoch_diff': last['stoch_k'] - last['stoch_d'],
-            'stoch_momentum': last['stoch_k'] - prev['stoch_k'],  # NOUVEAU
-            
-            # === Volatilité (enrichi) ===
-            'atr': last['atr'],
-            'atr_normalized': last['atr'] / df['atr'].rolling(20).mean().iloc[-1] if len(df) >= 20 else 1.0,
-            'atr_change': (last['atr'] - prev['atr']) / prev['atr'] if prev['atr'] > 0 else 0,  # NOUVEAU
-            
-            # === Prix & Momentum ===
-            'close_change': (last['close'] - prev['close']) / prev['close'],
-            'close_change_5': (last['close'] - prev5['close']) / prev5['close'],  # NOUVEAU
-            
-            # === Scores composites AMÉLIORÉS ===
-            'bullish_score': self._bullish_score_v2(df),   # Nouvelle version
-            'bearish_score': self._bearish_score_v2(df),   # Nouvelle version
-            
-            # NOUVEAU: Qualité globale
-            'signal_quality': self._compute_signal_quality(df),
+            # Volatilité
+            'atr': last.get('atr', 0) if 'atr' in df.columns else 0,
         }
+        
+        # Ajouter features optionnelles si disponibles
+        optional_features = {
+            'ema_50': last.get('ema_50', 0),
+            'ema_200': last.get('ema_200', 0),
+            'adx_pos': last.get('adx_pos', 0),
+            'adx_neg': last.get('adx_neg', 0),
+            'stoch_k': last.get('stoch_k', 50),
+            'stoch_d': last.get('stoch_d', 50),
+        }
+        
+        features.update({k: v for k, v in optional_features.items() if k in df.columns})
+        
+        # Features dérivées
+        if 'ema_50' in features and 'ema_200' in features:
+            features['ema_triple_bullish'] = int(
+                features['ema_fast'] > features['ema_slow'] > features['ema_50'] > features['ema_200']
+            )
+            features['ema_triple_bearish'] = int(
+                features['ema_fast'] < features['ema_slow'] < features['ema_50'] < features['ema_200']
+            )
+        
+        # Score composite simplifié
+        features['bullish_score'] = self._calculate_bullish_score_simple(last)
+        features['bearish_score'] = self._calculate_bearish_score_simple(last)
         
         return features
     
-    def _bullish_score_v2(self, df):
-        """
-        Score haussier V2 (0-7) - Plus strict
-        """
-        if len(df) < 10:
-            return 0
-        
-        last = df.iloc[-1]
-        prev = df.iloc[-2]
+    def _calculate_bullish_score_simple(self, last_row):
+        """Score haussier simplifié (0-5)"""
         score = 0
         
-        # 1. EMA triple alignment (2 points si complet, 1 sinon)
-        if last.get('ema_fast', 0) > last.get('ema_slow', 0) > last.get('ema_50', 0):
-            score += 2
-        elif last.get('ema_fast', 0) > last.get('ema_slow', 0):
+        # EMA fast > EMA slow
+        if last_row.get('ema_fast', 0) > last_row.get('ema_slow', 0):
             score += 1
         
-        # 2. MACD haussier ET en croissance (2 points)
-        macd_hist = last.get('MACDh_12_26_9', 0)
-        prev_hist = prev.get('MACDh_12_26_9', 0)
-        if last.get('MACD_12_26_9', 0) > last.get('MACDs_12_26_9', 0):
-            if macd_hist > 0 and macd_hist > prev_hist:
-                score += 2
-            else:
-                score += 1
-        
-        # 3. RSI optimal (1 point)
-        rsi = last.get('rsi', 50)
-        if 40 < rsi < 60:
+        # MACD positif
+        if last_row.get('MACD_12_26_9', 0) > last_row.get('MACDs_12_26_9', 0):
             score += 1
         
-        # 4. Stochastic (1 point)
-        if last.get('stoch_k', 50) > last.get('stoch_d', 50) and 20 < last.get('stoch_k', 50) < 80:
+        # RSI dans zone haussière
+        rsi = last_row.get('rsi', 50)
+        if 40 < rsi < 70:
+            score += 1
+        elif 30 < rsi < 80:
+            score += 0.5
+        
+        # ADX fort
+        if last_row.get('adx', 0) > 20:
             score += 1
         
-        # 5. ADX fort (1 point)
-        if last.get('adx', 0) > 22 and last.get('adx_pos', 0) > last.get('adx_neg', 0):
+        # Stochastic haussier
+        stoch_k = last_row.get('stoch_k', 50)
+        stoch_d = last_row.get('stoch_d', 50)
+        if stoch_k > stoch_d and 20 < stoch_k < 80:
             score += 1
         
-        return score
+        return min(score, 5)
     
-    def _bearish_score_v2(self, df):
-        """
-        Score baissier V2 (0-7) - Plus strict
-        """
-        if len(df) < 10:
-            return 0
-        
-        last = df.iloc[-1]
-        prev = df.iloc[-2]
+    def _calculate_bearish_score_simple(self, last_row):
+        """Score baissier simplifié (0-5)"""
         score = 0
         
-        # 1. EMA triple alignment inversé
-        if last.get('ema_fast', 0) < last.get('ema_slow', 0) < last.get('ema_50', 0):
-            score += 2
-        elif last.get('ema_fast', 0) < last.get('ema_slow', 0):
+        # EMA fast < EMA slow
+        if last_row.get('ema_fast', 0) < last_row.get('ema_slow', 0):
             score += 1
         
-        # 2. MACD baissier ET en descente
-        macd_hist = last.get('MACDh_12_26_9', 0)
-        prev_hist = prev.get('MACDh_12_26_9', 0)
-        if last.get('MACD_12_26_9', 0) < last.get('MACDs_12_26_9', 0):
-            if macd_hist < 0 and macd_hist < prev_hist:
-                score += 2
-            else:
-                score += 1
-        
-        # 3. RSI optimal
-        rsi = last.get('rsi', 50)
-        if 40 < rsi < 60:
+        # MACD négatif
+        if last_row.get('MACD_12_26_9', 0) < last_row.get('MACDs_12_26_9', 0):
             score += 1
         
-        # 4. Stochastic
-        if last.get('stoch_k', 50) < last.get('stoch_d', 50) and 20 < last.get('stoch_k', 50) < 80:
+        # RSI dans zone baissière
+        rsi = last_row.get('rsi', 50)
+        if 30 < rsi < 60:
+            score += 1
+        elif 20 < rsi < 70:
+            score += 0.5
+        
+        # ADX fort
+        if last_row.get('adx', 0) > 20:
             score += 1
         
-        # 5. ADX fort
-        if last.get('adx', 0) > 22 and last.get('adx_neg', 0) > last.get('adx_pos', 0):
+        # Stochastic baissier
+        stoch_k = last_row.get('stoch_k', 50)
+        stoch_d = last_row.get('stoch_d', 50)
+        if stoch_k < stoch_d and 20 < stoch_k < 80:
             score += 1
         
-        return score
-    
-    def _compute_signal_quality(self, df):
-        """
-        Qualité globale du signal (0-1)
-        Basé sur convergence des indicateurs
-        """
-        if len(df) < 10:
-            return 0.0
-        
-        last = df.iloc[-1]
-        quality = 0.0
-        max_quality = 5.0
-        
-        # 1. ADX
-        adx = last.get('adx', 0)
-        if adx > 25:
-            quality += 1.0
-        elif adx > 22:
-            quality += 0.7
-        elif adx > 18:
-            quality += 0.4
-        
-        # 2. RSI dans zone
-        rsi = last.get('rsi', 50)
-        if 45 < rsi < 55:
-            quality += 1.0
-        elif 40 < rsi < 60:
-            quality += 0.7
-        elif 35 < rsi < 65:
-            quality += 0.4
-        
-        # 3. MACD aligné
-        if (last.get('MACD_12_26_9', 0) > last.get('MACDs_12_26_9', 0) and 
-            last.get('MACDh_12_26_9', 0) > 0):
-            quality += 1.0
-        elif last.get('MACD_12_26_9', 0) < last.get('MACDs_12_26_9', 0) and last.get('MACDh_12_26_9', 0) < 0:
-            quality += 1.0
-        else:
-            quality += 0.3
-        
-        # 4. Volatilité normale
-        atr = last.get('atr', 0)
-        atr_sma = df['atr'].rolling(20).mean().iloc[-1] if len(df) >= 20 else atr
-        if atr_sma > 0:
-            ratio = atr / atr_sma
-            if 0.9 < ratio < 1.2:
-                quality += 1.0
-            elif 0.7 < ratio < 1.5:
-                quality += 0.6
-            else:
-                quality += 0.2
-        
-        # 5. EMA alignment
-        if (last.get('ema_fast', 0) > last.get('ema_slow', 0) > last.get('ema_50', 0)):
-            quality += 1.0
-        elif (last.get('ema_fast', 0) < last.get('ema_slow', 0) < last.get('ema_50', 0)):
-            quality += 1.0
-        elif last.get('ema_fast', 0) > last.get('ema_slow', 0) or last.get('ema_fast', 0) < last.get('ema_slow', 0):
-            quality += 0.5
-        
-        return quality / max_quality
+        return min(score, 5)
     
     def calculate_confidence_score(self, df, base_signal):
         """
-        Score de confiance AMÉLIORÉ (sans ML)
-        Scoring plus strict avec pénalités
+        Score de confiance simplifié et robuste
         Retourne: 0.0 à 1.0
         """
-        if len(df) < 50:
-            return 0.5
+        if len(df) < 10:
+            return 0.5  # Valeur neutre si données insuffisantes
         
         last = df.iloc[-1]
-        prev = df.iloc[-2]
-        score = 0.40  # Base réduite: 0.50 → 0.40
+        prev = df.iloc[-2] if len(df) > 1 else last
         
-        # === 1. ADX: Force tendance (max +0.20) ===
+        score = 0.50  # Base neutre
+        
+        # 1. Convergence des indicateurs (0-0.25)
+        convergence = 0
+        
+        # Vérifier la cohérence signal/indicateurs
+        if base_signal == 'CALL':
+            bullish_indicators = 0
+            if last.get('ema_fast', 0) > last.get('ema_slow', 0):
+                bullish_indicators += 1
+            if last.get('MACD_12_26_9', 0) > last.get('MACDs_12_26_9', 0):
+                bullish_indicators += 1
+            if 30 < last.get('rsi', 50) < 70:
+                bullish_indicators += 1
+            
+            convergence = bullish_indicators / 3 * 0.25
+            
+        else:  # PUT
+            bearish_indicators = 0
+            if last.get('ema_fast', 0) < last.get('ema_slow', 0):
+                bearish_indicators += 1
+            if last.get('MACD_12_26_9', 0) < last.get('MACDs_12_26_9', 0):
+                bearish_indicators += 1
+            if 30 < last.get('rsi', 50) < 70:
+                bearish_indicators += 1
+            
+            convergence = bearish_indicators / 3 * 0.25
+        
+        score += convergence
+        
+        # 2. Force de la tendance ADX (0-0.15)
         adx = last.get('adx', 0)
-        if adx > 28:
-            score += 0.20
-        elif adx > 25:
+        if adx > 30:
             score += 0.15
-        elif adx > 22:
+        elif adx > 25:
             score += 0.10
-        elif adx > 18:
+        elif adx > 20:
             score += 0.05
-        else:
-            score -= 0.05  # PÉNALITÉ
         
-        # === 2. RSI: Position + Momentum (max +0.15) ===
+        # 3. Momentum (0-0.10)
+        if base_signal == 'CALL' and last.get('close', 0) > prev.get('close', 0):
+            score += 0.10
+        elif base_signal == 'PUT' and last.get('close', 0) < prev.get('close', 0):
+            score += 0.10
+        
+        # 4. Position RSI (0-0.10)
         rsi = last.get('rsi', 50)
-        rsi_prev = prev.get('rsi', 50)
-        
-        # Position
-        if base_signal == 'CALL':
-            if 45 < rsi < 58:
-                score += 0.10
-            elif 40 < rsi < 63:
-                score += 0.05
-            elif rsi < 35 or rsi > 68:
-                score -= 0.05  # PÉNALITÉ extrêmes
-        else:  # PUT
-            if 42 < rsi < 55:
-                score += 0.10
-            elif 37 < rsi < 60:
-                score += 0.05
-            elif rsi < 32 or rsi > 65:
-                score -= 0.05
-        
-        # Momentum RSI
-        if base_signal == 'CALL' and rsi > rsi_prev:
-            score += 0.05
-        elif base_signal == 'PUT' and rsi < rsi_prev:
+        if base_signal == 'CALL' and 40 < rsi < 70:
+            score += 0.10
+        elif base_signal == 'PUT' and 30 < rsi < 60:
+            score += 0.10
+        elif 35 < rsi < 65:  # Zone neutre
             score += 0.05
         
-        # === 3. MACD: Alignement + Force (max +0.15) ===
-        macd = last.get('MACD_12_26_9', 0)
-        macd_signal = last.get('MACDs_12_26_9', 0)
-        macd_hist = last.get('MACDh_12_26_9', 0)
-        macd_hist_prev = prev.get('MACDh_12_26_9', 0)
+        # 5. Alignement EMA (0-0.10)
+        if base_signal == 'CALL' and last.get('ema_fast', 0) > last.get('ema_slow', 0):
+            score += 0.10
+        elif base_signal == 'PUT' and last.get('ema_fast', 0) < last.get('ema_slow', 0):
+            score += 0.10
         
-        if base_signal == 'CALL':
-            if macd > macd_signal and macd_hist > 0:
-                score += 0.10
-                # Bonus si en croissance
-                if macd_hist > macd_hist_prev:
-                    score += 0.05
-            else:
-                score -= 0.05  # PÉNALITÉ divergence
-        else:  # PUT
-            if macd < macd_signal and macd_hist < 0:
-                score += 0.10
-                if macd_hist < macd_hist_prev:
-                    score += 0.05
-            else:
-                score -= 0.05
-        
-        # === 4. EMA: Triple Alignment (max +0.15) ===
-        ema_fast = last.get('ema_fast', 0)
-        ema_slow = last.get('ema_slow', 0)
-        ema_50 = last.get('ema_50', 0)
-        ema_200 = last.get('ema_200', 0)
-        
-        if base_signal == 'CALL':
-            if ema_fast > ema_slow > ema_50 > ema_200:
-                score += 0.15  # Perfect
-            elif ema_fast > ema_slow > ema_50:
-                score += 0.10
-            elif ema_fast > ema_slow:
-                score += 0.05
-            else:
-                score -= 0.10  # GROSSE PÉNALITÉ contre-tendance
-        else:  # PUT
-            if ema_fast < ema_slow < ema_50 < ema_200:
-                score += 0.15
-            elif ema_fast < ema_slow < ema_50:
-                score += 0.10
-            elif ema_fast < ema_slow:
-                score += 0.05
-            else:
-                score -= 0.10
-        
-        # === 5. Stochastic: Confirmation (max +0.08) ===
-        stoch_k = last.get('stoch_k', 50)
-        stoch_d = last.get('stoch_d', 50)
-        
-        if base_signal == 'CALL':
-            if stoch_k > stoch_d and 20 < stoch_k < 75:
-                score += 0.08
-            elif stoch_k > 80:
-                score -= 0.05  # PÉNALITÉ surachat
-        else:  # PUT
-            if stoch_k < stoch_d and 25 < stoch_k < 80:
-                score += 0.08
-            elif stoch_k < 20:
-                score -= 0.05  # PÉNALITÉ survente
-        
-        # === 6. Volatilité: Stabilité (max +0.07) ===
-        atr = last.get('atr', 0)
-        atr_sma = df['atr'].rolling(20).mean().iloc[-1] if len(df) >= 20 else atr
-        
-        if atr_sma > 0:
-            atr_ratio = atr / atr_sma
-            if 0.95 < atr_ratio < 1.15:
-                score += 0.07  # Très stable
-            elif 0.85 < atr_ratio < 1.30:
-                score += 0.04
-            elif atr_ratio > 1.8 or atr_ratio < 0.6:
-                score -= 0.08  # PÉNALITÉ volatilité extrême
-        
-        # === 7. Momentum Multi-périodes (max +0.10) ===
-        momentum_3 = last.get('momentum_3', 0)
-        momentum_5 = last.get('momentum_5', 0)
-        
-        if base_signal == 'CALL':
-            if momentum_3 > 0 and momentum_5 > 0:
-                score += 0.10
-            elif momentum_3 > 0 or momentum_5 > 0:
-                score += 0.05
-            else:
-                score -= 0.05  # PÉNALITÉ momentum contraire
-        else:  # PUT
-            if momentum_3 < 0 and momentum_5 < 0:
-                score += 0.10
-            elif momentum_3 < 0 or momentum_5 < 0:
-                score += 0.05
-            else:
-                score -= 0.05
-        
-        # Limiter entre 0.0 et 1.0
-        return min(max(score, 0.0), 1.0)
+        # Limiter entre 0.3 et 0.9
+        return max(0.3, min(score, 0.9))
     
-    def predict_signal(self, df, base_signal, pair_name=None):
+    def predict_signal(self, df, base_signal):
         """
-        Prédit avec seuils ADAPTATIFS AUTO
-        - Détecte automatiquement OTC vs Forex
-        - Applique le seuil approprié
+        Prédiction avec adaptation automatique OTC/Forex
+        - En OTC: accepte les signaux avec seuil réduit
+        - En Forex: règles strictes
+        - Fallback robuste en cas d'erreur
         
         Returns: (signal, confidence) ou (None, confidence)
         """
-        # Détection automatique du mode et seuil
-        min_confidence = self._get_min_confidence(pair_name, df)
-        
-        mode = "OTC" if min_confidence == self.min_confidence_otc else "Forex"
-        print(f"   🎯 Mode auto: {mode} (seuil: {min_confidence*100:.0f}%)")
-        
-        # MODE 1: Modèle ML entraîné → Utiliser ML
-        if self.model_fitted:
-            try:
-                features = self.extract_features(df)
-                if features is None:
-                    # Fallback scoring manuel
-                    confidence = self.calculate_confidence_score(df, base_signal)
-                    
-                    # Adaptation OTC: être plus permissif
-                    if mode == "OTC" and confidence >= 0.55:
-                        print(f"   🏖️ OTC: Accepté avec score manuel {confidence:.1%}")
-                        return base_signal, confidence
-                    elif confidence >= min_confidence:
-                        return base_signal, confidence
-                    else:
-                        print(f"   ❌ Score manuel rejeté: {confidence:.1%} < {min_confidence:.0%}")
-                        return None, confidence
-                
-                X = pd.DataFrame([features])
-                
-                try:
-                    X_scaled = self.scaler.transform(X)
-                except:
-                    # Scaler non prêt
-                    confidence = self.calculate_confidence_score(df, base_signal)
-                    
-                    # Adaptation OTC
-                    if mode == "OTC" and confidence >= 0.55:
-                        print(f"   🏖️ OTC: Accepté sans scaler {confidence:.1%}")
-                        return base_signal, confidence
-                    elif confidence >= min_confidence:
-                        return base_signal, confidence
-                    else:
-                        return None, confidence
-                
-                # Prédiction ML
-                probas = self.model.predict_proba(X_scaled)[0]
-                ml_confidence = probas[1]
-                
-                print(f"   🤖 ML: {ml_confidence:.1%}")
-                
-                # SEUIL ADAPTATIF + Fallback OTC
-                if ml_confidence < min_confidence:
-                    # En mode OTC, être plus permissif
-                    if mode == "OTC" and ml_confidence >= 0.55:
-                        print(f"   🏖️ OTC: Accepté avec confiance réduite {ml_confidence:.1%}")
-                        return base_signal, max(ml_confidence, 0.60)
-                    else:
-                        print(f"   ❌ ML Rejeté: {ml_confidence:.1%} < {min_confidence:.0%}")
-                        return None, ml_confidence
-                
-                return base_signal, ml_confidence
-                
-            except Exception as e:
-                print(f"   ⚠️  ML Erreur: {e}")
-                # Fallback avec adaptation OTC
-                confidence = self.calculate_confidence_score(df, base_signal)
-                
-                if mode == "OTC" and confidence >= 0.55:
-                    print(f"   🏖️ OTC Fallback: {confidence:.1%}")
-                    return base_signal, confidence
-                elif confidence >= min_confidence:
-                    return base_signal, confidence
-                else:
-                    return None, confidence
-        
-        # MODE 2: Pas de ML → Scoring manuel avec adaptation OTC
-        else:
-            confidence = self.calculate_confidence_score(df, base_signal)
+        try:
+            # Détection du contexte
+            is_otc = self._detect_otc_context(df)
             
+            if is_otc:
+                print(f"   🏖️ MODE OTC DÉTECTÉ - Seuil réduit: {self.min_confidence_otc*100:.0f}%")
+                min_confidence = self.min_confidence_otc
+                mode = "OTC"
+            else:
+                print(f"   📈 MODE FOREX - Seuil strict: {self.min_confidence_forex*100:.0f}%")
+                min_confidence = self.min_confidence_forex
+                mode = "Forex"
+            
+            # Tentative avec ML si disponible
+            if self.model_fitted:
+                try:
+                    features = self.extract_features(df)
+                    if features is not None:
+                        X = pd.DataFrame([features])
+                        
+                        try:
+                            X_scaled = self.scaler.transform(X)
+                        except:
+                            # Entraîner le scaler si nécessaire
+                            self.scaler.fit(X)
+                            X_scaled = self.scaler.transform(X)
+                        
+                        # Prédiction
+                        probas = self.model.predict_proba(X_scaled)[0]
+                        if len(probas) >= 2:
+                            ml_confidence = probas[1] if base_signal == 'CALL' else probas[0]
+                        else:
+                            ml_confidence = probas[0]
+                        
+                        print(f"   🤖 ML: {ml_confidence:.1%}")
+                        
+                        # Vérification du seuil
+                        if ml_confidence >= min_confidence:
+                            return base_signal, ml_confidence
+                        else:
+                            print(f"   ⚠️  ML insuffisant: {ml_confidence:.1%} < {min_confidence:.0%}")
+                            # En OTC, on peut être plus flexible
+                            if mode == "OTC" and ml_confidence >= 0.55:
+                                print(f"   🏖️ OTC flexible: accepté à {ml_confidence:.1%}")
+                                return base_signal, ml_confidence
+                except Exception as e:
+                    print(f"   ⚠️  Erreur ML: {e}")
+            
+            # Fallback: scoring manuel
+            confidence = self.calculate_confidence_score(df, base_signal)
             print(f"   💪 Score manuel: {confidence:.1%}")
             
-            # Adaptation OTC: être plus permissif
-            if mode == "OTC" and confidence >= 0.55:
-                print(f"   🏖️ OTC: Accepté avec score manuel")
-                return base_signal, max(confidence, 0.60)
-            elif confidence < min_confidence:
-                print(f"   ❌ Score trop bas: {confidence:.1%} < {min_confidence:.0%}")
-                return None, confidence
+            # En OTC, être plus permissif
+            if mode == "OTC":
+                if confidence >= 0.55:  # Seuil très bas pour testing
+                    print(f"   🏖️ OTC: Signal accepté (flexible)")
+                    return base_signal, max(confidence, 0.60)
+                else:
+                    print(f"   🏖️ OTC: Score trop bas {confidence:.1%}")
             
-            return base_signal, confidence
+            # Vérification standard
+            if confidence >= min_confidence:
+                return base_signal, confidence
+            else:
+                print(f"   ❌ Score insuffisant: {confidence:.1%} < {min_confidence:.0%}")
+                return None, confidence
+                
+        except Exception as e:
+            print(f"   🚨 Erreur critique prédiction: {e}")
+            # Fallback ultime: accepter le signal avec confiance modérée
+            fallback_confidence = 0.65 if self._is_weekend_cached() else 0.70
+            print(f"   🆘 Fallback: {base_signal} ({fallback_confidence:.1%})")
+            return base_signal, fallback_confidence
     
     def train_on_history(self, engine):
         """Entraîne le modèle (placeholder)"""
@@ -594,8 +423,8 @@ class MLSignalPredictor:
         with engine.connect() as conn:
             results = conn.execute(query).fetchall()
         
-        if len(results) < 100:  # Seuil augmenté: 50 → 100
-            print(f"⚠️  Données insuffisantes: {len(results)} < 100")
+        if len(results) < 50:
+            print(f"⚠️  Données insuffisantes: {len(results)} < 50")
             return False
         
         print(f"📚 {len(results)} signaux disponibles")
@@ -606,9 +435,6 @@ class MLSignalPredictor:
     def save_model(self):
         """Sauvegarde"""
         try:
-            # Créer dossier parent
-            os.makedirs(os.path.dirname(self.model_path), exist_ok=True)
-            
             joblib.dump({
                 'model': self.model,
                 'scaler': self.scaler,
@@ -635,10 +461,8 @@ class MLSignalPredictor:
             self.premium_confidence = data.get('premium_confidence', 0.90)
             
             print(f"✅ Modèle ML chargé: {self.model_path}")
-            print(f"   🎯 Seuil Forex: {self.min_confidence_forex*100:.0f}%")
-            print(f"   🏖️ Seuil OTC: {self.min_confidence_otc*100:.0f}%")
-            print(f"   🔥 Seuil ultra: {self.ultra_strict_confidence:.0%}")
-            print(f"   ⭐ Seuil premium: {self.premium_confidence:.0%}")
+            print(f"   🎯 Forex: {self.min_confidence_forex*100:.0f}%")
+            print(f"   🏖️ OTC: {self.min_confidence_otc*100:.0f}%")
             print(f"   🤖 Entraîné: {'Oui' if self.model_fitted else 'Non'}")
         except Exception as e:
             print(f"⚠️  Erreur chargement: {e}")
@@ -647,6 +471,8 @@ class MLSignalPredictor:
     
     def get_model_info(self):
         """Info modèle"""
+        is_otc = self._detect_otc_context()
+        
         return {
             'model_loaded': self.model is not None,
             'model_fitted': self.model_fitted,
@@ -655,5 +481,52 @@ class MLSignalPredictor:
             'min_confidence_otc': self.min_confidence_otc,
             'ultra_strict_confidence': self.ultra_strict_confidence,
             'premium_confidence': self.premium_confidence,
-            'current_mode': 'OTC' if self._is_weekend() else 'Forex'
+            'current_mode': 'OTC' if is_otc else 'Forex',
+            'is_weekend': self._is_weekend_cached()
         }
+    
+    def force_otc_mode(self, enable=True):
+        """Force le mode OTC (pour testing)"""
+        if enable:
+            print("🔧 Mode OTC forcé activé")
+            self.min_confidence_otc = 0.55  # Seuil très bas pour testing
+        else:
+            print("🔧 Mode OTC forcé désactivé")
+            self.min_confidence_otc = 0.65
+    
+    def quick_test(self, df=None):
+        """Test rapide du predictor"""
+        print("\n🧪 TEST RAPIDE ML PREDICTOR")
+        print("="*50)
+        
+        if df is None:
+            # Créer des données de test minimales
+            df = pd.DataFrame({
+                'open': [100, 101, 102, 103, 104, 105],
+                'high': [101, 102, 103, 104, 105, 106],
+                'low': [99, 100, 101, 102, 103, 104],
+                'close': [100.5, 101.5, 102.5, 103.5, 104.5, 105.5],
+                'ema_fast': [100.2, 101.2, 102.2, 103.2, 104.2, 105.2],
+                'ema_slow': [100.1, 101.1, 102.1, 103.1, 104.1, 105.1],
+                'rsi': [55, 56, 57, 58, 59, 60],
+                'MACD_12_26_9': [0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+                'MACDs_12_26_9': [0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+                'MACDh_12_26_9': [0.1, 0.1, 0.1, 0.1, 0.1, 0.1],
+                'adx': [25, 26, 27, 28, 29, 30],
+            })
+        
+        print(f"Données: {len(df)} bougies")
+        print(f"Week-end: {'Oui' if self._is_weekend_cached() else 'Non'}")
+        print(f"Mode détecté: {'OTC' if self._detect_otc_context(df) else 'Forex'}")
+        
+        # Test CALL
+        print("\nTest CALL:")
+        signal, conf = self.predict_signal(df, "CALL")
+        print(f"  Signal: {signal}, Confiance: {conf:.1%}")
+        
+        # Test PUT
+        print("\nTest PUT:")
+        signal, conf = self.predict_signal(df, "PUT")
+        print(f"  Signal: {signal}, Confiance: {conf:.1%}")
+        
+        print("\n✅ Test terminé")
