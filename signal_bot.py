@@ -529,6 +529,126 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {e}")
 
+async def cmd_rapport(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Rapport quotidien M1"""
+    try:
+        msg = await update.message.reply_text("📊 Génération rapport...")
+        
+        now_haiti = get_haiti_now()
+        start_haiti = now_haiti.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_haiti = start_haiti + timedelta(days=1)
+        
+        start_utc = start_haiti.astimezone(timezone.utc)
+        end_utc = end_haiti.astimezone(timezone.utc)
+        
+        with engine.connect() as conn:
+            query = text("""
+                SELECT 
+                    COUNT(*) as total,
+                    SUM(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) as wins,
+                    SUM(CASE WHEN result = 'LOSE' THEN 1 ELSE 0 END) as losses
+                FROM signals
+                WHERE ts_send >= :start AND ts_send < :end
+                AND timeframe = 1
+                AND result IS NOT NULL
+            """)
+            
+            stats = conn.execute(query, {
+                "start": start_utc.isoformat(),
+                "end": end_utc.isoformat()
+            }).fetchone()
+        
+        if not stats or stats[0] == 0:
+            await msg.edit_text("ℹ️ Aucun signal M1 aujourd'hui")
+            return
+        
+        total, wins, losses = stats
+        verified = wins + losses
+        winrate = (wins / verified * 100) if verified > 0 else 0
+        
+        report = (
+            f"📊 **RAPPORT M1**\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📅 {now_haiti.strftime('%d/%m/%Y')}\n\n"
+            f"• Total: {total}\n"
+            f"• ✅ Wins: {wins}\n"
+            f"• ❌ Losses: {losses}\n"
+            f"• 📊 Win Rate: **{winrate:.1f}%**\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🎯 Timeframe: M1"
+        )
+        
+        await msg.edit_text(report)
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur: {e}")
+
+async def cmd_mlstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Statistiques ML"""
+    try:
+        from ml_continuous_learning import ContinuousLearning
+        
+        learner = ContinuousLearning(engine)
+        stats = learner.get_training_stats()
+        
+        msg = (
+            f"🤖 **Stats ML**\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📊 Entraînements: {stats['total_trainings']}\n"
+            f"🎯 Best accuracy: {stats['best_accuracy']*100:.2f}%\n"
+            f"📈 Signaux: {stats['total_signals']}\n"
+            f"📅 Dernier: {stats['last_training']}\n"
+        )
+        
+        if stats['recent_trainings']:
+            msg += "\n📋 **Derniers:**\n\n"
+            for t in reversed(stats['recent_trainings'][-3:]):
+                date = datetime.fromisoformat(t['timestamp']).strftime('%d/%m %H:%M')
+                emoji = "✅" if t.get('accepted', False) else "⚠️"
+                msg += f"{emoji} {date} - {t['accuracy']*100:.1f}%\n"
+        
+        await update.message.reply_text(msg)
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur: {e}")
+
+async def cmd_retrain(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Réentraîner le modèle ML"""
+    try:
+        from ml_continuous_learning import ContinuousLearning
+        
+        msg = await update.message.reply_text("🤖 Réentraînement ML...\n⏳ Cela peut prendre 1-2 minutes...")
+        
+        learner = ContinuousLearning(engine)
+        result = learner.retrain_model(min_signals=30, min_accuracy_improvement=0.00)
+        
+        if result['success']:
+            if result['accepted']:
+                response = (
+                    f"✅ **Modèle réentraîné**\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"📊 Signaux: {result['signals_count']}\n"
+                    f"🎯 Accuracy: {result['accuracy']*100:.2f}%\n"
+                    f"📈 Amélioration: {result['improvement']*100:+.2f}%\n\n"
+                    f"✨ {result['reason']}"
+                )
+            else:
+                response = (
+                    f"⚠️ **Modèle rejeté**\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"📊 Signaux: {result['signals_count']}\n"
+                    f"🎯 Accuracy: {result['accuracy']*100:.2f}%\n"
+                    f"📉 Amélioration: {result['improvement']*100:+.2f}%\n\n"
+                    f"ℹ️ {result['reason']}"
+                )
+        else:
+            response = f"❌ **Échec réentraînement**\n\n{result['reason']}"
+        
+        await msg.edit_text(response)
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur: {e}")
+
 # ===== SERVEUR HTTP =====
 
 async def health_check(request):
@@ -577,6 +697,9 @@ async def main():
     app.add_handler(CommandHandler('startsession', cmd_start_session))
     app.add_handler(CommandHandler('sessionstatus', cmd_session_status))
     app.add_handler(CommandHandler('stats', cmd_stats))
+    app.add_handler(CommandHandler('rapport', cmd_rapport))
+    app.add_handler(CommandHandler('mlstats', cmd_mlstats))
+    app.add_handler(CommandHandler('retrain', cmd_retrain))
     
     # Callbacks
     app.add_handler(CallbackQueryHandler(callback_generate_signal, pattern=r'^gen_signal_'))
