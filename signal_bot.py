@@ -1,6 +1,7 @@
 """
 Bot de trading M1 - Version Interactive
 8 signaux par session avec bouton Generate Signal
+Support OTC (crypto) le week-end
 """
 
 import os, json, asyncio
@@ -16,6 +17,7 @@ from config import *
 from utils import compute_indicators, rule_signal_ultra_strict
 from ml_predictor import MLSignalPredictor
 from auto_verifier import AutoResultVerifier
+from otc_provider import OTCDataProvider, get_otc_or_forex_data
 
 # Configuration
 HAITI_TZ = ZoneInfo("America/Port-au-Prince")
@@ -27,6 +29,9 @@ CONFIDENCE_THRESHOLD = 0.65
 engine = create_engine(DB_URL, connect_args={'check_same_thread': False})
 ml_predictor = MLSignalPredictor()
 auto_verifier = None
+
+# Initialiser OTC provider
+otc_provider = OTCDataProvider(TWELVEDATA_API_KEY)
 
 # Sessions actives (user_id -> session_data)
 active_sessions = {}
@@ -41,7 +46,15 @@ def get_utc_now():
     return datetime.now(timezone.utc)
 
 def is_forex_open():
+    """Vérifie si marché Forex OU OTC est ouvert"""
     now_utc = get_utc_now()
+    
+    # Si week-end -> OTC disponible (crypto 24/7)
+    if otc_provider.is_weekend():
+        print("   💡 Forex fermé mais OTC disponible (crypto)")
+        return True  # OTC always open
+    
+    # Vérification Forex standard
     weekday = now_utc.weekday()
     hour = now_utc.hour
     
@@ -54,12 +67,63 @@ def is_forex_open():
     
     return True
 
+def get_current_pair(pair):
+    """Retourne la paire à utiliser (Forex ou OTC) en fonction du jour"""
+    if otc_provider.is_weekend():
+        # Mapping Forex -> Crypto pour le week-end
+        forex_to_crypto = {
+            'EUR/USD': 'BTC/USD',
+            'GBP/USD': 'ETH/USD',
+            'USD/JPY': 'XRP/USD',
+            'AUD/USD': 'LTC/USD',
+            'BTC/USD': 'BTC/USD',  # Déjà crypto
+            'ETH/USD': 'ETH/USD'
+        }
+        return forex_to_crypto.get(pair, 'BTC/USD')
+    return pair
+
 def fetch_ohlc_td(pair, interval, outputsize=300):
+    """Version unifiée Forex + OTC"""
+    
+    # Vérifier si week-end
+    if otc_provider.is_weekend():
+        print(f"🏖️ Week-end - Mode OTC pour {pair}")
+        
+        # Mapping Forex -> Crypto
+        forex_to_crypto = {
+            'EUR/USD': 'BTC/USD',
+            'GBP/USD': 'ETH/USD',
+            'USD/JPY': 'XRP/USD',
+            'AUD/USD': 'LTC/USD',
+            'BTC/USD': 'BTC/USD',  # Déjà crypto
+            'ETH/USD': 'ETH/USD'
+        }
+        
+        otc_pair = forex_to_crypto.get(pair, 'BTC/USD')
+        
+        if otc_pair != pair:
+            print(f"   🔄 Conversion: {pair} → {otc_pair}")
+        
+        # Récupérer données OTC
+        df = otc_provider.get_otc_data(otc_pair, interval, outputsize)
+        
+        if df is not None:
+            return df
+        else:
+            raise RuntimeError("Données OTC indisponibles")
+    
+    # Mode Forex normal (semaine)
     if not is_forex_open():
         raise RuntimeError("Marché Forex fermé")
     
-    params = {'symbol': pair, 'interval': interval, 'outputsize': outputsize,
-    'apikey': TWELVEDATA_API_KEY, 'format':'JSON'}
+    params = {
+        'symbol': pair, 
+        'interval': interval, 
+        'outputsize': outputsize,
+        'apikey': TWELVEDATA_API_KEY, 
+        'format': 'JSON'
+    }
+    
     r = requests.get(TWELVE_TS_URL, params=params, timeout=10)
     r.raise_for_status()
     j = r.json()
@@ -71,19 +135,25 @@ def fetch_ohlc_td(pair, interval, outputsize=300):
         raise RuntimeError(f"TwelveData error: {j}")
     
     df = pd.DataFrame(j['values'])[::-1].reset_index(drop=True)
+    
     for col in ['open','high','low','close']:
         if col in df.columns:
             df[col] = df[col].astype(float)
+    
     if 'volume' in df.columns:
         df['volume'] = df['volume'].astype(float)
+    
     df.index = pd.to_datetime(df['datetime'])
+    
     return df
 
 def get_cached_ohlc(pair, interval, outputsize=300):
+    current_pair = get_current_pair(pair)
+    cache_key = f"{current_pair}_{interval}"
+    
     if not is_forex_open():
         return None
     
-    cache_key = f"{pair}_{interval}"
     current_time = get_utc_now()
     
     if cache_key in ohlc_cache:
@@ -139,35 +209,47 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 conn.execute(text("INSERT INTO subscribers (user_id, username) VALUES (:uid, :uname)"),
                 {"uid": user_id, "uname": username})
         
+        is_weekend = otc_provider.is_weekend()
+        mode_text = "🏖️ OTC (Crypto)" if is_weekend else "📈 Forex"
+        
         await update.message.reply_text(
-            "✅ **Bienvenue au Bot Trading M1 !**\n\n"
-            "🎯 Mode: **Interactive Session**\n"
-            "📊 8 signaux M1 par session\n"
-            "⚡ Vérification auto après 2 min\n\n"
-            "**Commandes:**\n"
-            "• /startsession - Démarrer session\n"
-            "• /stats - Statistiques\n"
-            "• /menu - Menu complet\n\n"
-            "━━━━━━━━━━━━━━━━━━━━"
+            f"✅ **Bienvenue au Bot Trading M1 !**\n\n"
+            f"🎯 Mode: **Interactive Session**\n"
+            f"📊 8 signaux M1 par session\n"
+            f"⚡ Vérification auto après 2 min\n"
+            f"🌐 Mode actuel: {mode_text}\n\n"
+            f"**Commandes:**\n"
+            f"• /startsession - Démarrer session\n"
+            f"• /stats - Statistiques\n"
+            f"• /otcstatus - Statut OTC\n"
+            f"• /menu - Menu complet\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"💡 Trading 24/7 avec OTC le week-end !"
         )
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {e}")
 
 async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     menu_text = (
-        "📋 **MENU**\n"
+        "📋 **MENU M1**\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "**Session:**\n"
-        "• /startsession - Nouvelle session\n"
-        "• /sessionstatus - État session\n\n"
-        "**Info:**\n"
-        "• /stats - Statistiques\n"
-        "• /rapport - Rapport jour\n\n"
-        "**ML:**\n"
+        "**📊 Session:**\n"
+        "• /startsession - Démarrer session\n"
+        "• /sessionstatus - État session\n"
+        "• /endsession - Terminer session\n\n"
+        "**📈 Statistiques:**\n"
+        "• /stats - Stats globales\n"
+        "• /rapport - Rapport du jour\n\n"
+        "**🤖 Machine Learning:**\n"
         "• /mlstats - Stats ML\n"
-        "• /retrain - Réentraîner\n\n"
+        "• /retrain - Réentraîner modèle\n\n"
+        "**🌐 OTC (Week-end):**\n"
+        "• /otcstatus - Statut OTC\n"
+        "• /testotc - Tester OTC\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "🎯 M1 | 8 signaux/session"
+        "🎯 M1 | 8 signaux/session\n"
+        "⚡ Vérif auto: 2 min\n"
+        "🏖️ OTC actif le week-end"
     )
     await update.message.reply_text(menu_text)
 
@@ -206,10 +288,14 @@ async def cmd_start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton("🎯 Generate Signal #1", callback_data=f"gen_signal_{user_id}")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
+    is_weekend = otc_provider.is_weekend()
+    mode_text = "🏖️ OTC (Crypto)" if is_weekend else "📈 Forex"
+    
     await update.message.reply_text(
         "🚀 **SESSION DÉMARRÉE**\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         f"📅 {now_haiti.strftime('%H:%M:%S')}\n"
+        f"🌐 Mode: {mode_text}\n"
         f"🎯 Objectif: {SIGNALS_PER_SESSION} signaux M1\n"
         f"⚡ Vérification: 2 min auto\n\n"
         f"Cliquez pour générer signal #1 ⬇️",
@@ -241,6 +327,37 @@ async def cmd_session_status(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
     
     await update.message.reply_text(msg)
+
+async def cmd_end_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Termine la session active manuellement"""
+    user_id = update.effective_user.id
+    
+    if user_id not in active_sessions:
+        await update.message.reply_text("ℹ️ Aucune session active")
+        return
+    
+    session = active_sessions[user_id]
+    
+    if session['pending'] > 0:
+        await update.message.reply_text(
+            f"⚠️ {session['pending']} signal(s) en attente de vérification\n\n"
+            f"Attendez la fin des vérifications ou confirmez la fin avec /forceend"
+        )
+        return
+    
+    await end_session_summary(user_id, context.application)
+    await update.message.reply_text("✅ Session terminée !")
+
+async def cmd_force_end(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Force la fin de session même avec signaux en attente"""
+    user_id = update.effective_user.id
+    
+    if user_id not in active_sessions:
+        await update.message.reply_text("ℹ️ Aucune session active")
+        return
+    
+    await end_session_summary(user_id, context.application)
+    await update.message.reply_text("✅ Session terminée (forcée) !")
 
 async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Callback pour générer un signal"""
@@ -292,9 +409,12 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
         await query.message.reply_text("Voulez-vous réessayer ?", reply_markup=reply_markup)
 
 async def generate_m1_signal(user_id, app):
-    """Génère un signal M1"""
+    """Version avec support OTC"""
     try:
-        print(f"\n[SIGNAL] 📤 M1 pour user {user_id}")
+        is_weekend = otc_provider.is_weekend()
+        mode = "OTC" if is_weekend else "Forex"
+        
+        print(f"\n[SIGNAL] 📤 M1 {mode} pour user {user_id}")
         
         # Rotation paires
         active_pairs = PAIRS[:3]
@@ -303,14 +423,14 @@ async def generate_m1_signal(user_id, app):
         
         print(f"[SIGNAL] 🔍 {pair}...")
         
-        # Données M1
+        # Données M1 (maintenant supporte OTC)
         df = get_cached_ohlc(pair, TIMEFRAME_M1, outputsize=400)
         
         if df is None or len(df) < 50:
-            print("[SIGNAL] ❌ Pas de données")
+            print(f"[SIGNAL] ❌ Pas de données {mode}")
             return None
         
-        print(f"[SIGNAL] ✅ {len(df)} bougies M1")
+        print(f"[SIGNAL] ✅ {len(df)} bougies M1 ({mode})")
         
         # Indicateurs
         df = compute_indicators(df)
@@ -340,11 +460,11 @@ async def generate_m1_signal(user_id, app):
         payload = {
             'pair': pair, 
             'direction': ml_signal, 
-            'reason': f'M1 Session - ML {ml_conf:.1%}',
+            'reason': f'M1 Session {mode} - ML {ml_conf:.1%}',
             'ts_enter': entry_time_utc.isoformat(), 
             'ts_send': get_utc_now().isoformat(),
             'confidence': ml_conf, 
-            'payload': json.dumps({'pair': pair, 'user_id': user_id}),
+            'payload': json.dumps({'pair': pair, 'user_id': user_id, 'mode': mode}),
             'max_gales': 0,
             'timeframe': 1
         }
@@ -357,6 +477,7 @@ async def generate_m1_signal(user_id, app):
             f"🎯 **SIGNAL M1 #{session['signal_count'] + 1}**\n"
             f"━━━━━━━━━━━━━━━━━━━━\n\n"
             f"💱 {pair}\n"
+            f"🌐 Mode: {mode}\n"
             f"📈 Direction: **{direction_text}**\n"
             f"💪 Confiance: **{int(ml_conf*100)}%**\n"
             f"🕐 Entrée: {entry_time_haiti.strftime('%H:%M')}\n\n"
@@ -649,6 +770,86 @@ async def cmd_retrain(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {e}")
 
+# ===== COMMANDES OTC =====
+
+async def cmd_otc_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Affiche le statut OTC et paires disponibles"""
+    try:
+        is_weekend = otc_provider.is_weekend()
+        now_haiti = get_haiti_now()
+        
+        msg = (
+            "🌐 **STATUT OTC**\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📅 {now_haiti.strftime('%A %d/%m/%Y')}\n"
+            f"🕐 {now_haiti.strftime('%H:%M:%S')} (Haïti)\n\n"
+        )
+        
+        if is_weekend:
+            msg += (
+                "🏖️ **Mode: OTC ACTIF**\n"
+                "💰 Source: Crypto (Binance)\n"
+                "⏰ Disponible: 24/7\n\n"
+                "📊 **Paires disponibles:**\n\n"
+            )
+            
+            for i, pair in enumerate(otc_provider.get_available_pairs(), 1):
+                msg += f"• {pair}\n"
+            
+            msg += (
+                "\n💡 Les paires Forex sont automatiquement\n"
+                "   converties en crypto équivalentes:\n"
+                "   • EUR/USD → BTC/USD\n"
+                "   • GBP/USD → ETH/USD\n"
+                "   • USD/JPY → XRP/USD\n"
+            )
+        else:
+            msg += (
+                "📈 **Mode: FOREX STANDARD**\n"
+                "💱 Source: TwelveData\n"
+                "⏰ Lun-Ven 00:00-22:00 UTC\n\n"
+                "💡 Le mode OTC s'active automatiquement\n"
+                "   le week-end (Sam-Dim)\n"
+            )
+        
+        msg += "\n━━━━━━━━━━━━━━━━━━━━"
+        
+        await update.message.reply_text(msg)
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur: {e}")
+
+async def cmd_test_otc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Teste la récupération de données OTC"""
+    try:
+        msg = await update.message.reply_text("🧪 Test OTC en cours...")
+        
+        # Tester récupération
+        test_pair = 'BTC/USD'
+        df = otc_provider.get_otc_data(test_pair, '1m', 50)
+        
+        if df is not None and len(df) > 0:
+            last = df.iloc[-1]
+            
+            response = (
+                f"✅ **Test OTC réussi**\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"💱 Paire: {test_pair}\n"
+                f"📊 Bougies: {len(df)}\n"
+                f"💰 Dernier prix: ${last['close']:.2f}\n"
+                f"📈 High: ${last['high']:.2f}\n"
+                f"📉 Low: ${last['low']:.2f}\n"
+                f"🕐 Timestamp: {last['datetime']}\n\n"
+                f"✅ OTC opérationnel !"
+            )
+        else:
+            response = "❌ Échec récupération données OTC"
+        
+        await msg.edit_text(response)
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur test: {e}")
+
 # ===== SERVEUR HTTP =====
 
 async def health_check(request):
@@ -656,6 +857,7 @@ async def health_check(request):
         'status': 'ok',
         'timestamp': get_haiti_now().isoformat(),
         'forex_open': is_forex_open(),
+        'otc_active': otc_provider.is_weekend(),
         'active_sessions': len(active_sessions)
     })
 
@@ -682,6 +884,7 @@ async def main():
     print("="*60)
     print(f"🎯 8 signaux/session")
     print(f"⚡ Vérification: 2 min auto")
+    print(f"🌐 OTC support: Week-end crypto")
     print("="*60 + "\n")
 
     ensure_db()
@@ -696,10 +899,14 @@ async def main():
     app.add_handler(CommandHandler('menu', cmd_menu))
     app.add_handler(CommandHandler('startsession', cmd_start_session))
     app.add_handler(CommandHandler('sessionstatus', cmd_session_status))
+    app.add_handler(CommandHandler('endsession', cmd_end_session))
+    app.add_handler(CommandHandler('forceend', cmd_force_end))
     app.add_handler(CommandHandler('stats', cmd_stats))
     app.add_handler(CommandHandler('rapport', cmd_rapport))
     app.add_handler(CommandHandler('mlstats', cmd_mlstats))
     app.add_handler(CommandHandler('retrain', cmd_retrain))
+    app.add_handler(CommandHandler('otcstatus', cmd_otc_status))
+    app.add_handler(CommandHandler('testotc', cmd_test_otc))
     
     # Callbacks
     app.add_handler(CallbackQueryHandler(callback_generate_signal, pattern=r'^gen_signal_'))
