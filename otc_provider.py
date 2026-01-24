@@ -376,7 +376,7 @@ if __name__ == '__main__':
     
     # Test 3: Synthétique
     print("\n\n3️⃣ Test Synthétique:")
-    df = otc.get_synthetic_data('XRP/USD', '1m', 50)
+    df = otc.get_synthetic_data('TRX/USD', '1m', 50)
     print(f"\nDernières 5 bougies:")
     print(df.tail())
     
