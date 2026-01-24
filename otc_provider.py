@@ -26,10 +26,10 @@ class OTCDataProvider:
         
         # Paires OTC disponibles le week-end
         self.otc_pairs = {
-            'BTC/USD': 'BTCUSDT',
-            'ETH/USD': 'ETHUSDT',
-            'XRP/USD': 'XRPUSDT',
-            'LTC/USD': 'LTCUSDT',
+            'BTC/USD': 'BTC/USDT',
+            'ETH/USD': 'ETH/USDT',
+            'TRX/USD': 'TRX/USDT',
+            'LTC/USD': 'LTC/USDT',
             'BCH/USD': 'BCHUSDT',
             'ADA/USD': 'ADAUSDT',
             'DOT/USD': 'DOTUSDT',
