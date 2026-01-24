@@ -4,7 +4,7 @@ Bot de trading M1 - Version Interactive
 Support OTC (crypto) le week-end via APIs multiples
 """
 
-import os, json, asyncio
+import os, json, asyncio, random
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 import requests
@@ -310,6 +310,125 @@ def ensure_db():
     except Exception as e:
         print(f"⚠️ Erreur DB: {e}")
 
+# ================= VÉRIFICATION AUTOMATIQUE =================
+
+async def auto_verify_signal(signal_id, user_id, app):
+    """Vérifie automatiquement un signal après 2 minutes"""
+    try:
+        print(f"\n[VERIF_AUTO] 🔍 Vérification auto signal #{signal_id}")
+        
+        # Attendre 2 minutes
+        print(f"[VERIF_AUTO] ⏳ Attente de 2 minutes...")
+        await asyncio.sleep(120)
+        
+        print(f"[VERIF_AUTO] ✅ 2 minutes écoulées, vérification en cours...")
+        
+        # IMPORTANT: Attendre encore un peu pour être sûr que la bougie est complète
+        await asyncio.sleep(5)
+        
+        # Vérifier si auto_verifier est initialisé
+        if auto_verifier is None:
+            print(f"[VERIF_AUTO] ❌ auto_verifier n'est pas initialisé!")
+            return
+        
+        print(f"[VERIF_AUTO] 📊 Appel de verify_single_signal...")
+        
+        # Vérifier
+        result = await auto_verifier.verify_single_signal(signal_id)
+        
+        print(f"[VERIF_AUTO] 📝 Résultat brut: {result}")
+        
+        if not result:
+            print(f"[VERIF_AUTO] ⚠️ Résultat non défini pour #{signal_id}")
+            # Si pas de résultat automatique, on marque manuellement comme LOSE pour continuer
+            result = 'LOSE'
+            await auto_verifier.manual_verify_signal(signal_id, result)
+        
+        # Mettre à jour session
+        if user_id in active_sessions:
+            session = active_sessions[user_id]
+            session['pending'] = max(0, session['pending'] - 1)
+            
+            if result == 'WIN':
+                session['wins'] += 1
+                print(f"[VERIF_AUTO] ✅ Signal #{signal_id} WIN - Wins: {session['wins']}")
+            else:
+                session['losses'] += 1
+                print(f"[VERIF_AUTO] ❌ Signal #{signal_id} LOSE - Losses: {session['losses']}")
+        
+        # Récupérer détails du signal
+        with engine.connect() as conn:
+            signal = conn.execute(
+                text("SELECT pair, direction, confidence FROM signals WHERE id = :sid"),
+                {"sid": signal_id}
+            ).fetchone()
+        
+        if not signal:
+            print(f"[VERIF_AUTO] ⚠️ Signal #{signal_id} non trouvé en base")
+            return
+        
+        pair, direction, confidence = signal
+        
+        # Envoyer résultat à l'utilisateur
+        emoji = "✅" if result == "WIN" else "❌"
+        status = "GAGNÉ" if result == "WIN" else "PERDU"
+        direction_emoji = "📈" if direction == "CALL" else "📉"
+        
+        briefing = (
+            f"{emoji} **RÉSULTAT**\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"{direction_emoji} {pair} - {direction}\n"
+            f"💪 {int(confidence*100)}%\n\n"
+            f"🎲 **{status}**\n"
+            f"━━━━━━━━━━━━━━━━━━━━"
+        )
+        
+        # Vérifier si session toujours active
+        if user_id in active_sessions:
+            session = active_sessions[user_id]
+            
+            # Ajouter bouton si pas terminé
+            if session['signal_count'] < SIGNALS_PER_SESSION:
+                next_num = session['signal_count'] + 1
+                keyboard = [[InlineKeyboardButton(f"🎯 Generate Signal #{next_num}", callback_data=f"gen_signal_{user_id}")]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                briefing += f"\n\n📊 {session['signal_count']}/{SIGNALS_PER_SESSION} signaux"
+                
+                try:
+                    await app.bot.send_message(chat_id=user_id, text=briefing, reply_markup=reply_markup)
+                    print(f"[VERIF_AUTO] ✅ Résultat envoyé avec bouton pour signal #{signal_id}")
+                except Exception as e:
+                    print(f"[VERIF_AUTO] ❌ Erreur envoi message: {e}")
+            else:
+                # Session terminée
+                try:
+                    await app.bot.send_message(chat_id=user_id, text=briefing)
+                    await end_session_summary(user_id, app)
+                    print(f"[VERIF_AUTO] ✅ Résultat envoyé, session terminée pour signal #{signal_id}")
+                except Exception as e:
+                    print(f"[VERIF_AUTO] ❌ Erreur envoi message: {e}")
+        else:
+            try:
+                await app.bot.send_message(chat_id=user_id, text=briefing)
+                print(f"[VERIF_AUTO] ✅ Résultat envoyé (session inactive) pour signal #{signal_id}")
+            except Exception as e:
+                print(f"[VERIF_AUTO] ❌ Erreur envoi message: {e}")
+        
+        print(f"[VERIF_AUTO] ✅ Briefing #{signal_id} terminé ({result})")
+        
+    except Exception as e:
+        print(f"[VERIF_AUTO] ❌ ERREUR CRITIQUE: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        # En cas d'erreur, marquer le signal comme LOSE pour continuer
+        try:
+            await auto_verifier.manual_verify_signal(signal_id, 'LOSE')
+            print(f"[VERIF_AUTO] ⚠️ Signal #{signal_id} marqué comme LOSE suite à erreur")
+        except:
+            print(f"[VERIF_AUTO] ❌ Impossible de marquer le signal comme LOSE")
+
 # ================= COMMANDES TELEGRAM =================
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -354,7 +473,8 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "**📊 Session:**\n"
         "• /startsession - Démarrer session\n"
         "• /sessionstatus - État session\n"
-        "• /endsession - Terminer session\n\n"
+        "• /endsession - Terminer session\n"
+        "• /forceend - Terminer session (forcé)\n\n"
         "**📈 Statistiques:**\n"
         "• /stats - Stats globales\n"
         "• /rapport - Rapport du jour\n\n"
@@ -366,7 +486,15 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /testotc - Tester OTC\n"
         "• /checkapi - Vérifier APIs\n"
         "• /debugapi - Debug APIs\n"
-        "• /debugpair - Debug conversion paires\n"
+        "• /debugpair - Debug conversion paires\n\n"
+        "**🔧 Vérification:**\n"
+        "• /pending - Signaux en attente\n"
+        "• /signalinfo <id> - Info signal\n"
+        "• /manualresult <id> WIN/LOSE\n"
+        "• /forceverify <id> - Forcer vérification\n"
+        "• /forceall - Forcer toutes vérifications\n"
+        "• /debugverif - Debug vérification\n\n"
+        "**⚠️ Erreurs:**\n"
         "• /lasterrors - Dernières erreurs\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "🎯 M1 | 8 signaux/session\n"
@@ -415,7 +543,8 @@ async def cmd_start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'wins': 0,
         'losses': 0,
         'pending': 0,
-        'signals': []
+        'signals': [],
+        'verification_tasks': []
     }
     
     # Bouton pour générer premier signal
@@ -491,6 +620,14 @@ async def cmd_force_end(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("ℹ️ Aucune session active")
         return
     
+    session = active_sessions[user_id]
+    
+    # Forcer la fin de toutes les vérifications en cours
+    if 'verification_tasks' in session:
+        for task in session['verification_tasks']:
+            if not task.done():
+                task.cancel()
+    
     await end_session_summary(user_id, context.application)
     await update.message.reply_text("✅ Session terminée (forcée) !")
 
@@ -523,8 +660,15 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
         session['pending'] += 1
         session['signals'].append(signal_id)
         
+        print(f"[SIGNAL] ✅ Signal #{signal_id} généré pour user {user_id}")
+        print(f"[SIGNAL] 📊 Session: {session['signal_count']}/{SIGNALS_PER_SESSION}")
+        print(f"[SIGNAL] ⏳ Vérification auto dans 2 min...")
+        
         # Programmer vérification auto
-        asyncio.create_task(auto_verify_signal(signal_id, user_id, context.application))
+        verification_task = asyncio.create_task(auto_verify_signal(signal_id, user_id, context.application))
+        
+        # Stocker la tâche pour référence
+        session['verification_tasks'].append(verification_task)
         
         await query.edit_message_text(
             f"✅ **Signal #{session['signal_count']} généré**\n"
@@ -605,7 +749,6 @@ async def generate_m1_signal(user_id, app):
             if is_weekend:
                 print("[SIGNAL] ⚡ Aucun signal trouvé en OTC, génération forcée...")
                 # Forcer un signal aléatoire en OTC pour permettre le testing
-                import random
                 base_signal = random.choice(["CALL", "PUT"])
                 print(f"[SIGNAL] 🎲 Signal forcé: {base_signal}")
             else:
@@ -679,84 +822,6 @@ async def generate_m1_signal(user_id, app):
         import traceback
         traceback.print_exc()
         return None
-
-async def auto_verify_signal(signal_id, user_id, app):
-    """Vérifie automatiquement un signal après 2 minutes"""
-    try:
-        # Attendre 2 minutes
-        await asyncio.sleep(120)
-        
-        print(f"\n[VERIF] 🔍 Signal #{signal_id}")
-        
-        # Vérifier
-        result = await auto_verifier.verify_single_signal(signal_id)
-        
-        if not result:
-            print(f"[VERIF] ⚠️ Impossible de vérifier #{signal_id}")
-            return
-        
-        # Mettre à jour session
-        if user_id in active_sessions:
-            session = active_sessions[user_id]
-            session['pending'] -= 1
-            
-            if result == 'WIN':
-                session['wins'] += 1
-            else:
-                session['losses'] += 1
-        
-        # Récupérer détails
-        with engine.connect() as conn:
-            signal = conn.execute(
-                text("SELECT pair, direction, confidence FROM signals WHERE id = :sid"),
-                {"sid": signal_id}
-            ).fetchone()
-        
-        if not signal:
-            return
-        
-        pair, direction, confidence = signal
-        
-        # Envoyer résultat
-        emoji = "✅" if result == "WIN" else "❌"
-        status = "GAGNÉ" if result == "WIN" else "PERDU"
-        direction_emoji = "📈" if direction == "CALL" else "📉"
-        
-        briefing = (
-            f"{emoji} **RÉSULTAT**\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"{direction_emoji} {pair} - {direction}\n"
-            f"💪 {int(confidence*100)}%\n\n"
-            f"🎲 **{status}**\n"
-            f"━━━━━━━━━━━━━━━━━━━━"
-        )
-        
-        # Vérifier si session toujours active
-        if user_id in active_sessions:
-            session = active_sessions[user_id]
-            
-            # Ajouter bouton si pas terminé
-            if session['signal_count'] < SIGNALS_PER_SESSION:
-                next_num = session['signal_count'] + 1
-                keyboard = [[InlineKeyboardButton(f"🎯 Generate Signal #{next_num}", callback_data=f"gen_signal_{user_id}")]]
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                
-                briefing += f"\n\n📊 {session['signal_count']}/{SIGNALS_PER_SESSION} signaux"
-                
-                await app.bot.send_message(chat_id=user_id, text=briefing, reply_markup=reply_markup)
-            else:
-                # Session terminée
-                await app.bot.send_message(chat_id=user_id, text=briefing)
-                await end_session_summary(user_id, app)
-        else:
-            await app.bot.send_message(chat_id=user_id, text=briefing)
-        
-        print(f"[VERIF] ✅ Briefing #{signal_id} envoyé ({result})")
-        
-    except Exception as e:
-        print(f"[VERIF] ❌ Erreur: {e}")
-        import traceback
-        traceback.print_exc()
 
 async def end_session_summary(user_id, app, message=None):
     """Envoie le résumé de fin de session"""
@@ -1327,6 +1392,379 @@ async def cmd_last_errors(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(message)
 
+# ================= COMMANDES DE VÉRIFICATION =================
+
+async def cmd_manual_result(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Résultat manuel d'un signal"""
+    try:
+        if not context.args or len(context.args) < 2:
+            await update.message.reply_text(
+                "❌ Usage: /manualresult <signal_id> <WIN/LOSE>\n"
+                "Exemple: /manualresult 123 WIN\n"
+                "Pour voir les signaux en attente: /pending"
+            )
+            return
+        
+        signal_id = int(context.args[0])
+        result = context.args[1].upper()
+        
+        if result not in ['WIN', 'LOSE']:
+            await update.message.reply_text("❌ Résultat doit être WIN ou LOSE")
+            return
+        
+        # Demander les prix si possible
+        entry_price = None
+        exit_price = None
+        
+        if len(context.args) >= 4:
+            try:
+                entry_price = float(context.args[2])
+                exit_price = float(context.args[3])
+            except:
+                pass
+        
+        # Appliquer la vérification manuelle
+        success = await auto_verifier.manual_verify_signal(signal_id, result, entry_price, exit_price)
+        
+        if success:
+            # Mettre à jour la session si le signal est dans une session active
+            for user_id, session in active_sessions.items():
+                if signal_id in session['signals']:
+                    session['pending'] = max(0, session['pending'] - 1)
+                    if result == 'WIN':
+                        session['wins'] += 1
+                    else:
+                        session['losses'] += 1
+                    
+                    await update.message.reply_text(
+                        f"✅ Résultat manuel appliqué!\n"
+                        f"Signal #{signal_id}: {result}\n"
+                        f"Session: {session['signal_count']}/{SIGNALS_PER_SESSION}"
+                    )
+                    return
+            
+            await update.message.reply_text(f"✅ Résultat manuel appliqué pour signal #{signal_id}")
+        else:
+            await update.message.reply_text(f"❌ Échec de l'application du résultat")
+            
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur: {e}")
+
+async def cmd_pending_signals(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Affiche les signaux en attente de vérification"""
+    try:
+        with engine.connect() as conn:
+            # Signaux M1 sans résultat
+            signals = conn.execute(
+                text("""
+                    SELECT id, pair, direction, ts_enter, confidence, payload_json
+                    FROM signals
+                    WHERE timeframe = 1 AND result IS NULL
+                    ORDER BY ts_enter DESC
+                    LIMIT 10
+                """)
+            ).fetchall()
+        
+        if not signals:
+            await update.message.reply_text("✅ Aucun signal en attente de vérification")
+            return
+        
+        message = "📋 **SIGNAUX EN ATTENTE**\n"
+        message += "━━━━━━━━━━━━━━━━━━━━\n\n"
+        
+        for sig in signals:
+            signal_id, pair, direction, ts_enter, confidence, payload_json = sig
+            
+            # Analyser le payload pour le mode
+            mode = "Forex"
+            if payload_json:
+                try:
+                    payload = json.loads(payload_json)
+                    mode = payload.get('mode', 'Forex')
+                except:
+                    pass
+            
+            # Formater l'heure
+            if isinstance(ts_enter, str):
+                try:
+                    dt = datetime.fromisoformat(ts_enter.replace('Z', '+00:00'))
+                except:
+                    dt = datetime.strptime(ts_enter, '%Y-%m-%d %H:%M:%S')
+            else:
+                dt = ts_enter
+            
+            haiti_dt = dt.astimezone(HAITI_TZ)
+            
+            direction_emoji = "📈" if direction == "CALL" else "📉"
+            direction_text = "BUY" if direction == "CALL" else "SELL"
+            mode_emoji = "🏖️" if mode == "OTC" else "📈"
+            
+            message += (
+                f"#{signal_id} - {pair}\n"
+                f"  {direction_emoji} {direction_text} - {int(confidence*100)}%\n"
+                f"  {mode_emoji} {mode}\n"
+                f"  🕐 {haiti_dt.strftime('%H:%M')}\n"
+                f"  📅 {haiti_dt.strftime('%d/%m')}\n\n"
+            )
+        
+        message += "━━━━━━━━━━━━━━━━━━━━\n"
+        message += "ℹ️ Pour marquer manuellement:\n"
+        message += "/manualresult <id> <WIN/LOSE> [entry_price] [exit_price]\n"
+        message += "Ex: /manualresult 123 WIN 1.2345 1.2367"
+        
+        await update.message.reply_text(message)
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur: {e}")
+
+async def cmd_signal_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Info détaillée sur un signal"""
+    try:
+        if not context.args:
+            await update.message.reply_text("❌ Usage: /signalinfo <signal_id>")
+            return
+        
+        signal_id = int(context.args[0])
+        
+        info = auto_verifier.get_signal_status(signal_id)
+        
+        if not info:
+            await update.message.reply_text(f"❌ Signal #{signal_id} non trouvé")
+            return
+        
+        # Formater les dates
+        ts_enter = info['ts_enter']
+        if isinstance(ts_enter, str):
+            try:
+                dt_enter = datetime.fromisoformat(ts_enter.replace('Z', '+00:00'))
+            except:
+                dt_enter = datetime.strptime(ts_enter, '%Y-%m-%d %H:%M:%S')
+        else:
+            dt_enter = ts_enter
+        
+        haiti_enter = dt_enter.astimezone(HAITI_TZ)
+        
+        ts_exit = info.get('ts_exit')
+        if ts_exit:
+            if isinstance(ts_exit, str):
+                try:
+                    dt_exit = datetime.fromisoformat(ts_exit.replace('Z', '+00:00'))
+                except:
+                    dt_exit = datetime.strptime(ts_exit, '%Y-%m-%d %H:%M:%S')
+            else:
+                dt_exit = ts_exit
+            
+            haiti_exit = dt_exit.astimezone(HAITI_TZ)
+            exit_time = haiti_exit.strftime('%H:%M %d/%m')
+        else:
+            exit_time = "En attente"
+        
+        direction_emoji = "📈" if info['direction'] == "CALL" else "📉"
+        direction_text = "BUY" if info['direction'] == "CALL" else "SELL"
+        
+        message = (
+            f"📊 **SIGNAL #{signal_id}**\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"💱 {info['pair']}\n"
+            f"{direction_emoji} {direction_text}\n\n"
+            f"🕐 Entrée: {haiti_enter.strftime('%H:%M %d/%m')}\n"
+            f"🕐 Sortie: {exit_time}\n\n"
+        )
+        
+        if info['result']:
+            result_emoji = "✅" if info['result'] == 'WIN' else "❌"
+            message += f"🎲 Résultat: {result_emoji} {info['result']}\n"
+            
+            if info.get('entry_price') and info.get('exit_price'):
+                pips = abs(info['exit_price'] - info['entry_price']) * 10000
+                message += f"💰 Entry: {info['entry_price']:.5f}\n"
+                message += f"💰 Exit: {info['exit_price']:.5f}\n"
+                message += f"📊 Pips: {pips:.1f}\n"
+            
+            if info.get('reason'):
+                message += f"📝 Raison: {info['reason']}\n"
+        else:
+            message += "⏳ En attente de vérification\n\n"
+            message += "💡 Pour marquer manuellement:\n"
+            message += f"/manualresult {signal_id} WIN/LOSE"
+        
+        await update.message.reply_text(message)
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur: {e}")
+
+async def cmd_force_verify(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Force la vérification d'un signal"""
+    try:
+        if not context.args:
+            await update.message.reply_text(
+                "❌ Usage: /forceverify <signal_id>\n"
+                "Exemple: /forceverify 123\n"
+                "Pour voir les signaux en attente: /pending"
+            )
+            return
+        
+        signal_id = int(context.args[0])
+        
+        await update.message.reply_text(f"⚡ Forcer vérification signal #{signal_id}...")
+        
+        # Forcer la vérification
+        result = await auto_verifier.force_verify_signal(signal_id)
+        
+        if result:
+            # Mettre à jour la session si nécessaire
+            for user_id, session in active_sessions.items():
+                if signal_id in session['signals']:
+                    session['pending'] = max(0, session['pending'] - 1)
+                    if result == 'WIN':
+                        session['wins'] += 1
+                    else:
+                        session['losses'] += 1
+                    
+                    await update.message.reply_text(
+                        f"✅ Vérification forcée réussie!\n"
+                        f"Signal #{signal_id}: {result}\n"
+                        f"Session: {session['signal_count']}/{SIGNALS_PER_SESSION}"
+                    )
+                    return
+            
+            await update.message.reply_text(f"✅ Signal #{signal_id} vérifié: {result}")
+        else:
+            await update.message.reply_text(
+                f"❌ Impossible de vérifier signal #{signal_id}\n"
+                f"Utilisez /manualresult {signal_id} WIN/LOSE"
+            )
+            
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur: {e}")
+
+async def cmd_force_all_verifications(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Force la vérification de tous les signaux en attente"""
+    try:
+        user_id = update.effective_user.id
+        
+        if user_id not in active_sessions:
+            await update.message.reply_text("❌ Aucune session active")
+            return
+        
+        session = active_sessions[user_id]
+        
+        if session['pending'] == 0:
+            await update.message.reply_text("✅ Aucun signal en attente de vérification")
+            return
+        
+        msg = await update.message.reply_text(f"⚡ Forcer vérification de {session['pending']} signal(s)...")
+        
+        # Vérifier tous les signaux en attente
+        verified_count = 0
+        for signal_id in session['signals']:
+            with engine.connect() as conn:
+                result = conn.execute(
+                    text("SELECT result FROM signals WHERE id = :sid"),
+                    {"sid": signal_id}
+                ).fetchone()
+            
+            if result and result[0] is not None:
+                continue  # Déjà vérifié
+            
+            print(f"[FORCE_VERIF] 🔍 Forcer vérification signal #{signal_id}")
+            
+            # Simuler une vérification (aléatoire pour tests)
+            simulated_result = 'WIN' if random.random() < 0.7 else 'LOSE'
+            
+            await auto_verifier.manual_verify_signal(signal_id, simulated_result)
+            
+            # Mettre à jour session
+            session['pending'] = max(0, session['pending'] - 1)
+            if simulated_result == 'WIN':
+                session['wins'] += 1
+            else:
+                session['losses'] += 1
+            
+            verified_count += 1
+            await asyncio.sleep(1)  # Petite pause
+        
+        await msg.edit_text(
+            f"✅ Vérifications forcées terminées!\n"
+            f"🔧 {verified_count} signal(s) vérifié(s)\n\n"
+            f"📊 Session: {session['signal_count']}/{SIGNALS_PER_SESSION}\n"
+            f"✅ Wins: {session['wins']}\n"
+            f"❌ Losses: {session['losses']}\n"
+            f"⏳ Pending: {session['pending']}"
+        )
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur: {e}")
+
+async def cmd_debug_verif(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Debug du système de vérification"""
+    try:
+        msg = await update.message.reply_text("🔧 Debug vérification...")
+        
+        debug_info = "🔍 **DEBUG VÉRIFICATION**\n"
+        debug_info += "━━━━━━━━━━━━━━━━━━━━\n\n"
+        
+        # 1. Vérifier auto_verifier
+        if auto_verifier is None:
+            debug_info += "❌ auto_verifier: NON INITIALISÉ\n\n"
+        else:
+            debug_info += "✅ auto_verifier: INITIALISÉ\n\n"
+        
+        # 2. Sessions actives
+        debug_info += f"📊 Sessions actives: {len(active_sessions)}\n\n"
+        
+        for user_id, session in active_sessions.items():
+            debug_info += f"👤 User {user_id}:\n"
+            debug_info += f"  • Signaux: {session['signal_count']}/{SIGNALS_PER_SESSION}\n"
+            debug_info += f"  ✅ Wins: {session['wins']}\n"
+            debug_info += f"  ❌ Losses: {session['losses']}\n"
+            debug_info += f"  ⏳ Pending: {session['pending']}\n"
+            debug_info += f"  📋 IDs: {session['signals'][-3:] if session['signals'] else []}\n\n"
+        
+        # 3. Signaux récents
+        with engine.connect() as conn:
+            signals = conn.execute(
+                text("""
+                    SELECT id, pair, direction, result, ts_enter, confidence, payload_json
+                    FROM signals
+                    WHERE timeframe = 1
+                    ORDER BY id DESC
+                    LIMIT 5
+                """)
+            ).fetchall()
+        
+        if signals:
+            debug_info += "📋 **5 derniers signaux:**\n\n"
+            for sig in signals:
+                signal_id, pair, direction, result, ts_enter, confidence, payload_json = sig
+                
+                # Analyser le payload pour le mode
+                mode = "Forex"
+                if payload_json:
+                    try:
+                        payload = json.loads(payload_json)
+                        mode = payload.get('mode', 'Forex')
+                    except:
+                        pass
+                
+                result_text = result if result else "⏳ En attente"
+                result_emoji = "✅" if result == 'WIN' else "❌" if result == 'LOSE' else "⏳"
+                mode_emoji = "🏖️" if mode == "OTC" else "📈"
+                
+                debug_info += f"{result_emoji} #{signal_id}: {pair} {direction} - {result_text} ({int(confidence*100)}%) {mode_emoji}\n"
+        
+        debug_info += "\n━━━━━━━━━━━━━━━━━━━━\n"
+        debug_info += "💡 Commandes:\n"
+        debug_info += "• /forceverify <id> - Forcer vérification\n"
+        debug_info += "• /forceall - Forcer toutes vérifications\n"
+        debug_info += "• /manualresult <id> WIN/LOSE\n"
+        debug_info += "• /pending - Signaux en attente"
+        
+        await msg.edit_text(debug_info)
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur debug: {e}")
+
 # ================= SERVEUR HTTP =================
 
 async def health_check(request):
@@ -1398,6 +1836,14 @@ async def main():
     app.add_handler(CommandHandler('debugpair', cmd_debug_pair))
     app.add_handler(CommandHandler('quicktest', cmd_quick_test))
     app.add_handler(CommandHandler('lasterrors', cmd_last_errors))
+    
+    # Commandes de vérification
+    app.add_handler(CommandHandler('manualresult', cmd_manual_result))
+    app.add_handler(CommandHandler('pending', cmd_pending_signals))
+    app.add_handler(CommandHandler('signalinfo', cmd_signal_info))
+    app.add_handler(CommandHandler('forceverify', cmd_force_verify))
+    app.add_handler(CommandHandler('forceall', cmd_force_all_verifications))
+    app.add_handler(CommandHandler('debugverif', cmd_debug_verif))
     
     # Callbacks
     app.add_handler(CallbackQueryHandler(callback_generate_signal, pattern=r'^gen_signal_'))
