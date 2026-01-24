@@ -93,7 +93,7 @@ def fetch_ohlc_td(pair, interval, outputsize=300):
         forex_to_crypto = {
             'EUR/USD': 'BTC/USD',
             'GBP/USD': 'ETH/USD',
-            'USD/JPY': 'XRP/USD',
+            'USD/JPY': 'TRX/USD',
             'AUD/USD': 'LTC/USD',
             'BTC/USD': 'BTC/USD',  # Déjà crypto
             'ETH/USD': 'ETH/USD'
