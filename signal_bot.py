@@ -2,7 +2,7 @@
 Bot de trading M1 - Version Interactive
 8 signaux par session avec bouton Generate Signal
 Support OTC (crypto) le week-end via APIs multiples
-Signal envoyé 2 minutes avant l'entrée en position
+Signal envoyé immédiatement avec timing 2 minutes avant entrée
 """
 
 import os, json, asyncio, random
@@ -431,71 +431,41 @@ async def auto_verify_signal(signal_id, user_id, app):
         except:
             print(f"[VERIF_AUTO] ❌ Impossible de marquer le signal comme LOSE")
 
-# ================= NOUVELLE FONCTION: ATTENTE SIGNAL =================
+# ================= FONCTION RAPPEL =================
 
-async def wait_and_send_signal(signal_id, user_id, app, send_time, entry_time):
-    """Attend le moment approprié pour envoyer le signal (2 minutes avant l'entrée)"""
+async def send_reminder(signal_id, user_id, app, reminder_time, entry_time, pair, direction):
+    """Envoie un rappel 1 minute avant l'entrée"""
     try:
         now_haiti = get_haiti_now()
-        wait_seconds = (send_time - now_haiti).total_seconds()
+        wait_seconds = (reminder_time - now_haiti).total_seconds()
         
         if wait_seconds > 0:
-            print(f"[SIGNAL_TIMING] ⏳ Attente de {wait_seconds:.1f} secondes avant envoi du signal #{signal_id}")
+            print(f"[REMINDER] ⏳ Attente de {wait_seconds:.1f} secondes pour rappel signal #{signal_id}")
             await asyncio.sleep(wait_seconds)
         
-        # Récupérer les détails du signal depuis la base
-        with engine.connect() as conn:
-            signal = conn.execute(
-                text("SELECT pair, direction, confidence, payload_json FROM signals WHERE id = :sid"),
-                {"sid": signal_id}
-            ).fetchone()
-        
-        if not signal:
-            print(f"[SIGNAL_TIMING] ❌ Signal #{signal_id} non trouvé en base")
-            return
-        
-        pair, direction, confidence, payload_json = signal
-        
-        # Analyser le payload pour le mode
-        mode = "Forex"
-        if payload_json:
-            try:
-                payload = json.loads(payload_json)
-                mode = payload.get('mode', 'Forex')
-            except:
-                pass
-        
-        # Formater le message du signal
-        direction_text = "BUY ↗️" if direction == "CALL" else "SELL ↘️"
-        entry_time_formatted = entry_time.strftime('%H:%M')
-        
-        # Calculer le temps restant avant entrée
         time_to_entry = max(0, (entry_time - get_haiti_now()).total_seconds() / 60)
+        direction_text = "BUY ↗️" if direction == "CALL" else "SELL ↘️"
         
-        msg = (
-            f"🎯 **SIGNAL #{active_sessions[user_id]['signal_count']}**\n"
+        reminder_msg = (
+            f"🔔 **RAPPEL - SIGNAL #{active_sessions[user_id]['signal_count']}**\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"💱 {pair}\n"
-            f"🌐 Mode: {mode}\n"
-            f"🕐 Entrée dans: **{time_to_entry:.0f} min**\n"
-            f"⏰ Heure entrée: **{entry_time_formatted}**\n"
             f"📈 Direction: **{direction_text}**\n"
-            f"💪 Confiance: **{int(confidence*100)}%**\n"
-            f"⏱️ Timeframe: 1 minute"
+            f"⏰ Entrée dans: **{time_to_entry:.0f} min**\n\n"
+            f"💡 Préparez-vous à entrer en position!"
         )
         
         try:
-            await app.bot.send_message(chat_id=user_id, text=msg)
-            print(f"[SIGNAL_TIMING] ✅ Signal #{signal_id} envoyé à {get_haiti_now().strftime('%H:%M:%S')}")
-            print(f"[SIGNAL_TIMING] ⏰ Entrée prévue à {entry_time_formatted} (dans {time_to_entry:.1f} min)")
+            await app.bot.send_message(chat_id=user_id, text=reminder_msg)
+            print(f"[REMINDER] ✅ Rappel envoyé pour signal #{signal_id}")
         except Exception as e:
-            print(f"[SIGNAL_TIMING] ❌ Erreur envoi signal: {e}")
+            print(f"[REMINDER] ❌ Erreur envoi rappel: {e}")
             
     except asyncio.CancelledError:
-        print(f"[SIGNAL_TIMING] ❌ Tâche d'attente signal #{signal_id} annulée")
+        print(f"[REMINDER] ❌ Tâche de rappel signal #{signal_id} annulée")
         raise
     except Exception as e:
-        print(f"[SIGNAL_TIMING] ❌ Erreur dans wait_and_send_signal: {e}")
+        print(f"[REMINDER] ❌ Erreur dans send_reminder: {e}")
 
 # ================= COMMANDES TELEGRAM =================
 
@@ -518,7 +488,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ **Bienvenue au Bot Trading M1 !**\n\n"
             f"🎯 Mode: **Interactive Session**\n"
             f"📊 8 signaux M1 par session\n"
-            f"⚡ Signal envoyé: **2 min avant l'entrée**\n"
+            f"⚡ Signal envoyé: **Immédiatement avec timing**\n"
+            f"🔔 Rappel: 1 min avant entrée\n"
             f"🔍 Vérification auto: 3 min après signal\n"
             f"🌐 Mode actuel: {mode_text}\n"
             f"🔧 Sources: TwelveData + APIs Crypto\n\n"
@@ -567,7 +538,8 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /lasterrors - Dernières erreurs\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "🎯 M1 | 8 signaux/session\n"
-        "⚡ Signal envoyé: 2 min avant entrée\n"
+        "⚡ Signal envoyé: Immédiatement\n"
+        "🔔 Rappel: 1 min avant entrée\n"
         "🔍 Vérif auto: 3 min après signal\n"
         "🏖️ OTC actif le week-end\n"
         "🔧 Multi-APIs Crypto"
@@ -615,7 +587,7 @@ async def cmd_start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'pending': 0,
         'signals': [],
         'verification_tasks': [],
-        'signal_tasks': []  # Nouvelles tâches d'envoi de signal
+        'reminder_tasks': []  # Nouvelles tâches de rappel
     }
     
     # Bouton pour générer premier signal
@@ -631,7 +603,8 @@ async def cmd_start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📅 {now_haiti.strftime('%H:%M:%S')}\n"
         f"🌐 Mode: {mode_text}\n"
         f"🎯 Objectif: {SIGNALS_PER_SESSION} signaux M1\n"
-        f"⚡ Signal envoyé: 2 min avant entrée\n"
+        f"⚡ Signal envoyé: Immédiatement\n"
+        f"🔔 Rappel: 1 min avant entrée\n"
         f"🔍 Vérification: 3 min après signal\n"
         f"🔧 Sources: {'APIs Crypto' if is_weekend else 'TwelveData'}\n\n"
         f"Cliquez pour générer signal #1 ⬇️",
@@ -650,12 +623,12 @@ async def cmd_session_status(update: Update, context: ContextTypes.DEFAULT_TYPE)
     duration = (get_haiti_now() - session['start_time']).total_seconds() / 60
     winrate = (session['wins'] / session['signal_count'] * 100) if session['signal_count'] > 0 else 0
     
-    # Vérifier si des signaux sont en attente d'envoi
-    pending_signals = 0
-    if 'signal_tasks' in session:
-        for task in session['signal_tasks']:
+    # Vérifier si des rappels sont en attente
+    pending_reminders = 0
+    if 'reminder_tasks' in session:
+        for task in session['reminder_tasks']:
             if not task.done():
-                pending_signals += 1
+                pending_reminders += 1
     
     msg = (
         "📊 **ÉTAT SESSION**\n"
@@ -665,10 +638,11 @@ async def cmd_session_status(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"✅ Wins: {session['wins']}\n"
         f"❌ Losses: {session['losses']}\n"
         f"⏳ Vérif en attente: {session['pending']}\n"
-        f"📨 Signaux en attente d'envoi: {pending_signals}\n\n"
+        f"🔔 Rappels en attente: {pending_reminders}\n\n"
         f"📊 Win Rate: {winrate:.1f}%\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        f"⚡ Signal timing: 2 min avant entrée"
+        f"⚡ Signal envoyé immédiatement\n"
+        f"🔔 Rappel 1 min avant entrée"
     )
     
     await update.message.reply_text(msg)
@@ -683,9 +657,9 @@ async def cmd_end_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     session = active_sessions[user_id]
     
-    # Annuler les tâches d'envoi de signal en attente
-    if 'signal_tasks' in session:
-        for task in session['signal_tasks']:
+    # Annuler les tâches de rappel en attente
+    if 'reminder_tasks' in session:
+        for task in session['reminder_tasks']:
             if not task.done():
                 try:
                     task.cancel()
@@ -718,8 +692,8 @@ async def cmd_force_end(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not task.done():
                 task.cancel()
     
-    if 'signal_tasks' in session:
-        for task in session['signal_tasks']:
+    if 'reminder_tasks' in session:
+        for task in session['reminder_tasks']:
             if not task.done():
                 try:
                     task.cancel()
@@ -760,17 +734,27 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
         
         print(f"[SIGNAL] ✅ Signal #{signal_id} généré pour user {user_id}")
         print(f"[SIGNAL] 📊 Session: {session['signal_count']}/{SIGNALS_PER_SESSION}")
-        print(f"[SIGNAL] ⏳ Vérification auto dans 3 min...")
         
-        # Récupérer l'heure d'entrée du signal
+        # Récupérer les détails du signal pour l'envoyer immédiatement
         with engine.connect() as conn:
             signal = conn.execute(
-                text("SELECT ts_enter FROM signals WHERE id = :sid"),
+                text("SELECT pair, direction, confidence, payload_json, ts_enter FROM signals WHERE id = :sid"),
                 {"sid": signal_id}
             ).fetchone()
         
         if signal:
-            ts_enter = signal[0]
+            pair, direction, confidence, payload_json, ts_enter = signal
+            
+            # Analyser le payload pour le mode
+            mode = "Forex"
+            if payload_json:
+                try:
+                    payload = json.loads(payload_json)
+                    mode = payload.get('mode', 'Forex')
+                except:
+                    pass
+            
+            # Convertir ts_enter en datetime si nécessaire
             if isinstance(ts_enter, str):
                 entry_time = datetime.fromisoformat(ts_enter.replace('Z', '+00:00')).astimezone(HAITI_TZ)
             else:
@@ -780,61 +764,67 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
             send_time = entry_time - timedelta(minutes=2)
             now_haiti = get_haiti_now()
             
-            # Vérifier si le moment d'envoi est dans le futur
+            # Formater le message du signal
+            direction_text = "BUY ↗️" if direction == "CALL" else "SELL ↘️"
+            entry_time_formatted = entry_time.strftime('%H:%M')
+            
+            # Calculer le temps restant avant entrée
+            time_to_entry = max(0, (entry_time - now_haiti).total_seconds() / 60)
+            
+            # Message COMPLET du signal à envoyer IMMÉDIATEMENT
+            signal_msg = (
+                f"🎯 **SIGNAL #{session['signal_count']}**\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"💱 {pair}\n"
+                f"🌐 Mode: {mode}\n"
+                f"🕐 Entrée dans: **{time_to_entry:.0f} min**\n"
+                f"⏰ Heure entrée: **{entry_time_formatted}**\n"
+                f"📈 Direction: **{direction_text}**\n"
+                f"💪 Confiance: **{int(confidence*100)}%**\n"
+                f"⏱️ Timeframe: 1 minute"
+            )
+            
+            try:
+                await context.application.bot.send_message(chat_id=user_id, text=signal_msg)
+                print(f"[SIGNAL] ✅ Signal #{signal_id} ENVOYÉ IMMÉDIATEMENT à {now_haiti.strftime('%H:%M:%S')}")
+                print(f"[SIGNAL] ⏰ Entrée prévue à {entry_time_formatted} (dans {time_to_entry:.1f} min)")
+            except Exception as e:
+                print(f"[SIGNAL] ❌ Erreur envoi signal: {e}")
+            
+            # Vérifier si le moment d'envoi est dans le futur pour les rappels
             if send_time > now_haiti:
-                # Créer une tâche pour envoyer le signal au bon moment
-                signal_task = asyncio.create_task(
-                    wait_and_send_signal(signal_id, user_id, context.application, send_time, entry_time)
+                # Créer une tâche pour un rappel 1 minute avant l'entrée
+                reminder_time = entry_time - timedelta(minutes=1)
+                reminder_task = asyncio.create_task(
+                    send_reminder(signal_id, user_id, context.application, reminder_time, entry_time, pair, direction)
                 )
-                session['signal_tasks'].append(signal_task)
+                session['reminder_tasks'].append(reminder_task)
                 
-                wait_seconds = (send_time - now_haiti).total_seconds()
-                print(f"[SIGNAL_TIMING] ⏰ Signal #{signal_id} sera envoyé dans {wait_seconds:.0f} secondes")
-                print(f"[SIGNAL_TIMING] ⏰ Heure d'envoi: {send_time.strftime('%H:%M:%S')}")
-                print(f"[SIGNAL_TIMING] ⏰ Heure d'entrée: {entry_time.strftime('%H:%M:%S')}")
-            else:
-                # Si le moment d'envoi est déjà passé, envoyer immédiatement
-                print(f"[SIGNAL_TIMING] ⚠️ Heure d'envoi déjà passée, envoi immédiat")
-                # Récupérer les détails du signal et l'envoyer
-                with engine.connect() as conn:
-                    signal = conn.execute(
-                        text("SELECT pair, direction, confidence, payload_json FROM signals WHERE id = :sid"),
-                        {"sid": signal_id}
-                    ).fetchone()
-                
-                if signal:
-                    pair, direction, confidence, payload_json = signal
-                    direction_text = "BUY ↗️" if direction == "CALL" else "SELL ↘️"
-                    
-                    msg = (
-                        f"🎯 **SIGNAL #{session['signal_count']}**\n"
-                        f"━━━━━━━━━━━━━━━━━━━━\n"
-                        f"💱 {pair}\n"
-                        f"📈 Direction: **{direction_text}**\n"
-                        f"💪 Confiance: **{int(confidence*100)}%**\n"
-                        f"⏱️ Timeframe: 1 minute\n"
-                        f"⚠️ Signal envoyé immédiatement (timing dépassé)"
-                    )
-                    
-                    try:
-                        await context.application.bot.send_message(chat_id=user_id, text=msg)
-                    except Exception as e:
-                        print(f"[SIGNAL] ❌ Erreur envoi signal: {e}")
+                wait_seconds = (reminder_time - now_haiti).total_seconds()
+                if wait_seconds > 0:
+                    print(f"[SIGNAL_REMINDER] ⏰ Rappel programmé pour signal #{signal_id} dans {wait_seconds:.0f} secondes")
         
         # Programmer vérification auto (3 minutes après la génération du signal)
         verification_task = asyncio.create_task(auto_verify_signal(signal_id, user_id, context.application))
         session['verification_tasks'].append(verification_task)
         
-        await query.edit_message_text(
-            f"✅ **Signal #{session['signal_count']} généré**\n"
+        print(f"[SIGNAL] ⏳ Vérification auto programmée dans 3 min...")
+        
+        # Message de confirmation modifié
+        confirmation_msg = (
+            f"✅ **Signal #{session['signal_count']} généré et envoyé!**\n"
             f"━━━━━━━━━━━━━━━━━━━━\n\n"
             f"📊 Progression: {session['signal_count']}/{SIGNALS_PER_SESSION}\n\n"
             f"⏰ **Timing du signal:**\n"
-            f"• Génération: Maintenant\n"
-            f"• Envoi: 2 min avant entrée\n"
-            f"• Entrée: Dans 2 min\n"
-            f"• Vérification: 3 min après génération"
+            f"• Génération: Maintenant ✅\n"
+            f"• Signal: Envoyé maintenant ✅\n"
+            f"• Entrée: Dans {time_to_entry:.0f} min\n"
+            f"• Rappel: 1 min avant entrée\n"
+            f"• Vérification: 3 min après entrée\n\n"
+            f"💡 Préparez votre position!"
         )
+        
+        await query.edit_message_text(confirmation_msg)
     else:
         await query.edit_message_text(
             "⚠️ Aucun signal (conditions non remplies)\n\n"
@@ -933,7 +923,7 @@ async def generate_m1_signal(user_id, app):
         
         # Calculer l'heure d'entrée (arrondie à la minute suivante + 2 minutes)
         # Pour avoir une entrée précise, on arrondit à la minute suivante
-        entry_time_haiti = (now_haiti + timedelta(minutes=3)).replace(second=0, microsecond=0)
+        entry_time_haiti = (now_haiti + timedelta(minutes=2)).replace(second=0, microsecond=0)
         # S'assurer que l'entrée est bien dans 2 minutes minimum
         if entry_time_haiti < now_haiti + timedelta(minutes=2):
             entry_time_haiti = (now_haiti + timedelta(minutes=2)).replace(second=0, microsecond=0)
@@ -949,7 +939,7 @@ async def generate_m1_signal(user_id, app):
         payload = {
             'pair': current_pair,  # Stocker la paire actuelle utilisée
             'direction': ml_signal, 
-            'reason': f'M1 Session {mode} - ML {ml_conf:.1%} - Timing: 2min avant entrée',
+            'reason': f'M1 Session {mode} - ML {ml_conf:.1%} - Timing: entrée dans 2min',
             'ts_enter': entry_time_utc.isoformat(), 
             'ts_send': send_time_utc.isoformat(),
             'confidence': ml_conf, 
@@ -964,7 +954,7 @@ async def generate_m1_signal(user_id, app):
                 'timing_info': {
                     'signal_generated': now_haiti.isoformat(),
                     'entry_scheduled': entry_time_haiti.isoformat(),
-                    'send_scheduled': (entry_time_haiti - timedelta(minutes=2)).isoformat(),
+                    'reminder_scheduled': (entry_time_haiti - timedelta(minutes=1)).isoformat(),
                     'delay_before_entry_minutes': 2
                 }
             }),
@@ -973,7 +963,7 @@ async def generate_m1_signal(user_id, app):
         }
         signal_id = persist_signal(payload)
         
-        print(f"[SIGNAL] ✅ Signal #{signal_id} persisté avec timing 2 min avant entrée")
+        print(f"[SIGNAL] ✅ Signal #{signal_id} persisté avec entrée dans 2 min")
         
         return signal_id
         
@@ -1002,7 +992,8 @@ async def end_session_summary(user_id, app, message=None):
         f"❌ Losses: {session['losses']}\n"
         f"📈 Win Rate: **{winrate:.1f}%**\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "⚡ Timing: Signaux envoyés 2 min avant entrée\n"
+        "⚡ Signal envoyé immédiatement\n"
+        "🔔 Rappel 1 min avant entrée\n"
         "Utilisez /startsession pour nouvelle session"
     )
     
@@ -1965,10 +1956,11 @@ async def main():
 
     print("\n" + "="*60)
     print("🤖 BOT M1 - VERSION INTERACTIVE")
-    print("🎯 SIGNAL TIMING: 2 MINUTES AVANT ENTRÉE")
+    print("🎯 SIGNAL ENVOYÉ IMMÉDIATEMENT AVEC TIMING")
     print("="*60)
     print(f"🎯 8 signaux/session")
-    print(f"⚡ Signal envoyé: 2 min avant entrée")
+    print(f"⚡ Signal envoyé: Immédiatement")
+    print(f"🔔 Rappel: 1 min avant entrée")
     print(f"🔍 Vérification: 3 min après signal")
     print(f"🌐 OTC support: Week-end crypto")
     print(f"🔧 Sources: TwelveData + Multi-APIs Crypto")
@@ -2021,7 +2013,8 @@ async def main():
     print(f"✅ BOT ACTIF: @{bot_info.username}\n")
     print(f"🔧 Mode actuel: {'OTC (Crypto)' if otc_provider.is_weekend() else 'Forex'}")
     print(f"🌐 Sources: {'Multi-APIs Crypto' if otc_provider.is_weekend() else 'TwelveData'}")
-    print(f"⏰ Timing signal: 2 minutes avant l'entrée\n")
+    print(f"⚡ Signal envoyé: Immédiatement après génération")
+    print(f"🔔 Rappel: 1 minute avant l'entrée\n")
 
     try:
         while True:
