@@ -488,8 +488,6 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ **Bienvenue au Bot Trading M1 !**\n\n"
             f"🎯 Mode: **Interactive Session**\n"
             f"📊 8 signaux M1 par session\n"
-            f"⚡ Signal envoyé: **Immédiatement avec timing**\n"
-            f"🔔 Rappel: 1 min avant entrée\n"
             f"🔍 Vérification auto: 3 min après signal\n"
             f"🌐 Mode actuel: {mode_text}\n"
             f"🔧 Sources: TwelveData + APIs Crypto\n\n"
@@ -538,8 +536,6 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /lasterrors - Dernières erreurs\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "🎯 M1 | 8 signaux/session\n"
-        "⚡ Signal envoyé: Immédiatement\n"
-        "🔔 Rappel: 1 min avant entrée\n"
         "🔍 Vérif auto: 3 min après signal\n"
         "🏖️ OTC actif le week-end\n"
         "🔧 Multi-APIs Crypto"
@@ -603,7 +599,6 @@ async def cmd_start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📅 {now_haiti.strftime('%H:%M:%S')}\n"
         f"🌐 Mode: {mode_text}\n"
         f"🎯 Objectif: {SIGNALS_PER_SESSION} signaux M1\n"
-        f"⚡ Signal envoyé: Immédiatement\n"
         f"🔍 Vérification: 3 min après signal\n"
         f"🔧 Sources: {'APIs Crypto' if is_weekend else 'TwelveData'}\n\n"
         f"Cliquez pour générer signal #1 ⬇️",
@@ -640,7 +635,6 @@ async def cmd_session_status(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"🔔 Rappels en attente: {pending_reminders}\n\n"
         f"📊 Win Rate: {winrate:.1f}%\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        f"⚡ Signal envoyé immédiatement\n"
         f"🔔 Rappel 1 min avant entrée"
     )
     
@@ -776,7 +770,6 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
                 f"━━━━━━━━━━━━━━━━━━━━\n"
                 f"💱 {pair}\n"
                 f"🌐 Mode: {mode}\n"
-                f"🕐 Entrée dans: **{time_to_entry:.0f} min**\n"
                 f"⏰ Heure entrée: **{entry_time_formatted}**\n"
                 f"📈 Direction: **{direction_text}**\n"
                 f"💪 Confiance: **{int(confidence*100)}%**\n"
@@ -815,7 +808,6 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
             f"━━━━━━━━━━━━━━━━━━━━\n\n"
             f"📊 Progression: {session['signal_count']}/{SIGNALS_PER_SESSION}\n\n"
             f"⏰ **Timing du signal:**\n"
-            f"• Entrée: Dans {time_to_entry:.0f} min\n"
             f"• Vérification: 3 min après entrée\n\n"
             f"💡 Préparez votre position!"
         )
