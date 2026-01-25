@@ -20,7 +20,7 @@ class OTCDataProvider:
     
     def get_available_pairs(self) -> List[str]:
         """Retourne la liste des paires OTC disponibles"""
-        return ['BTC/USD', 'ETH/USD', 'XRP/USD', 'LTC/USD']
+        return ['BTC/USD', 'ETH/USD', 'TRX/USD', 'LTC/USD']
     
     def _map_pair_to_symbol(self, pair: str, exchange: str = 'bybit') -> str:
         """Convertit une paire format TradingView en symbole d'API"""
@@ -28,19 +28,19 @@ class OTCDataProvider:
             'bybit': {
                 'BTC/USD': 'BTCUSDT',
                 'ETH/USD': 'ETHUSDT',
-                'XRP/USD': 'XRPUSDT',
+                'TRX/USD': 'TRXUSDT',
                 'LTC/USD': 'LTCUSDT'
             },
             'binance': {
                 'BTC/USD': 'BTCUSDT',
                 'ETH/USD': 'ETHUSDT',
-                'XRP/USD': 'XRPUSDT',
+                'TRX/USD': 'TRXUSDT',
                 'LTC/USD': 'LTCUSDT'
             },
             'kucoin': {
                 'BTC/USD': 'BTC-USDT',
                 'ETH/USD': 'ETH-USDT',
-                'XRP/USD': 'XRP-USDT',
+                'TRX/USD': 'TRX-USDT',
                 'LTC/USD': 'LTC-USDT'
             }
         }
@@ -264,7 +264,7 @@ class OTCDataProvider:
             cg_ids = {
                 'BTC/USD': 'bitcoin',
                 'ETH/USD': 'ethereum',
-                'XRP/USD': 'ripple',
+                'TRX/USD': 'tron',
                 'LTC/USD': 'litecoin'
             }
             
@@ -322,7 +322,7 @@ class OTCDataProvider:
             coincap_ids = {
                 'BTC/USD': 'bitcoin',
                 'ETH/USD': 'ethereum',
-                'XRP/USD': 'ripple',
+                'TRX/USD': 'tron',
                 'LTC/USD': 'litecoin'
             }
             
@@ -395,25 +395,30 @@ class OTCDataProvider:
             real_price = self.get_current_price(pair)
             if real_price:
                 base_price = real_price
-                print(f"💰 Prix réel obtenu: ${base_price:.2f}")
+                print(f"💰 Prix réel obtenu: ${base_price:.4f}")
             else:
                 # Prix par défaut si échec
                 base_prices = {
                     'BTC/USD': 45000.0,
                     'ETH/USD': 2500.0,
-                    'XRP/USD': 0.60,
+                    'TRX/USD': 0.10,  # Prix TRX autour de 0.10 USD
                     'LTC/USD': 70.0
                 }
                 base_price = base_prices.get(pair, 100.0)
-                print(f"⚠️ Utilisation prix par défaut: ${base_price:.2f}")
+                print(f"⚠️ Utilisation prix par défaut: ${base_price:.4f}")
             
             # Générer des données réalistes
             end_time = datetime.utcnow()
             start_time = end_time - timedelta(minutes=limit)
             timestamps = pd.date_range(start=start_time, end=end_time, periods=limit)
             
-            # Volatilité réaliste
-            volatility = 0.005 if 'BTC' in pair or 'ETH' in pair else 0.008
+            # Volatilité réaliste - TRX a généralement une volatilité plus élevée
+            if 'BTC' in pair or 'ETH' in pair:
+                volatility = 0.005
+            elif 'TRX' in pair:
+                volatility = 0.015  # TRX est plus volatile
+            else:
+                volatility = 0.008
             
             prices = []
             current_price = base_price
@@ -444,7 +449,7 @@ class OTCDataProvider:
             df = pd.DataFrame(prices)
             df.set_index('datetime', inplace=True)
             
-            print(f"✅ Données synthétiques générées: {len(df)} bougies, dernier prix: ${df.iloc[-1]['close']:.2f}")
+            print(f"✅ Données synthétiques générées: {len(df)} bougies, dernier prix: ${df.iloc[-1]['close']:.4f}")
             return df
             
         except Exception as e:
@@ -458,7 +463,7 @@ class OTCDataProvider:
             cg_ids = {
                 'BTC/USD': 'bitcoin',
                 'ETH/USD': 'ethereum',
-                'XRP/USD': 'ripple',
+                'TRX/USD': 'tron',
                 'LTC/USD': 'litecoin'
             }
             
