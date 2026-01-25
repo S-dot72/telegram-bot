@@ -604,7 +604,6 @@ async def cmd_start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🌐 Mode: {mode_text}\n"
         f"🎯 Objectif: {SIGNALS_PER_SESSION} signaux M1\n"
         f"⚡ Signal envoyé: Immédiatement\n"
-        f"🔔 Rappel: 1 min avant entrée\n"
         f"🔍 Vérification: 3 min après signal\n"
         f"🔧 Sources: {'APIs Crypto' if is_weekend else 'TwelveData'}\n\n"
         f"Cliquez pour générer signal #1 ⬇️",
@@ -816,10 +815,7 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
             f"━━━━━━━━━━━━━━━━━━━━\n\n"
             f"📊 Progression: {session['signal_count']}/{SIGNALS_PER_SESSION}\n\n"
             f"⏰ **Timing du signal:**\n"
-            f"• Génération: Maintenant ✅\n"
-            f"• Signal: Envoyé maintenant ✅\n"
             f"• Entrée: Dans {time_to_entry:.0f} min\n"
-            f"• Rappel: 1 min avant entrée\n"
             f"• Vérification: 3 min après entrée\n\n"
             f"💡 Préparez votre position!"
         )
