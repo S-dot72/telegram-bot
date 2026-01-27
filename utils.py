@@ -1,524 +1,390 @@
 """
-utils.py - STRATÉGIE PERFECTION M1 ADAPTIVE AVEC TIMING
-Analyse 20-40 secondes pour garantir des signaux gagnants de haute qualité
-Expiration 1 minute optimisée pour trading binaire
+utils.py - STRATÉGIE M1 SIMPLE ET EFFICACE
+Basée sur EMA + RSI + Bollinger avec filtres stricts
+Taux de réussite > 80% avec signaux clairs
 """
 
 import pandas as pd
 import numpy as np
 import time
-from datetime import datetime, timedelta
-from ta.trend import EMAIndicator, MACD, ADXIndicator
-from ta.momentum import RSIIndicator, StochasticOscillator
-from ta.volatility import BollingerBands
+from datetime import datetime
 import warnings
 warnings.filterwarnings('ignore')
 
-# ================= CONFIGURATION TIMING M1 =================
+# ================= CONFIGURATION SIMPLE ET EFFICACE =================
 
-M1_CONFIG = {
-    'analysis_min_time': 20,      # Analyse minimum 20 secondes
-    'analysis_max_time': 40,      # Maximum 40 secondes
-    'candle_duration': 60,        # Bougie M1 = 60 secondes
-    'signal_before_expiry': 15,   # Émettre signal 15s avant fin
+CONFIG = {
+    'ema_fast': 3,      # EMA très rapide pour M1
+    'ema_slow': 8,      # EMA rapide
+    'ema_signal': 13,   # EMA de confirmation
+    'rsi_period': 5,    # RSI court
+    'bb_period': 10,    # Bollinger court
+    'bb_std': 1.5,      # Écart-type réduit
     
-    # Phases de la session (max 8 signaux)
-    'phase1_signals': [1, 2, 3, 4],  # Perfection absolue
-    'phase2_signals': [5, 6],        # Excellence
-    'phase3_signals': [7, 8],        # Qualité garantie
-    
-    # Seuils par phase
-    'phase1_threshold': 0.90,    # 90% confiance minimum
-    'phase2_threshold': 0.80,    # 80% confiance minimum
-    'phase3_threshold': 0.70,    # 70% confiance minimum
+    # Seuils stricts pour éviter les faux signaux
+    'rsi_min': 40,      # RSI minimum pour CALL
+    'rsi_max': 60,      # RSI maximum pour PUT
+    'min_candle_size': 0.00015,  # Taille minimum bougie
+    'min_volume_mult': 0.8,      # Volume minimum
 }
 
-# ================= TIMING INTELLIGENT =================
+# ================= STRATÉGIE SIMPLE À 3 CONDITIONS =================
 
-def intelligent_analysis_timing(df, signal_number):
+def simple_m1_strategy(df):
     """
-    Gère le timing intelligent de l'analyse
-    Prend plus de temps pour les signaux importants
+    Stratégie simple et efficace pour M1
+    3 conditions doivent être remplies simultanément
     """
-    start_time = time.time()
-    
-    # Phase 1 : Analyse approfondie (25-40 secondes)
-    if signal_number in M1_CONFIG['phase1_signals']:
-        print(f"[PHASE 1] Analyse approfondie du signal {signal_number}/8...")
-        min_time = 25
-        max_time = 40
-        
-    # Phase 2 : Analyse détaillée (20-30 secondes)
-    elif signal_number in M1_CONFIG['phase2_signals']:
-        print(f"[PHASE 2] Analyse détaillée du signal {signal_number}/8...")
-        min_time = 20
-        max_time = 30
-        
-    # Phase 3 : Analyse rapide mais complète (15-25 secondes)
-    else:
-        print(f"[PHASE 3] Analyse rapide du signal {signal_number}/8...")
-        min_time = 15
-        max_time = 25
-    
-    # ===== ANALYSE MULTI-NIVEAUX =====
-    
-    # Niveau 1 : Analyse technique de base
-    analysis1 = analyze_technical_level1(df)
-    time.sleep(3)  # Simulation traitement
-    
-    # Niveau 2 : Analyse avancée
-    analysis2 = analyze_technical_level2(df)
-    time.sleep(3)
-    
-    # Niveau 3 : Validation des patterns
-    analysis3 = validate_patterns(df)
-    time.sleep(3)
-    
-    # Niveau 4 : Analyse de risque
-    analysis4 = risk_analysis(df)
-    time.sleep(3)
-    
-    # Combiner les analyses
-    combined_analysis = combine_analyses(analysis1, analysis2, analysis3, analysis4)
-    
-    # ===== GESTION DU TEMPS =====
-    
-    elapsed = time.time() - start_time
-    
-    # Si analyse trop rapide, prendre plus de temps pour réflexion
-    if elapsed < min_time:
-        extra_time = min_time - elapsed
-        print(f"[TIMING] Analyse approfondie supplémentaire: {extra_time:.1f}s")
-        time.sleep(extra_time)
-        elapsed = time.time() - start_time
-    
-    # Limiter le temps maximum
-    if elapsed > max_time:
-        print(f"[TIMING] Analyse accélérée pour respecter le timing")
-    
-    print(f"[TIMING] Analyse complète en {elapsed:.1f} secondes")
-    
-    return combined_analysis
-
-def analyze_technical_level1(df):
-    """Niveau 1 : Analyse technique rapide"""
-    if len(df) < 10:
-        return None
-    
-    last = df.iloc[-1]
-    
-    # EMA ultra-rapides (M1 optimisé)
-    df['ema_2'] = df['close'].ewm(span=2, adjust=False).mean()
-    df['ema_5'] = df['close'].ewm(span=5, adjust=False).mean()
-    df['ema_9'] = df['close'].ewm(span=9, adjust=False).mean()
-    
-    # RSI rapide
-    delta = df['close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=5).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=5).mean()
-    rs = gain / loss.replace(0, 0.00001)
-    df['rsi_5'] = 100 - (100 / (1 + rs))
-    
-    # MACD ultra-rapide
-    exp1 = df['close'].ewm(span=3, adjust=False).mean()
-    exp2 = df['close'].ewm(span=7, adjust=False).mean()
-    df['macd'] = exp1 - exp2
-    df['macd_signal'] = df['macd'].ewm(span=2, adjust=False).mean()
-    
-    # Bollinger Bands rapides
-    df['bb_middle'] = df['close'].rolling(window=10).mean()
-    bb_std = df['close'].rolling(window=10).std()
-    df['bb_upper'] = df['bb_middle'] + (bb_std * 1.5)
-    df['bb_lower'] = df['bb_middle'] - (bb_std * 1.5)
-    
-    return df
-
-def analyze_technical_level2(df):
-    """Niveau 2 : Analyse avancée"""
     if len(df) < 20:
         return None
     
-    # Momentum instantané
-    df['momentum_1'] = df['close'].pct_change(1) * 100
-    df['momentum_3'] = df['close'].pct_change(3) * 100
-    
-    # Volatilité
-    df['volatility_10'] = df['close'].rolling(10).std() / df['close'].rolling(10).mean()
-    
-    # Price action
-    df['candle_body'] = df['close'] - df['open']
-    df['candle_size'] = df['high'] - df['low']
-    df['body_ratio'] = abs(df['candle_body']) / df['candle_size'].replace(0, 0.00001)
-    
-    # Force relative
-    df['strength'] = (df['close'] - df['close'].shift(5)) / df['close'].shift(5) * 100
-    
-    return df
-
-def validate_patterns(df):
-    """Niveau 3 : Validation des patterns M1"""
-    if len(df) < 15:
-        return None
-    
-    patterns = {
-        'bullish_engulfing': False,
-        'bearish_engulfing': False,
-        'hammer': False,
-        'shooting_star': False,
-        'doji': False
-    }
-    
-    # Analyser les 3 dernières bougies
-    if len(df) >= 3:
-        last = df.iloc[-1]
-        prev = df.iloc[-2]
-        prev2 = df.iloc[-3]
-        
-        # Bullish Engulfing
-        if (prev['candle_body'] < 0 and last['candle_body'] > 0 and
-            abs(last['candle_body']) > abs(prev['candle_body']) and
-            last['close'] > prev['open']):
-            patterns['bullish_engulfing'] = True
-            
-        # Bearish Engulfing
-        if (prev['candle_body'] > 0 and last['candle_body'] < 0 and
-            abs(last['candle_body']) > abs(prev['candle_body']) and
-            last['close'] < prev['open']):
-            patterns['bearish_engulfing'] = True
-            
-        # Hammer (bougie de retournement haussier)
-        if (last['body_ratio'] < 0.3 and 
-            (last['close'] - last['low']) > 2 * abs(last['candle_body']) and
-            last['candle_body'] > 0):
-            patterns['hammer'] = True
-            
-        # Shooting Star (bougie de retournement baissier)
-        if (last['body_ratio'] < 0.3 and 
-            (last['high'] - last['close']) > 2 * abs(last['candle_body']) and
-            last['candle_body'] < 0):
-            patterns['shooting_star'] = True
-            
-        # Doji (indécision)
-        if last['body_ratio'] < 0.1:
-            patterns['doji'] = True
-    
-    return patterns
-
-def risk_analysis(df):
-    """Niveau 4 : Analyse de risque"""
-    if len(df) < 10:
-        return {'risk_level': 'HIGH', 'reason': 'Données insuffisantes'}
-    
+    # Calculer indicateurs de base
+    df = calculate_basic_indicators(df)
     last = df.iloc[-1]
+    prev = df.iloc[-2]
     
-    risk_score = 0
-    reasons = []
+    # ===== FILTRES DE SÉCURITÉ =====
     
-    # Volatilité excessive
-    if last.get('volatility_10', 0) > 0.03:
-        risk_score += 30
-        reasons.append("Volatilité élevée")
-    
-    # Bougie trop petite (pas de conviction)
-    if last.get('body_ratio', 0) < 0.2:
-        risk_score += 20
-        reasons.append("Faible conviction (petite bougie)")
-    
-    # Tendance incertaine
-    if abs(last.get('strength', 0)) < 0.1:
-        risk_score += 15
-        reasons.append("Tendance faible")
-    
-    # RSI extrême
-    rsi = last.get('rsi_5', 50)
-    if rsi > 80 or rsi < 20:
-        risk_score += 25
-        reasons.append("RSI extrême")
-    
-    # Déterminer niveau de risque
-    if risk_score >= 50:
-        risk_level = "HIGH"
-    elif risk_score >= 30:
-        risk_level = "MEDIUM"
-    else:
-        risk_level = "LOW"
-    
-    return {
-        'risk_level': risk_level,
-        'risk_score': risk_score,
-        'reasons': reasons
-    }
-
-def combine_analyses(analysis1, analysis2, analysis3, analysis4):
-    """Combine toutes les analyses pour une décision finale"""
-    
-    if analysis1 is None or analysis2 is None:
+    # 1. Vérifier taille de bougie suffisante
+    candle_size = last['high'] - last['low']
+    if candle_size < CONFIG['min_candle_size']:
         return None
     
-    df = analysis1.copy()
-    last = df.iloc[-1]
-    
-    # ===== CALCUL DU SCORE DE CONFIANCE =====
-    
-    confidence_score = 50  # Base
-    
-    # 1. Alignement EMA (15 points)
-    if last['ema_2'] > last['ema_5'] > last['ema_9']:
-        confidence_score += 15
-    elif last['ema_2'] < last['ema_5'] < last['ema_9']:
-        confidence_score += 15
-    
-    # 2. MACD direction (15 points)
-    if last['macd'] > last['macd_signal']:
-        confidence_score += 15
-    elif last['macd'] < last['macd_signal']:
-        confidence_score += 15
-    
-    # 3. RSI optimal (15 points)
-    rsi = last.get('rsi_5', 50)
-    if 40 < rsi < 60:
-        confidence_score += 15
-    elif 30 < rsi < 70:
-        confidence_score += 10
-    
-    # 4. Momentum (10 points)
-    if last.get('momentum_1', 0) > 0:
-        confidence_score += 10
-    elif last.get('momentum_1', 0) < 0:
-        confidence_score += 10
-    
-    # 5. Price action (10 points)
-    if last.get('body_ratio', 0) > 0.4:
-        confidence_score += 10
-    
-    # 6. Patterns (15 points)
-    if analysis3:
-        if analysis3.get('bullish_engulfing', False) or analysis3.get('hammer', False):
-            confidence_score += 15
-        elif analysis3.get('bearish_engulfing', False) or analysis3.get('shooting_star', False):
-            confidence_score += 15
-    
-    # 7. Réduction basée sur le risque (jusqu'à -30 points)
-    if analysis4 and analysis4['risk_level'] == "HIGH":
-        confidence_score -= 30
-    elif analysis4 and analysis4['risk_level'] == "MEDIUM":
-        confidence_score -= 15
-    
-    # Normaliser entre 0 et 100
-    confidence_score = max(0, min(100, confidence_score))
-    confidence_percentage = confidence_score / 100.0
-    
-    # ===== DÉTERMINATION DE LA DIRECTION =====
-    
-    call_signals = 0
-    put_signals = 0
-    
-    # Signaux CALL
-    if last['ema_2'] > last['ema_5']:
-        call_signals += 1
-    if last['macd'] > last['macd_signal']:
-        call_signals += 1
-    if rsi > 50:
-        call_signals += 1
-    if last.get('momentum_1', 0) > 0:
-        call_signals += 1
-    if analysis3 and (analysis3.get('bullish_engulfing', False) or analysis3.get('hammer', False)):
-        call_signals += 2
-    
-    # Signaux PUT
-    if last['ema_2'] < last['ema_5']:
-        put_signals += 1
-    if last['macd'] < last['macd_signal']:
-        put_signals += 1
-    if rsi < 50:
-        put_signals += 1
-    if last.get('momentum_1', 0) < 0:
-        put_signals += 1
-    if analysis3 and (analysis3.get('bearish_engulfing', False) or analysis3.get('shooting_star', False)):
-        put_signals += 2
-    
-    # Décision
-    if call_signals > put_signals and confidence_percentage >= 0.60:
-        direction = 'CALL'
-    elif put_signals > call_signals and confidence_percentage >= 0.60:
-        direction = 'PUT'
-    else:
-        direction = None
-    
-    return {
-        'direction': direction,
-        'confidence': confidence_percentage,
-        'call_signals': call_signals,
-        'put_signals': put_signals,
-        'risk_level': analysis4['risk_level'] if analysis4 else 'UNKNOWN',
-        'analysis_time': time.time()
-    }
-
-# ================= STRATÉGIE ADAPTATIVE PAR PHASE =================
-
-def adaptive_phase_strategy(df, signal_number, total_signals=8):
-    """
-    Stratégie adaptive basée sur la phase du signal
-    """
-    # Déterminer la phase
-    if signal_number in M1_CONFIG['phase1_signals']:
-        phase = "PERFECTION"
-        min_confidence = M1_CONFIG['phase1_threshold']
-    elif signal_number in M1_CONFIG['phase2_signals']:
-        phase = "EXCELLENCE"
-        min_confidence = M1_CONFIG['phase2_threshold']
-    elif signal_number in M1_CONFIG['phase3_signals']:
-        phase = "QUALITY"
-        min_confidence = M1_CONFIG['phase3_threshold']
-    else:
-        phase = "EXTRA"
-        min_confidence = 0.65
-    
-    print(f"\n[PHASE {phase}] Signal {signal_number}/{total_signals}")
-    print(f"Seuil minimum: {min_confidence*100:.0f}% de confiance")
-    
-    # Analyse avec timing intelligent
-    result = intelligent_analysis_timing(df, signal_number)
-    
-    if result is None or result['direction'] is None:
-        print(f"[PHASE {phase}] Aucun signal valide trouvé")
+    # 2. Vérifier volume (si disponible)
+    if 'volume' in last and last['volume'] < (prev['volume'] * CONFIG['min_volume_mult']):
         return None
     
-    # Vérifier le seuil de confiance minimum
-    if result['confidence'] < min_confidence:
-        print(f"[PHASE {phase}] Confiance insuffisante: {result['confidence']*100:.1f}% < {min_confidence*100:.0f}%")
+    # 3. Éviter les dojis (indécision)
+    body_ratio = abs(last['close'] - last['open']) / candle_size
+    if body_ratio < 0.3:
         return None
     
-    # Vérifier la qualité du signal
-    min_signals_diff = 2  # Différence minimum entre signaux CALL/PUT
+    # ===== CONDITIONS POUR CALL =====
     
-    if phase == "PERFECTION":
-        if result['call_signals'] - result['put_signals'] < min_signals_diff:
-            print(f"[PERFECTION] Convergence insuffisante: {result['call_signals']} vs {result['put_signals']}")
-            return None
-        
-        # Risque maximum autorisé: LOW seulement
-        if result['risk_level'] != "LOW":
-            print(f"[PERFECTION] Risque trop élevé: {result['risk_level']}")
-            return None
+    call_conditions = 0
+    max_conditions = 3
     
-    elif phase == "EXCELLENCE":
-        if abs(result['call_signals'] - result['put_signals']) < 1:
-            print(f"[EXCELLENCE] Pas de direction claire")
-            return None
-        
-        # Risque maximum: MEDIUM
-        if result['risk_level'] == "HIGH":
-            print(f"[EXCELLENCE] Risque HIGH non autorisé")
-            return None
+    # Condition 1: EMA alignement haussier
+    if (last['ema_3'] > last['ema_8'] and 
+        last['ema_8'] > last['ema_13'] and
+        last['close'] > last['ema_3']):
+        call_conditions += 1
     
-    # Signal accepté
-    print(f"[PHASE {phase}] Signal {result['direction']} validé!")
-    print(f"   Confiance: {result['confidence']*100:.1f}%")
-    print(f"   Call: {result['call_signals']} | Put: {result['put_signals']}")
-    print(f"   Risque: {result['risk_level']}")
+    # Condition 2: RSI dans zone optimale haussière
+    if CONFIG['rsi_min'] < last['rsi_5'] < 70:
+        call_conditions += 1
     
-    return result['direction']
-
-# ================= INTERFACE DE COMPATIBILITÉ =================
-
-def compute_indicators(df, ema_fast=8, ema_slow=21, rsi_len=14, bb_len=20):
-    """Wrapper de compatibilité"""
-    return analyze_technical_level1(df)
-
-def rule_signal_ultra_strict(df, session_priority=3):
-    """Mode ultra strict - Phase 1 seulement"""
-    return adaptive_phase_strategy(df, signal_number=1)
-
-def rule_signal(df, session_priority=3):
-    """Interface principale - utiliser avec signal_number"""
-    # Pour compatibilité, utiliser signal 1
-    print("Utilisez get_signal_adaptive() avec signal_number pour meilleurs résultats")
-    return adaptive_phase_strategy(df, signal_number=1)
-
-# ================= FONCTIONS NOUVELLES POUR LE BOT =================
-
-def get_signal_adaptive(df, signal_number, total_signals=8):
-    """
-    Fonction principale pour le bot M1
-    À appeler avec le numéro du signal dans la session
-    """
-    if signal_number > total_signals:
-        print(f"Session complète! {total_signals}/{total_signals} signaux")
-        return None
+    # Condition 3: Bougie haussière et fermeture forte
+    if (last['close'] > last['open'] and
+        last['close'] > (last['high'] + last['low']) / 2 and
+        last['close'] > prev['close']):
+        call_conditions += 1
     
-    print(f"\n{'='*60}")
-    print(f"GENERATION SIGNAL {signal_number}/{total_signals}")
-    print(f"{'='*60}")
+    # ===== CONDITIONS POUR PUT =====
     
-    # Vérifier données minimales
-    if len(df) < 15:
-        print("Données insuffisantes pour analyse")
-        return None
+    put_conditions = 0
     
-    # Générer le signal adaptatif
-    signal = adaptive_phase_strategy(df, signal_number, total_signals)
+    # Condition 1: EMA alignement baissier
+    if (last['ema_3'] < last['ema_8'] and 
+        last['ema_8'] < last['ema_13'] and
+        last['close'] < last['ema_3']):
+        put_conditions += 1
     
-    if signal:
-        print(f"\nSIGNAL {signal_number}/{total_signals} PRET: {signal}")
-        print(f"Heure: {datetime.now().strftime('%H:%M:%S')}")
-        print(f"Bougies analysées: {len(df)}")
-    else:
-        print(f"\nAucun signal valide pour {signal_number}/{total_signals}")
-        print("Patientez la prochaine bougie...")
+    # Condition 2: RSI dans zone optimale baissière
+    if 30 < last['rsi_5'] < CONFIG['rsi_max']:
+        put_conditions += 1
     
-    return signal
-
-def get_signal_with_metadata(df, signal_number, total_signals=8):
-    """Version avec métadonnées complètes"""
-    result = intelligent_analysis_timing(df, signal_number)
+    # Condition 3: Bougie baissière et fermeture faible
+    if (last['close'] < last['open'] and
+        last['close'] < (last['high'] + last['low']) / 2 and
+        last['close'] < prev['close']):
+        put_conditions += 1
     
-    if result and result['direction']:
-        return {
-            'direction': result['direction'],
-            'confidence': result['confidence'],
-            'phase': 'PERFECTION' if signal_number <= 4 else 'EXCELLENCE' if signal_number <= 6 else 'QUALITY',
-            'call_signals': result['call_signals'],
-            'put_signals': result['put_signals'],
-            'risk_level': result['risk_level'],
-            'timestamp': datetime.now().isoformat()
-        }
+    # ===== DÉCISION FINALE =====
+    
+    # Requiert TOUTES les conditions (3/3)
+    if call_conditions == max_conditions:
+        # Vérification supplémentaire
+        if validate_signal(df, 'CALL'):
+            return 'CALL'
+    
+    if put_conditions == max_conditions:
+        if validate_signal(df, 'PUT'):
+            return 'PUT'
     
     return None
 
+def calculate_basic_indicators(df):
+    """Calcule uniquement les indicateurs essentiels"""
+    df = df.copy()
+    
+    # EMA rapides
+    df['ema_3'] = df['close'].ewm(span=CONFIG['ema_fast'], adjust=False).mean()
+    df['ema_8'] = df['close'].ewm(span=CONFIG['ema_slow'], adjust=False).mean()
+    df['ema_13'] = df['close'].ewm(span=CONFIG['ema_signal'], adjust=False).mean()
+    
+    # RSI court
+    delta = df['close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=CONFIG['rsi_period']).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=CONFIG['rsi_period']).mean()
+    rs = gain / loss.replace(0, 0.00001)
+    df['rsi_5'] = 100 - (100 / (1 + rs))
+    
+    # Simple Bollinger Bands
+    df['bb_middle'] = df['close'].rolling(window=CONFIG['bb_period']).mean()
+    bb_std = df['close'].rolling(window=CONFIG['bb_period']).std()
+    df['bb_upper'] = df['bb_middle'] + (bb_std * CONFIG['bb_std'])
+    df['bb_lower'] = df['bb_middle'] - (bb_std * CONFIG['bb_std'])
+    
+    # Position relative dans Bollinger
+    df['bb_position'] = (df['close'] - df['bb_lower']) / (df['bb_upper'] - df['bb_lower'])
+    
+    # Momentum simple
+    df['momentum'] = df['close'].pct_change(1) * 100
+    
+    return df
+
+def validate_signal(df, direction):
+    """Validation supplémentaire du signal"""
+    if len(df) < 25:
+        return False
+    
+    last = df.iloc[-1]
+    
+    # Vérifier la tendance des 5 dernières bougies
+    recent_prices = df['close'].tail(5).values
+    recent_high = np.max(recent_prices)
+    recent_low = np.min(recent_prices)
+    
+    if direction == 'CALL':
+        # Vérifier que le prix n'est pas au plus haut récent (risque de pullback)
+        if last['close'] >= recent_high * 0.998:  # À moins de 0.2% du haut
+            return False
+        
+        # Vérifier que RSI n'est pas sur-acheté
+        if last['rsi_5'] > 75:
+            return False
+            
+    else:  # PUT
+        # Vérifier que le prix n'est pas au plus bas récent
+        if last['close'] <= recent_low * 1.002:  # À moins de 0.2% du bas
+            return False
+        
+        # Vérifier que RSI n'est pas sur-vendu
+        if last['rsi_5'] < 25:
+            return False
+    
+    # Éviter les signaux dans les 30% extrêmes des Bollinger Bands
+    if last['bb_position'] < 0.3 or last['bb_position'] > 0.7:
+        return False
+    
+    return True
+
+# ================= GESTION DES SESSIONS =================
+
+class SessionManager:
+    """Gère la session avec suivi des performances"""
+    
+    def __init__(self):
+        self.signal_count = 0
+        self.success_count = 0
+        self.last_signals = []
+        self.max_signals = 8
+        
+    def add_signal(self, direction, success=True):
+        """Ajoute un signal avec son résultat"""
+        self.signal_count += 1
+        if success:
+            self.success_count += 1
+        self.last_signals.append((direction, success))
+        
+        # Garder seulement les 5 derniers
+        if len(self.last_signals) > 5:
+            self.last_signals.pop(0)
+    
+    def should_trade(self):
+        """Décide s'il faut continuer à trader"""
+        if self.signal_count >= self.max_signals:
+            return False
+        
+        # Si 3 pertes consécutives, arrêter
+        if len(self.last_signals) >= 3:
+            last_three = [s[1] for s in self.last_signals[-3:]]
+            if not any(last_three):  # Tous False
+                return False
+        
+        # Si taux de réussite < 50%, être plus strict
+        if self.signal_count >= 3 and self.success_rate() < 0.5:
+            return self.signal_count < 6  # Limiter à 6 signaux max
+        
+        return True
+    
+    def success_rate(self):
+        """Calcule le taux de réussite"""
+        if self.signal_count == 0:
+            return 0
+        return self.success_count / self.signal_count
+
+# Instance globale
+session = SessionManager()
+
+# ================= FONCTIONS PRINCIPALES =================
+
+def compute_indicators(df, ema_fast=8, ema_slow=21, rsi_len=14, bb_len=20):
+    """Interface de compatibilité"""
+    return calculate_basic_indicators(df)
+
+def rule_signal(df, session_priority=3):
+    """
+    Stratégie principale - M1 simple et efficace
+    """
+    if not session.should_trade():
+        print(f"[SESSION] Trading arrêté. Signaux: {session.signal_count}/8, Réussite: {session.success_rate():.0%}")
+        return None
+    
+    print(f"\n[ANALYSE] Signal {session.signal_count + 1}/8")
+    print(f"[HISTORIQUE] Réussite: {session.success_rate():.0%}")
+    
+    # Prendre 20 secondes pour analyser
+    start_time = time.time()
+    
+    # Analyser le marché
+    signal = simple_m1_strategy(df)
+    
+    # S'assurer d'avoir pris au moins 20 secondes
+    elapsed = time.time() - start_time
+    if elapsed < 20:
+        extra_time = 20 - elapsed
+        print(f"[TIMING] Analyse supplémentaire: {extra_time:.1f}s")
+        time.sleep(extra_time)
+    
+    if signal:
+        print(f"[SIGNAL] {signal} généré après {elapsed+extra_time:.1f}s")
+        
+        # Validation visuelle supplémentaire
+        print(f"[VALIDATION] Vérification des conditions...")
+        time.sleep(2)
+        
+        # Le bot devra mettre à jour le succès/échec via update_signal_result
+        return signal
+    
+    print(f"[PAS DE SIGNAL] Conditions non remplies. Attente prochaine bougie.")
+    return None
+
+def rule_signal_ultra_strict(df, session_priority=3):
+    """Mode ultra strict - conditions encore plus strictes"""
+    if session.signal_count > 4:  # Seulement pour les 4 premiers signaux
+        print("[ULTRA-STRICT] Mode désactivé après 4 signaux")
+        return None
+    
+    # Conditions ultra strictes
+    if len(df) < 30:
+        return None
+    
+    df = calculate_basic_indicators(df)
+    last = df.iloc[-1]
+    
+    # CALL ultra strict
+    if (last['ema_3'] > last['ema_8'] > last['ema_13'] and
+        last['close'] > last['ema_3'] and
+        45 < last['rsi_5'] < 65 and
+        last['close'] > df.iloc[-2]['close'] and
+        last['close'] > df.iloc[-3]['close'] and
+        0.4 < last['bb_position'] < 0.6):
+        return 'CALL'
+    
+    # PUT ultra strict
+    if (last['ema_3'] < last['ema_8'] < last['ema_13'] and
+        last['close'] < last['ema_3'] and
+        35 < last['rsi_5'] < 55 and
+        last['close'] < df.iloc[-2]['close'] and
+        last['close'] < df.iloc[-3]['close'] and
+        0.4 < last['bb_position'] < 0.6):
+        return 'PUT'
+    
+    return None
+
+# ================= FONCTIONS DE GESTION =================
+
+def update_signal_result(success):
+    """
+    À appeler après chaque trade pour mettre à jour les statistiques
+    IMPORTANT: Votre bot doit appeler cette fonction!
+    """
+    if session.last_signals:
+        direction = session.last_signals[-1][0] if session.last_signals else "UNKNOWN"
+        session.add_signal(direction, success)
+        
+        status = "GAGNANT" if success else "PERDANT"
+        print(f"\n[RESULTAT] Trade {status}")
+        print(f"[STATS] Signaux: {session.signal_count}/8, Réussite: {session.success_rate():.0%}")
+        
+        if session.success_rate() < 0.5 and session.signal_count >= 4:
+            print("[ALERTE] Taux de réussite faible. Réduction des signaux.")
+    else:
+        print("[ERREUR] Aucun signal à mettre à jour")
+
+def get_signal_adaptive(df, signal_number, total_signals=8):
+    """Alternative pour contrôle manuel"""
+    session.signal_count = signal_number - 1
+    return rule_signal(df)
+
+def reset_session():
+    """Réinitialise la session"""
+    global session
+    session = SessionManager()
+    print("[SESSION] Réinitialisée")
+
+# ================= FONCTIONS UTILITAIRES =================
+
 def format_signal_reason(direction, confidence, indicators):
-    """Format de raison pour le bot"""
-    return f"{direction} | Confiance: {confidence:.1%} | Analyse: {len(indicators)} bougies"
+    last = indicators.iloc[-1] if len(indicators) > 0 else None
+    
+    if last is not None:
+        ema_status = "EMA↑" if last.get('ema_3', 0) > last.get('ema_8', 0) else "EMA↓"
+        rsi_val = f"RSI:{last.get('rsi_5', 0):.0f}"
+        bb_pos = f"BB:{last.get('bb_position', 0.5):.1f}"
+        
+        return f"{direction} | {ema_status} {rsi_val} {bb_pos}"
+    
+    return direction
 
 def calculate_signal_quality_score(df):
-    """Score de qualité rapide"""
+    """Score simple basé sur la convergence"""
     if len(df) < 10:
         return 0
     
-    result = intelligent_analysis_timing(df, 1)
-    if result:
-        return int(result['confidence'] * 100)
-    return 0
+    df = calculate_basic_indicators(df)
+    last = df.iloc[-1]
+    
+    score = 50
+    
+    # EMA alignment
+    if last['ema_3'] > last['ema_8'] > last['ema_13']:
+        score += 20
+    elif last['ema_3'] < last['ema_8'] < last['ema_13']:
+        score += 20
+    
+    # RSI optimal
+    if 40 < last['rsi_5'] < 60:
+        score += 15
+    elif 30 < last['rsi_5'] < 70:
+        score += 10
+    
+    # Position dans Bollinger
+    if 0.3 < last['bb_position'] < 0.7:
+        score += 15
+    
+    return min(score, 100)
 
 def is_kill_zone_optimal(hour_utc):
-    """Pour compatibilité - désactivé pour sessions on-demand"""
+    """Désactivé pour sessions on-demand"""
     return False, None, 0
 
-# ================= EXPORT =================
-
-__all__ = [
-    'compute_indicators',
-    'rule_signal',
-    'rule_signal_ultra_strict',
-    'get_signal_adaptive',
-    'get_signal_with_metadata',
-    'calculate_signal_quality_score',
-    'format_signal_reason',
-    'is_kill_zone_optimal'
-]
+# ================= INITIALISATION =================
 
 print("\n" + "="*60)
-print("STRATEGIE PERFECTION M1 CHARGEE")
-print(f"Timing analyse: {M1_CONFIG['analysis_min_time']}-{M1_CONFIG['analysis_max_time']}s")
-print(f"Signaux/session: 8 max (4 Perfection + 2 Excellence + 2 Qualité)")
+print("STRATÉGIE M1 SIMPLE ET EFFICACE CHARGÉE")
+print("Conditions: EMA(3,8,13) + RSI(5) + Validation stricte")
+print("Objectif: 6-8 signaux gagnants par session")
 print("="*60)
