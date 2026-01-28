@@ -295,7 +295,7 @@ def get_cached_ohlc(pair, interval, outputsize=300):
 def persist_signal(payload):
     """Persiste un signal en base de données"""
     q = text("""INSERT INTO signals (pair,direction,reason,ts_enter,ts_send,confidence,payload_json,max_gales,timeframe)
-    VALUES (:pair,:direction,:reason,:ts_enter,:ts_send,:confidence,:payload,:max_gales,:timeframe)""")
+    VALUES (:pair,:direction,:reason,:ts_enter,:ts_send,:confidence,:payload_json,:max_gales,:timeframe)""")
     with engine.begin() as conn:
         result = conn.execute(q, payload)
     return result.lastrowid
@@ -587,7 +587,7 @@ async def generate_m1_signal(user_id, app):
             'ts_enter': entry_time_utc.isoformat(), 
             'ts_send': send_time_utc.isoformat(),
             'confidence': ml_conf, 
-            'payload': json.dumps({
+            'payload_json': json.dumps({
                 'original_pair': pair,
                 'actual_pair': current_pair,
                 'user_id': user_id, 
@@ -630,11 +630,15 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = update.effective_user.username or "Unknown"
     try:
         with engine.begin() as conn:
-            existing = conn.execute(text("SELECT user_id FROM subscribers WHERE user_id = :uid"),
-            {"uid": user_id}).fetchone()
+            existing = conn.execute(
+                text("SELECT user_id FROM subscribers WHERE user_id = :uid"),
+                {"uid": user_id}
+            ).fetchone()
             if not existing:
-                conn.execute(text("INSERT INTO subscribers (user_id, username) VALUES (:uid, :uname)"),
-                {"uid": user_id, "uname": username})
+                conn.execute(
+                    text("INSERT INTO subscribers (user_id, username) VALUES (:uid, :uname)"),
+                    {"uid": user_id, "uname": username}
+                )
         
         is_weekend = otc_provider.is_weekend()
         mode_text = "🏖️ OTC (Crypto)" if is_weekend else "📈 Forex"
