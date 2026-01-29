@@ -1,6 +1,6 @@
 """
 utils.py - STRATÉGIE FOREX M1 - 8 SIGNAUX QUALITÉ MAXIMALE AVEC GARANTIE
-Version optimisée pour 8 signaux haute qualité avec garantie
+Version avec analyse de structure pour éviter d'acheter près des swing highs
 """
 
 import pandas as pd
@@ -28,39 +28,39 @@ SAINT_GRAAL_CONFIG = {
         'adx_min': 25,
         'stoch_overbought': 74,
         'stoch_oversold': 26,
-        'min_confluence_points': 7,  # 7/10 points minimum pour garantir 8 signaux
+        'min_confluence_points': 7,
         'min_body_ratio': 0.4,
         'max_wick_ratio': 0.4,
-        'min_quality_score': 80,  # Score minimum pour qualité maximale
+        'min_quality_score': 80,
     },
     
-    # Seuils QUALITÉ ÉLEVÉE (pour compléter les 8 signaux si nécessaire)
+    # Seuils QUALITÉ ÉLEVÉE
     'high_quality': {
         'rsi_overbought': 72,
         'rsi_oversold': 28,
         'adx_min': 22,
         'stoch_overbought': 78,
         'stoch_oversold': 22,
-        'min_confluence_points': 6,  # 6/10 points pour qualité élevée
+        'min_confluence_points': 6,
         'min_body_ratio': 0.35,
         'max_wick_ratio': 0.5,
         'min_quality_score': 70,
     },
     
-    # Mode GARANTIE (dernier recours pour les 8 signaux)
+    # Mode GARANTIE
     'guarantee_mode': {
         'rsi_overbought': 75,
         'rsi_oversold': 25,
         'adx_min': 20,
         'stoch_overbought': 80,
         'stoch_oversold': 20,
-        'min_confluence_points': 5,  # 5/10 points minimum en garantie
+        'min_confluence_points': 5,
         'min_body_ratio': 0.3,
         'max_wick_ratio': 0.6,
         'min_quality_score': 60,
     },
     
-    # Filtres anti-manipulation renforcés
+    # Filtres anti-manipulation
     'anti_manip': {
         'max_wick_ratio': 0.65,
         'max_candle_size_ratio': 2.5,
@@ -69,9 +69,17 @@ SAINT_GRAAL_CONFIG = {
         'min_data_quality': 0.8,
     },
     
+    # Paramètres structure marché
+    'structure': {
+        'swing_lookback': 15,
+        'near_high_threshold': 0.5,  # % distance du swing high
+        'min_trend_strength': 1.5,   # % pour considérer une tendance
+        'pattern_lookback': 5,
+    },
+    
     # Paramètres généraux
-    'target_signals': 8,  # Objectif GARANTI de 8 signaux
-    'max_signals': 8,     # Maximum = objectif
+    'target_signals': 8,
+    'max_signals': 8,
 }
 
 # ================= FONCTIONS DE BASE =================
@@ -94,11 +102,163 @@ def get_m1_candle_range(dt):
     end_time = current_candle + timedelta(minutes=1)
     return start_time, end_time
 
+# ================= ANALYSE STRUCTURE MARCHÉ =================
+
+def analyze_market_structure(df, lookback=15):
+    """
+    Analyse la structure du marché pour éviter d'acheter au sommet
+    Retourne: (structure, strength%)
+    """
+    if len(df) < lookback + 5:
+        return "INSUFFICIENT_DATA", 0
+    
+    recent = df.tail(lookback).copy()
+    highs = recent['high'].values
+    lows = recent['low'].values
+    
+    # Détection des pivots (swing highs/lows)
+    swing_highs = []
+    swing_lows = []
+    
+    for i in range(2, len(recent)-2):
+        # Swing High
+        if (highs[i] > highs[i-1] and highs[i] > highs[i-2] and 
+            highs[i] > highs[i+1] and highs[i] > highs[i+2]):
+            swing_highs.append((i, highs[i]))
+        
+        # Swing Low
+        if (lows[i] < lows[i-1] and lows[i] < lows[i-2] and 
+            lows[i] < lows[i+1] and lows[i] < lows[i+2]):
+            swing_lows.append((i, lows[i]))
+    
+    # Analyser la tendance
+    if len(swing_highs) >= 2 and len(swing_lows) >= 2:
+        last_high = swing_highs[-1][1]
+        prev_high = swing_highs[-2][1] if len(swing_highs) >= 2 else last_high
+        
+        last_low = swing_lows[-1][1]
+        prev_low = swing_lows[-2][1] if len(swing_lows) >= 2 else last_low
+        
+        # Uptrend: HH + HL
+        if last_high > prev_high and last_low > prev_low:
+            structure = "UPTREND"
+            strength = (last_high - prev_high) / prev_high * 100
+        
+        # Downtrend: LH + LL
+        elif last_high < prev_high and last_low < prev_low:
+            structure = "DOWNTREND"
+            strength = (prev_low - last_low) / last_low * 100
+        
+        # Range
+        else:
+            structure = "RANGE"
+            strength = 0
+    else:
+        structure = "NO_CLEAR_STRUCTURE"
+        strength = 0
+    
+    # Vérifier proximité des swings
+    current_price = recent.iloc[-1]['close']
+    
+    if swing_highs:
+        nearest_high = min(swing_highs, key=lambda x: abs(x[0] - len(recent)))
+        distance_to_high = (nearest_high[1] - current_price) / current_price * 100
+        
+        if distance_to_high < SAINT_GRAAL_CONFIG['structure']['near_high_threshold']:
+            structure += "_NEAR_HIGH"
+    
+    if swing_lows:
+        nearest_low = min(swing_lows, key=lambda x: abs(x[0] - len(recent)))
+        distance_to_low = (current_price - nearest_low[1]) / current_price * 100
+        
+        if distance_to_low < SAINT_GRAAL_CONFIG['structure']['near_high_threshold']:
+            structure += "_NEAR_LOW"
+    
+    return structure, strength
+
+def is_near_swing_high(df, lookback=20):
+    """
+    Vérifie si le prix est proche d'un swing high récent
+    Retourne: (is_near, distance%)
+    """
+    if len(df) < lookback:
+        return False, 0
+    
+    recent = df.tail(lookback)
+    highs = recent['high'].values
+    
+    # Trouver le swing high récent
+    swing_high_idx = np.argmax(highs)
+    swing_high = highs[swing_high_idx]
+    
+    current_price = df.iloc[-1]['close']
+    distance = (swing_high - current_price) / swing_high * 100
+    
+    threshold = SAINT_GRAAL_CONFIG['structure']['near_high_threshold']
+    is_near = distance < threshold
+    
+    return is_near, distance
+
+def detect_retest_pattern(df, lookback=5):
+    """
+    Détecte les patterns de retest (rouge → vert → vert)
+    Retourne: pattern_type, confidence
+    """
+    if len(df) < lookback + 1:
+        return "NO_PATTERN", 0
+    
+    confidence = 0
+    pattern_type = "NO_PATTERN"
+    
+    # Bougies nécessaires pour le pattern
+    if len(df) >= 4:
+        # Indices: -4 = bougie rouge, -3 et -2 = vertes, -1 = actuelle
+        idx_red = -4
+        idx_green1 = -3
+        idx_green2 = -2
+        idx_current = -1
+        
+        # Vérifier le pattern rouge → vert → vert
+        red_candle = df.iloc[idx_red]
+        green1_candle = df.iloc[idx_green1]
+        green2_candle = df.iloc[idx_green2]
+        current_candle = df.iloc[idx_current]
+        
+        is_red = red_candle['close'] < red_candle['open']
+        is_green1 = green1_candle['close'] > green1_candle['open']
+        is_green2 = green2_candle['close'] > green2_candle['open']
+        
+        if is_red and is_green1 and is_green2:
+            # Pattern détecté
+            pattern_type = "RETEST_PATTERN"
+            
+            # Calculer la confiance
+            # 1. Les vertes doivent être plus petites que la rouge
+            red_size = abs(red_candle['close'] - red_candle['open'])
+            green1_size = abs(green1_candle['close'] - green1_candle['open'])
+            green2_size = abs(green2_candle['close'] - green2_candle['open'])
+            
+            if green1_size < red_size and green2_size < red_size:
+                confidence += 30
+            
+            # 2. La bougie actuelle doit être sous le haut de la rouge
+            if current_candle['high'] < red_candle['high']:
+                confidence += 30
+            
+            # 3. Les vertes doivent fermer dans la moitié supérieure de la rouge
+            red_body_mid = (red_candle['open'] + red_candle['close']) / 2
+            if green1_candle['close'] > red_body_mid:
+                confidence += 20
+            if green2_candle['close'] > red_body_mid:
+                confidence += 20
+    
+    return pattern_type, confidence
+
 # ================= INDICATEURS QUALITÉ MAX =================
 
 def compute_saint_graal_indicators(df):
     """
-    Calcule les indicateurs pour qualité maximale - Version 8 signaux
+    Calcule les indicateurs pour qualité maximale
     """
     df = df.copy()
     
@@ -115,17 +275,17 @@ def compute_saint_graal_indicators(df):
     
     # ===== 1. INDICATEURS PRINCIPAUX =====
     
-    # EMA 5 & 13 (tendance)
+    # EMA 5 & 13
     df['ema_5'] = EMAIndicator(close=df['close'], window=config['ema_fast']).ema_indicator()
     df['ema_13'] = EMAIndicator(close=df['close'], window=config['ema_slow']).ema_indicator()
     df['ema_spread'] = abs(df['ema_5'] - df['ema_13']) / df['close']
     df['ema_trend'] = (df['ema_5'] > df['ema_13']).astype(int)
     
-    # RSI 7 (momentum)
+    # RSI 7
     df['rsi_7'] = RSIIndicator(close=df['close'], window=config['rsi_period']).rsi()
     df['rsi_trend'] = (df['rsi_7'] > 50).astype(int)
     
-    # Stochastique 5,3,3 (sur-achat/vente)
+    # Stochastique 5,3,3
     stoch = StochasticOscillator(
         high=df['high'],
         low=df['low'],
@@ -137,7 +297,7 @@ def compute_saint_graal_indicators(df):
     df['stoch_d'] = stoch.stoch_signal()
     df['stoch_trend'] = (df['stoch_k'] > df['stoch_d']).astype(int)
     
-    # ADX 10 (force de tendance)
+    # ADX 10
     adx = ADXIndicator(
         high=df['high'],
         low=df['low'],
@@ -210,12 +370,9 @@ def compute_saint_graal_indicators(df):
     
     return df
 
-# ================= FONCTION MANQUANTE calculate_signal_quality_score =================
-
 def calculate_signal_quality_score(df):
     """
     Calcule un score de qualité global du signal (0-100)
-    Compatibilité avec l'ancien code
     """
     if len(df) < 20:
         return 0
@@ -271,10 +428,10 @@ def calculate_signal_quality_score(df):
     
     return min(score, 100)
 
-# ================= FILTRES ANTI-MANIPULATION RENFORCÉS =================
+# ================= FILTRES ANTI-MANIPULATION =================
 
 def check_anti_manipulation(df, strict_mode=True):
-    """Vérifie les conditions anti-manipulation renforcées"""
+    """Vérifie les conditions anti-manipulation"""
     if len(df) < 15:
         return False, "Données insuffisantes"
     
@@ -282,7 +439,8 @@ def check_anti_manipulation(df, strict_mode=True):
     anti = SAINT_GRAAL_CONFIG['anti_manip']
     
     # 1. Qualité des données minimale
-    if last['data_quality'] < anti['min_data_quality']:
+    min_quality = 0.85 if strict_mode else anti['min_data_quality']
+    if last['data_quality'] < min_quality:
         return False, f"Qualité données faible: {last['data_quality']:.2f}"
     
     # 2. Mèches suspectes
@@ -302,23 +460,17 @@ def check_anti_manipulation(df, strict_mode=True):
     if last['ema_spread'] < anti['min_ema_spread']:
         return False, f"EMA plates: écart {last['ema_spread']:.5%}"
     
-    # 6. ADX trop faible (pas de tendance)
-    if last['adx'] < 15:
+    # 6. ADX trop faible (sauf mode non-strict)
+    if strict_mode and last['adx'] < 15:
         return False, f"ADX faible: {last['adx']:.1f}"
     
     return True, "OK"
 
-# ================= STRATÉGIE 8 SIGNAUX QUALITÉ MAX =================
+# ================= STRATÉGIE 8 SIGNAUX AVEC ANALYSE STRUCTURE =================
 
 def rule_signal_saint_graal_with_guarantee(df, signal_count=0, total_signals_needed=8):
     """
-    STRATÉGIE - 8 signaux qualité maximale avec GARANTIE
-    
-    Nouvelle logique pour 8 signaux garantis :
-    1. Essayer QUALITÉ MAXIMALE (signaux 1-6)
-    2. Si échec après 3 tentatives, passer à QUALITÉ ÉLEVÉE
-    3. En dernier recours, utiliser MODE GARANTIE
-    4. Résultat : TOUJOURS un signal pour compléter les 8
+    STRATÉGIE - 8 signaux qualité maximale avec analyse de structure
     """
     
     if len(df) < 30:
@@ -326,21 +478,27 @@ def rule_signal_saint_graal_with_guarantee(df, signal_count=0, total_signals_nee
         return None
     
     target_signals = SAINT_GRAAL_CONFIG['target_signals']
-    max_signals = SAINT_GRAAL_CONFIG['max_signals']
     
     print(f"\n[STRATEGIE] 🎯 Signal #{signal_count+1}/{target_signals}")
     
-    # ===== 1. QUALITÉ MAXIMALE (signaux 1-6 préférés) =====
+    # ===== ANALYSE STRUCTURE MARCHÉ =====
+    structure, strength = analyze_market_structure(df, 15)
+    is_near_high, distance_to_high = is_near_swing_high(df, 20)
+    pattern_type, pattern_confidence = detect_retest_pattern(df, 5)
+    
+    print(f"[STRUCTURE] {structure} (force: {strength:.1f}%)")
+    print(f"[STRUCTURE] Near high: {is_near_high} ({distance_to_high:.2f}%)")
+    print(f"[PATTERN] {pattern_type} (confiance: {pattern_confidence}%)")
+    
+    # ===== 1. QUALITÉ MAXIMALE (signaux 1-6) =====
     if signal_count < 6:
         print(f"[STRATEGIE] 🔵 Mode QUALITÉ MAXIMALE")
         
-        # Vérifier anti-manipulation strict
         manip_ok, manip_reason = check_anti_manipulation(df, strict_mode=True)
         if not manip_ok:
             print(f"[STRATEGIE] ⚠️ Anti-manip: {manip_reason}")
-            # Pas d'échec immédiat, on essaie quand même l'analyse
-            
-        max_quality_signal = rule_signal_max_quality(df)
+        
+        max_quality_signal = rule_signal_max_quality(df, structure, is_near_high, pattern_type, pattern_confidence)
         if max_quality_signal:
             quality_score = calculate_signal_quality(df, max_quality_signal)
             min_score = SAINT_GRAAL_CONFIG['max_quality']['min_quality_score']
@@ -351,22 +509,22 @@ def rule_signal_saint_graal_with_guarantee(df, signal_count=0, total_signals_nee
                     'signal': max_quality_signal,
                     'mode': 'MAX_QUALITY',
                     'quality': 'EXCELLENT',
-                    'score': quality_score
+                    'score': quality_score,
+                    'structure_info': {
+                        'market_structure': structure,
+                        'near_high': is_near_high,
+                        'pattern': pattern_type
+                    }
                 }
-            else:
-                print(f"[STRATEGIE] ⚠️ Qualité insuffisante: {quality_score}/{min_score}")
-                # Continuer vers QUALITÉ ÉLEVÉE
     
-    # ===== 2. QUALITÉ ÉLEVÉE (signaux 7-8 ou backup) =====
+    # ===== 2. QUALITÉ ÉLEVÉE =====
     print(f"[STRATEGIE] 🟡 Mode QUALITÉ ÉLEVÉE")
     
-    # Anti-manipulation un peu moins strict
     manip_ok, manip_reason = check_anti_manipulation(df, strict_mode=False)
     if not manip_ok:
         print(f"[STRATEGIE] ⚠️ Anti-manip (toléré): {manip_reason}")
-        # En mode qualité élevée, on tolère plus
     
-    high_quality_signal = rule_signal_high_quality(df)
+    high_quality_signal = rule_signal_high_quality(df, structure, is_near_high)
     if high_quality_signal:
         quality_score = calculate_signal_quality_for_mode(df, high_quality_signal, 'HIGH_QUALITY')
         min_score = SAINT_GRAAL_CONFIG['high_quality']['min_quality_score']
@@ -377,17 +535,18 @@ def rule_signal_saint_graal_with_guarantee(df, signal_count=0, total_signals_nee
                 'signal': high_quality_signal,
                 'mode': 'HIGH_QUALITY',
                 'quality': 'HIGH',
-                'score': quality_score
+                'score': quality_score,
+                'structure_info': {
+                    'market_structure': structure,
+                    'near_high': is_near_high,
+                    'pattern': pattern_type
+                }
             }
-        else:
-            print(f"[STRATEGIE] ⚠️ Qualité élevée insuffisante: {quality_score}/{min_score}")
-            # Continuer vers MODE GARANTIE
     
-    # ===== 3. MODE GARANTIE (dernier recours pour les 8 signaux) =====
-    print(f"[STRATEGIE] 🟠 Mode GARANTIE (dernier recours)")
+    # ===== 3. MODE GARANTIE =====
+    print(f"[STRATEGIE] 🟠 Mode GARANTIE")
     
-    # Filtres minimaux seulement
-    guarantee_signal = rule_signal_guarantee_mode(df)
+    guarantee_signal = rule_signal_guarantee_mode(df, structure, is_near_high)
     if guarantee_signal:
         quality_score = calculate_signal_quality_for_mode(df, guarantee_signal, 'GUARANTEE')
         min_score = SAINT_GRAAL_CONFIG['guarantee_mode']['min_quality_score']
@@ -398,111 +557,136 @@ def rule_signal_saint_graal_with_guarantee(df, signal_count=0, total_signals_nee
                 'signal': guarantee_signal,
                 'mode': 'GUARANTEE',
                 'quality': 'ACCEPTABLE',
-                'score': quality_score
+                'score': quality_score,
+                'structure_info': {
+                    'market_structure': structure,
+                    'near_high': is_near_high,
+                    'pattern': pattern_type
+                }
             }
     
-    # ===== 4. FORCÉ (absolument aucun signal trouvé) =====
+    # ===== 4. FORCÉ =====
     print(f"[STRATEGIE] ⚡ Mode FORCÉ pour garantir le signal #{signal_count+1}")
     
-    # Forcer un signal basé sur les indicateurs simples
-    forced_signal = force_signal_based_on_indicators(df)
+    forced_signal = force_signal_with_structure(df, structure, is_near_high)
     if forced_signal:
-        print(f"[STRATEGIE] ✅ Signal FORCÉ #{signal_count+1} (garantie des 8 signaux)")
+        print(f"[STRATEGIE] ✅ Signal FORCÉ #{signal_count+1}")
         return {
             'signal': forced_signal,
             'mode': 'FORCED',
             'quality': 'MINIMUM',
-            'score': 50  # Score minimum
+            'score': 50,
+            'structure_info': {
+                'market_structure': structure,
+                'near_high': is_near_high,
+                'pattern': pattern_type
+            }
         }
     
-    # Si même le forçage échoue (très improbable)
-    print(f"[STRATEGIE] ❌ ERREUR CRITIQUE: Impossible de générer un signal même en mode forcé")
+    print(f"[STRATEGIE] ❌ ERREUR: Impossible de générer un signal")
     return None
 
-def rule_signal_max_quality(df):
-    """QUALITÉ MAXIMALE - Filtres très stricts"""
+def rule_signal_max_quality(df, structure, is_near_high, pattern_type, pattern_confidence):
+    """QUALITÉ MAXIMALE avec analyse de structure"""
     if len(df) < 25:
         return None
     
     config = SAINT_GRAAL_CONFIG['max_quality']
     last = df.iloc[-1]
     
-    # ===== FILTRES ABSOLUS =====
-    
-    # 1. Qualité données exceptionnelle
+    # === FILTRES ABSOLUS ===
     if last['data_quality'] < 0.85:
         return None
-    
-    # 2. ADX fort (tendance claire)
     if last['adx'] < config['adx_min']:
         return None
-    
-    # 3. Convergence forte (3+/5 indicateurs alignés)
     if last['convergence_raw'] < 3:
         return None
     
-    # ===== ANALYSE CALL MAX QUALITY =====
+    # === ANALYSE STRUCTURE ===
+    call_penalty = 0
+    put_bonus = 0
     
+    # 1. Si près d'un swing high, pénalité pour CALL
+    if is_near_high:
+        call_penalty -= 2.0
+        put_bonus += 1.5
+    
+    # 2. Si pattern de retest, forte pénalité CALL
+    if pattern_type == "RETEST_PATTERN" and pattern_confidence > 50:
+        call_penalty -= 3.0
+        put_bonus += 2.0
+    
+    # 3. Si UPTREND mature, prudence
+    if "UPTREND" in structure and "NEAR_HIGH" in structure:
+        call_penalty -= 1.5
+        put_bonus += 1.0
+    
+    # 4. Si DOWNTREND et près d'un low, bonus CALL
+    if "DOWNTREND" in structure and "NEAR_LOW" in structure:
+        call_penalty += 1.5
+    
+    # === ANALYSE CALL ===
     call_points = 0
-    max_points = 10
     
-    # 1. EMA alignées et écarté (3 points)
+    # 1. EMA alignées
     if last['ema_5'] > last['ema_13'] and last['ema_spread'] > 0.001:
         call_points += 3
     elif last['ema_5'] > last['ema_13']:
         call_points += 2
     
-    # 2. RSI optimal (58-68) (2 points)
+    # 2. RSI optimal
     if 58 < last['rsi_7'] < config['rsi_overbought']:
         call_points += 2
     elif 55 < last['rsi_7'] < 70:
         call_points += 1
     
-    # 3. Stochastique directionnel (2 points)
+    # 3. Stochastique
     if last['stoch_k'] > last['stoch_d'] and last['stoch_k'] < config['stoch_overbought']:
         call_points += 2
     elif last['stoch_k'] > last['stoch_d']:
         call_points += 1
     
-    # 4. ADX +DI fort (2 points)
+    # 4. ADX
     if last['adx_pos'] > last['adx_neg'] and last['adx_pos'] > 25:
         call_points += 2
     elif last['adx_pos'] > last['adx_neg']:
         call_points += 1
     
-    # 5. Bougie haussière (1 point)
+    # 5. Bougie haussière
     if last['price_trend'] == 1:
         call_points += 1
     
-    # 6. Bonne formation bougie (points bonus)
+    # 6. Qualité bougie
     if last['body_ratio'] > config['min_body_ratio']:
         call_points += 0.5
     if last['wick_ratio'] < config['max_wick_ratio']:
         call_points += 0.5
     
-    # ===== ANALYSE PUT MAX QUALITY =====
+    # Appliquer pénalités structure
+    call_points += call_penalty
     
+    # === ANALYSE PUT ===
     put_points = 0
     
-    # 1. EMA alignées et écarté
+    # 1. EMA alignées
     if last['ema_5'] < last['ema_13'] and last['ema_spread'] > 0.001:
         put_points += 3
     elif last['ema_5'] < last['ema_13']:
         put_points += 2
     
-    # 2. RSI optimal (32-42)
+    # 2. RSI optimal
     if config['rsi_oversold'] < last['rsi_7'] < 42:
         put_points += 2
     elif 30 < last['rsi_7'] < 45:
         put_points += 1
     
-    # 3. Stochastique directionnel
+    # 3. Stochastique
     if last['stoch_k'] < last['stoch_d'] and last['stoch_k'] > config['stoch_oversold']:
         put_points += 2
     elif last['stoch_k'] < last['stoch_d']:
         put_points += 1
     
-    # 4. ADX -DI fort
+    # 4. ADX
     if last['adx_neg'] > last['adx_pos'] and last['adx_neg'] > 25:
         put_points += 2
     elif last['adx_neg'] > last['adx_pos']:
@@ -512,45 +696,65 @@ def rule_signal_max_quality(df):
     if last['price_trend'] == 0:
         put_points += 1
     
-    # 6. Bonne formation bougie
+    # 6. Qualité bougie
     if last['body_ratio'] > config['min_body_ratio']:
         put_points += 0.5
     if last['wick_ratio'] < config['max_wick_ratio']:
         put_points += 0.5
     
-    # ===== DÉCISION STRICTE =====
+    # Appliquer bonus structure
+    put_points += put_bonus
     
+    # === DÉCISION ===
     min_points = config['min_confluence_points']
     
-    if call_points >= min_points and call_points > put_points:
+    print(f"[STRUCTURE] CALL: {call_points:.1f}, PUT: {put_points:.1f}, Min: {min_points}")
+    print(f"[STRUCTURE] Call penalty: {call_penalty:.1f}, Put bonus: {put_bonus:.1f}")
+    
+    # Augmenter seuil pour CALL si près d'un high
+    min_points_call = min_points + (1 if is_near_high else 0)
+    
+    if call_points >= min_points_call and call_points > put_points:
         return 'CALL'
     if put_points >= min_points and put_points > call_points:
         return 'PUT'
     
-    # Si égalité mais points élevés, choisir basé sur RSI
+    # Si égalité, décider par structure
     if call_points == put_points and call_points >= min_points - 1:
-        if last['rsi_7'] > 50:
+        if is_near_high:
+            return 'PUT'
+        elif "DOWNTREND" in structure and "NEAR_LOW" in structure:
             return 'CALL'
         else:
-            return 'PUT'
+            if last['rsi_7'] > 50:
+                return 'CALL'
+            else:
+                return 'PUT'
     
     return None
 
-def rule_signal_high_quality(df):
-    """QUALITÉ ÉLEVÉE - Pour compléter les 8 signaux"""
+def rule_signal_high_quality(df, structure, is_near_high):
+    """QUALITÉ ÉLEVÉE avec analyse structure"""
     if len(df) < 20:
         return None
     
     config = SAINT_GRAAL_CONFIG['high_quality']
     last = df.iloc[-1]
     
-    # Filtres moins stricts
     if last['data_quality'] < 0.75:
         return None
     if last['adx'] < config['adx_min']:
         return None
     
-    # Conditions simplifiées mais robustes
+    # Ajustements structure
+    call_adj = 0
+    put_adj = 0
+    
+    if is_near_high:
+        call_adj -= 1
+        put_adj += 1
+    
+    # Conditions CALL
     call_conditions = [
         last['ema_5'] > last['ema_13'],
         last['rsi_7'] > 52,
@@ -561,6 +765,7 @@ def rule_signal_high_quality(df):
         last['wick_ratio'] < config['max_wick_ratio'],
     ]
     
+    # Conditions PUT
     put_conditions = [
         last['ema_5'] < last['ema_13'],
         last['rsi_7'] < 48,
@@ -571,8 +776,8 @@ def rule_signal_high_quality(df):
         last['wick_ratio'] < config['max_wick_ratio'],
     ]
     
-    call_score = sum(call_conditions)
-    put_score = sum(put_conditions)
+    call_score = sum(call_conditions) + call_adj
+    put_score = sum(put_conditions) + put_adj
     
     min_conditions = config['min_confluence_points']
     
@@ -583,19 +788,26 @@ def rule_signal_high_quality(df):
     
     return None
 
-def rule_signal_guarantee_mode(df):
-    """MODE GARANTIE - Dernier recours pour les 8 signaux"""
+def rule_signal_guarantee_mode(df, structure, is_near_high):
+    """MODE GARANTIE avec analyse structure"""
     if len(df) < 15:
         return None
     
     config = SAINT_GRAAL_CONFIG['guarantee_mode']
     last = df.iloc[-1]
     
-    # Filtres minimaux
     if last['data_quality'] < 0.65:
         return None
     
-    # Conditions très simples
+    # Ajustements structure forts
+    call_adj = 0
+    put_adj = 0
+    
+    if is_near_high:
+        call_adj -= 2
+        put_adj += 2
+    
+    # Conditions simples
     call_conditions = [
         last['ema_5'] > last['ema_13'],
         last['rsi_7'] > 50,
@@ -610,8 +822,8 @@ def rule_signal_guarantee_mode(df):
         last['price_trend'] == 0,
     ]
     
-    call_score = sum(call_conditions)
-    put_score = sum(put_conditions)
+    call_score = sum(call_conditions) + call_adj
+    put_score = sum(put_conditions) + put_adj
     
     min_conditions = config['min_confluence_points']
     
@@ -620,26 +832,37 @@ def rule_signal_guarantee_mode(df):
     if put_score >= min_conditions:
         return 'PUT'
     
-    # Si aucune condition n'est remplie, choisir basé sur RSI
-    if last['rsi_7'] > 50:
-        return 'CALL'
-    else:
+    # Dernier recours
+    if is_near_high:
         return 'PUT'
+    else:
+        if last['rsi_7'] > 50:
+            return 'CALL'
+        else:
+            return 'PUT'
 
-def force_signal_based_on_indicators(df):
-    """Force un signal basé sur les indicateurs les plus simples"""
+def force_signal_with_structure(df, structure, is_near_high):
+    """Force un signal en considérant la structure"""
     if len(df) < 10:
         return None
     
     last = df.iloc[-1]
     
-    # Règle simple : RSI + EMA
+    # Si près d'un swing high, forcer PUT
+    if is_near_high:
+        return 'PUT'
+    
+    # Si DOWNTREND et près d'un low, forcer CALL
+    if "DOWNTREND" in structure and "NEAR_LOW" in structure:
+        return 'CALL'
+    
+    # Sinon basé sur RSI + EMA
     if last['rsi_7'] > 50 and last['ema_5'] > last['ema_13']:
         return 'CALL'
     elif last['rsi_7'] < 50 and last['ema_5'] < last['ema_13']:
         return 'PUT'
     
-    # Fallback : RSI seul
+    # Default
     if last['rsi_7'] > 50:
         return 'CALL'
     else:
@@ -648,14 +871,14 @@ def force_signal_based_on_indicators(df):
 # ================= FONCTIONS DE QUALITÉ =================
 
 def calculate_signal_quality(df, direction):
-    """Calcule un score de qualité (0-100) très strict"""
+    """Calcule un score de qualité (0-100)"""
     if len(df) < 20:
         return 0
     
     last = df.iloc[-1]
     score = 0
     
-    # 1. CONVERGENCE (40 points max)
+    # Convergence (40 points)
     convergence = last['convergence_raw']
     if convergence >= 4:
         score += 40
@@ -663,10 +886,8 @@ def calculate_signal_quality(df, direction):
         score += 30
     elif convergence >= 2:
         score += 20
-    else:
-        score += 10
     
-    # 2. FORCE DE TENDANCE (30 points)
+    # Force tendance (30 points)
     if last['adx'] > 30:
         score += 30
     elif last['adx'] > 25:
@@ -675,10 +896,8 @@ def calculate_signal_quality(df, direction):
         score += 20
     elif last['adx'] > 15:
         score += 15
-    else:
-        score += 5
     
-    # 3. QUALITÉ BOUGIE (20 points)
+    # Qualité bougie (20 points)
     if last['body_ratio'] > 0.5:
         score += 15
     elif last['body_ratio'] > 0.4:
@@ -688,12 +907,8 @@ def calculate_signal_quality(df, direction):
     
     if last['wick_ratio'] < 0.3:
         score += 5
-    elif last['wick_ratio'] < 0.4:
-        score += 3
-    elif last['wick_ratio'] < 0.5:
-        score += 1
     
-    # 4. ALIGNEMENT INDICATEURS (10 points)
+    # Alignement (10 points)
     aligned = 0
     if direction == 'CALL':
         if last['ema_5'] > last['ema_13']:
@@ -704,7 +919,7 @@ def calculate_signal_quality(df, direction):
             aligned += 1
         if last['adx_trend'] == 1:
             aligned += 1
-    else:  # PUT
+    else:
         if last['ema_5'] < last['ema_13']:
             aligned += 1
         if last['rsi_trend'] == 0:
@@ -723,7 +938,6 @@ def calculate_signal_quality_for_mode(df, direction, mode):
     last = df.iloc[-1]
     score = 0
     
-    # Base score par mode
     base_scores = {
         'MAX_QUALITY': 80,
         'HIGH_QUALITY': 70,
@@ -732,7 +946,7 @@ def calculate_signal_quality_for_mode(df, direction, mode):
     
     score = base_scores.get(mode, 60)
     
-    # Bonus selon les indicateurs
+    # Bonus indicateurs
     if direction == 'CALL':
         if last['ema_5'] > last['ema_13']:
             score += 5
@@ -756,17 +970,11 @@ def calculate_signal_quality_for_mode(df, direction, mode):
     if last['convergence_raw'] >= 3:
         score += 5
     
-    # Bonus qualité bougie
-    if last['body_ratio'] > 0.3:
-        score += 5
-    
     return min(score, 100)
 
 def format_signal_reason(direction, confidence, indicators):
-    """Formate la raison du signal - Compatibilité avec ancien code"""
+    """Formate la raison du signal"""
     last = indicators.iloc[-1]
-    
-    # Utiliser le score de qualité global
     quality_score = calculate_signal_quality_score(indicators)
     
     reason_parts = [f"🎯 {direction}"]
@@ -805,15 +1013,35 @@ def compute_indicators(df, ema_fast=8, ema_slow=21, rsi_len=14, bb_len=20):
     return compute_saint_graal_indicators(df)
 
 def rule_signal(df):
-    """Version par défaut (8 signaux qualité max)"""
+    """Version par défaut"""
     result = rule_signal_saint_graal_with_guarantee(df, signal_count=0, total_signals_needed=8)
     return result['signal'] if result else None
 
 def get_signal_with_metadata(df, signal_count=0, total_signals=8):
-    """Fonction principale pour le bot - RETOURNE TOUJOURS UN SIGNAL"""
+    """Fonction principale pour le bot"""
     result = rule_signal_saint_graal_with_guarantee(df, signal_count, total_signals)
     
     if result:
+        # Analyser structure pour rapport
+        structure, strength = analyze_market_structure(df, 15)
+        is_near_high, distance = is_near_swing_high(df, 20)
+        pattern_type, pattern_conf = detect_retest_pattern(df, 5)
+        
+        # Construire raison avec info structure
+        base_reason = format_signal_reason(result['signal'], result['score'], df)
+        
+        # Ajouter warnings structure
+        warnings = []
+        if is_near_high and result['signal'] == 'CALL':
+            warnings.append(f"⚠️ NEAR HIGH ({distance:.1f}%)")
+        if pattern_type == "RETEST_PATTERN" and pattern_conf > 50:
+            warnings.append(f"⚠️ RETEST PATTERN")
+        
+        if warnings:
+            reason = base_reason + " | " + " | ".join(warnings)
+        else:
+            reason = base_reason
+        
         mode_display = {
             'MAX_QUALITY': '🔵 STRICT',
             'HIGH_QUALITY': '🟡 HIGH',
@@ -833,11 +1061,15 @@ def get_signal_with_metadata(df, signal_count=0, total_signals=8):
             'mode': result['mode'],
             'quality': result['quality'],
             'score': result['score'],
-            'reason': format_signal_reason(
-                result['signal'], 
-                result['score'], 
-                df
-            ),
+            'reason': reason,
+            'structure_info': {
+                'market_structure': structure,
+                'strength': strength,
+                'near_swing_high': is_near_high,
+                'distance_to_high': distance,
+                'pattern_detected': pattern_type,
+                'pattern_confidence': pattern_conf
+            },
             'session_info': {
                 'current_signal': signal_count + 1,
                 'total_signals': total_signals,
@@ -846,15 +1078,12 @@ def get_signal_with_metadata(df, signal_count=0, total_signals=8):
             }
         }
     
-    # Cette ligne ne devrait JAMAIS être atteinte grâce au mode FORCED
-    print(f"[STRATEGIE] ⚠️ ERREUR: Aucun signal retourné même après tous les modes")
-    
     # Fallback absolu
     last = df.iloc[-1] if len(df) > 0 else None
     if last is not None:
         forced_direction = 'CALL' if last.get('rsi_7', 50) > 50 else 'PUT'
     else:
-        forced_direction = 'CALL'  # Default
+        forced_direction = 'CALL'
     
     return {
         'direction': forced_direction,
@@ -870,23 +1099,16 @@ def get_signal_with_metadata(df, signal_count=0, total_signals=8):
         }
     }
 
-# ================= FONCTIONS DE TIMING OPTIMAL =================
+# ================= FONCTIONS DE TIMING =================
 
 def is_kill_zone_optimal(hour_utc):
-    """Heures de trading optimales (London/NY)"""
-    # London Open (7-10 UTC) - Meilleure liquidité
+    """Heures de trading optimales"""
     if 7 <= hour_utc < 10:
         return True, "London Open", 10
-    
-    # NY Open (13-16 UTC) - Volatilité élevée
     if 13 <= hour_utc < 16:
         return True, "NY Open", 9
-    
-    # Overlap London/NY (10-12 UTC)
     if 10 <= hour_utc < 12:
         return True, "London/NY Overlap", 8
-    
-    # Asia Close (1-4 UTC) - Mouvements techniques
     if 1 <= hour_utc < 4:
         return True, "Asia Close", 6
     
