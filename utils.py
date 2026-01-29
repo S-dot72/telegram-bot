@@ -1,6 +1,7 @@
 """
 utils.py - STRATÉGIE FOREX M1 - 8 SIGNAUX QUALITÉ MAXIMALE AVEC GARANTIE
 Version avec analyse de structure pour éviter d'acheter près des swing highs
+Correction bug JSON serialization
 """
 
 import pandas as pd
@@ -72,8 +73,8 @@ SAINT_GRAAL_CONFIG = {
     # Paramètres structure marché
     'structure': {
         'swing_lookback': 15,
-        'near_high_threshold': 0.5,  # % distance du swing high
-        'min_trend_strength': 1.5,   # % pour considérer une tendance
+        'near_high_threshold': 0.5,
+        'min_trend_strength': 1.5,
         'pattern_lookback': 5,
     },
     
@@ -124,12 +125,12 @@ def analyze_market_structure(df, lookback=15):
         # Swing High
         if (highs[i] > highs[i-1] and highs[i] > highs[i-2] and 
             highs[i] > highs[i+1] and highs[i] > highs[i+2]):
-            swing_highs.append((i, highs[i]))
+            swing_highs.append((i, float(highs[i])))
         
         # Swing Low
         if (lows[i] < lows[i-1] and lows[i] < lows[i-2] and 
             lows[i] < lows[i+1] and lows[i] < lows[i+2]):
-            swing_lows.append((i, lows[i]))
+            swing_lows.append((i, float(lows[i])))
     
     # Analyser la tendance
     if len(swing_highs) >= 2 and len(swing_lows) >= 2:
@@ -142,34 +143,34 @@ def analyze_market_structure(df, lookback=15):
         # Uptrend: HH + HL
         if last_high > prev_high and last_low > prev_low:
             structure = "UPTREND"
-            strength = (last_high - prev_high) / prev_high * 100
+            strength = float((last_high - prev_high) / prev_high * 100)
         
         # Downtrend: LH + LL
         elif last_high < prev_high and last_low < prev_low:
             structure = "DOWNTREND"
-            strength = (prev_low - last_low) / last_low * 100
+            strength = float((prev_low - last_low) / last_low * 100)
         
         # Range
         else:
             structure = "RANGE"
-            strength = 0
+            strength = 0.0
     else:
         structure = "NO_CLEAR_STRUCTURE"
-        strength = 0
+        strength = 0.0
     
     # Vérifier proximité des swings
-    current_price = recent.iloc[-1]['close']
+    current_price = float(recent.iloc[-1]['close'])
     
     if swing_highs:
         nearest_high = min(swing_highs, key=lambda x: abs(x[0] - len(recent)))
-        distance_to_high = (nearest_high[1] - current_price) / current_price * 100
+        distance_to_high = float((nearest_high[1] - current_price) / current_price * 100)
         
         if distance_to_high < SAINT_GRAAL_CONFIG['structure']['near_high_threshold']:
             structure += "_NEAR_HIGH"
     
     if swing_lows:
         nearest_low = min(swing_lows, key=lambda x: abs(x[0] - len(recent)))
-        distance_to_low = (current_price - nearest_low[1]) / current_price * 100
+        distance_to_low = float((current_price - nearest_low[1]) / current_price * 100)
         
         if distance_to_low < SAINT_GRAAL_CONFIG['structure']['near_high_threshold']:
             structure += "_NEAR_LOW"
@@ -182,22 +183,22 @@ def is_near_swing_high(df, lookback=20):
     Retourne: (is_near, distance%)
     """
     if len(df) < lookback:
-        return False, 0
+        return False, 0.0
     
     recent = df.tail(lookback)
     highs = recent['high'].values
     
     # Trouver le swing high récent
     swing_high_idx = np.argmax(highs)
-    swing_high = highs[swing_high_idx]
+    swing_high = float(highs[swing_high_idx])
     
-    current_price = df.iloc[-1]['close']
-    distance = (swing_high - current_price) / swing_high * 100
+    current_price = float(df.iloc[-1]['close'])
+    distance = float((swing_high - current_price) / swing_high * 100)
     
     threshold = SAINT_GRAAL_CONFIG['structure']['near_high_threshold']
     is_near = distance < threshold
     
-    return is_near, distance
+    return bool(is_near), distance  # Convertir en bool pour JSON
 
 def detect_retest_pattern(df, lookback=5):
     """
@@ -216,17 +217,15 @@ def detect_retest_pattern(df, lookback=5):
         idx_red = -4
         idx_green1 = -3
         idx_green2 = -2
-        idx_current = -1
         
         # Vérifier le pattern rouge → vert → vert
         red_candle = df.iloc[idx_red]
         green1_candle = df.iloc[idx_green1]
         green2_candle = df.iloc[idx_green2]
-        current_candle = df.iloc[idx_current]
         
-        is_red = red_candle['close'] < red_candle['open']
-        is_green1 = green1_candle['close'] > green1_candle['open']
-        is_green2 = green2_candle['close'] > green2_candle['open']
+        is_red = bool(red_candle['close'] < red_candle['open'])
+        is_green1 = bool(green1_candle['close'] > green1_candle['open'])
+        is_green2 = bool(green2_candle['close'] > green2_candle['open'])
         
         if is_red and is_green1 and is_green2:
             # Pattern détecté
@@ -234,22 +233,23 @@ def detect_retest_pattern(df, lookback=5):
             
             # Calculer la confiance
             # 1. Les vertes doivent être plus petites que la rouge
-            red_size = abs(red_candle['close'] - red_candle['open'])
-            green1_size = abs(green1_candle['close'] - green1_candle['open'])
-            green2_size = abs(green2_candle['close'] - green2_candle['open'])
+            red_size = float(abs(red_candle['close'] - red_candle['open']))
+            green1_size = float(abs(green1_candle['close'] - green1_candle['open']))
+            green2_size = float(abs(green2_candle['close'] - green2_candle['open']))
             
             if green1_size < red_size and green2_size < red_size:
                 confidence += 30
             
             # 2. La bougie actuelle doit être sous le haut de la rouge
-            if current_candle['high'] < red_candle['high']:
+            current_candle = df.iloc[-1]
+            if float(current_candle['high']) < float(red_candle['high']):
                 confidence += 30
             
             # 3. Les vertes doivent fermer dans la moitié supérieure de la rouge
-            red_body_mid = (red_candle['open'] + red_candle['close']) / 2
-            if green1_candle['close'] > red_body_mid:
+            red_body_mid = float((red_candle['open'] + red_candle['close']) / 2)
+            if float(green1_candle['close']) > red_body_mid:
                 confidence += 20
-            if green2_candle['close'] > red_body_mid:
+            if float(green2_candle['close']) > red_body_mid:
                 confidence += 20
     
     return pattern_type, confidence
@@ -368,6 +368,13 @@ def compute_saint_graal_indicators(df):
     df.fillna(method='ffill', inplace=True)
     df.fillna(method='bfill', inplace=True)
     
+    # Convertir tous les types numériques pour éviter les problèmes
+    for col in df.columns:
+        if df[col].dtype in ['float32', 'float64']:
+            df[col] = df[col].astype('float64')
+        elif df[col].dtype in ['int32', 'int64']:
+            df[col] = df[col].astype('int64')
+    
     return df
 
 def calculate_signal_quality_score(df):
@@ -382,7 +389,7 @@ def calculate_signal_quality_score(df):
     
     # Convergence (30 points max)
     convergence = last.get('convergence_score', 0.5)
-    score += convergence * 30
+    score += float(convergence) * 30
     
     # Force de la tendance (25 points)
     adx = last.get('adx', 0)
@@ -513,7 +520,10 @@ def rule_signal_saint_graal_with_guarantee(df, signal_count=0, total_signals_nee
                     'structure_info': {
                         'market_structure': structure,
                         'near_high': is_near_high,
-                        'pattern': pattern_type
+                        'distance_to_high': float(distance_to_high),
+                        'pattern': pattern_type,
+                        'pattern_confidence': pattern_confidence,
+                        'trend_strength': float(strength)
                     }
                 }
     
@@ -539,7 +549,10 @@ def rule_signal_saint_graal_with_guarantee(df, signal_count=0, total_signals_nee
                 'structure_info': {
                     'market_structure': structure,
                     'near_high': is_near_high,
-                    'pattern': pattern_type
+                    'distance_to_high': float(distance_to_high),
+                    'pattern': pattern_type,
+                    'pattern_confidence': pattern_confidence,
+                    'trend_strength': float(strength)
                 }
             }
     
@@ -561,7 +574,10 @@ def rule_signal_saint_graal_with_guarantee(df, signal_count=0, total_signals_nee
                 'structure_info': {
                     'market_structure': structure,
                     'near_high': is_near_high,
-                    'pattern': pattern_type
+                    'distance_to_high': float(distance_to_high),
+                    'pattern': pattern_type,
+                    'pattern_confidence': pattern_confidence,
+                    'trend_strength': float(strength)
                 }
             }
     
@@ -579,7 +595,10 @@ def rule_signal_saint_graal_with_guarantee(df, signal_count=0, total_signals_nee
             'structure_info': {
                 'market_structure': structure,
                 'near_high': is_near_high,
-                'pattern': pattern_type
+                'distance_to_high': float(distance_to_high),
+                'pattern': pattern_type,
+                'pattern_confidence': pattern_confidence,
+                'trend_strength': float(strength)
             }
         }
     
@@ -603,8 +622,8 @@ def rule_signal_max_quality(df, structure, is_near_high, pattern_type, pattern_c
         return None
     
     # === ANALYSE STRUCTURE ===
-    call_penalty = 0
-    put_bonus = 0
+    call_penalty = 0.0
+    put_bonus = 0.0
     
     # 1. Si près d'un swing high, pénalité pour CALL
     if is_near_high:
@@ -626,35 +645,35 @@ def rule_signal_max_quality(df, structure, is_near_high, pattern_type, pattern_c
         call_penalty += 1.5
     
     # === ANALYSE CALL ===
-    call_points = 0
+    call_points = 0.0
     
     # 1. EMA alignées
     if last['ema_5'] > last['ema_13'] and last['ema_spread'] > 0.001:
-        call_points += 3
+        call_points += 3.0
     elif last['ema_5'] > last['ema_13']:
-        call_points += 2
+        call_points += 2.0
     
     # 2. RSI optimal
     if 58 < last['rsi_7'] < config['rsi_overbought']:
-        call_points += 2
+        call_points += 2.0
     elif 55 < last['rsi_7'] < 70:
-        call_points += 1
+        call_points += 1.0
     
     # 3. Stochastique
     if last['stoch_k'] > last['stoch_d'] and last['stoch_k'] < config['stoch_overbought']:
-        call_points += 2
+        call_points += 2.0
     elif last['stoch_k'] > last['stoch_d']:
-        call_points += 1
+        call_points += 1.0
     
     # 4. ADX
     if last['adx_pos'] > last['adx_neg'] and last['adx_pos'] > 25:
-        call_points += 2
+        call_points += 2.0
     elif last['adx_pos'] > last['adx_neg']:
-        call_points += 1
+        call_points += 1.0
     
     # 5. Bougie haussière
     if last['price_trend'] == 1:
-        call_points += 1
+        call_points += 1.0
     
     # 6. Qualité bougie
     if last['body_ratio'] > config['min_body_ratio']:
@@ -666,35 +685,35 @@ def rule_signal_max_quality(df, structure, is_near_high, pattern_type, pattern_c
     call_points += call_penalty
     
     # === ANALYSE PUT ===
-    put_points = 0
+    put_points = 0.0
     
     # 1. EMA alignées
     if last['ema_5'] < last['ema_13'] and last['ema_spread'] > 0.001:
-        put_points += 3
+        put_points += 3.0
     elif last['ema_5'] < last['ema_13']:
-        put_points += 2
+        put_points += 2.0
     
     # 2. RSI optimal
     if config['rsi_oversold'] < last['rsi_7'] < 42:
-        put_points += 2
+        put_points += 2.0
     elif 30 < last['rsi_7'] < 45:
-        put_points += 1
+        put_points += 1.0
     
     # 3. Stochastique
     if last['stoch_k'] < last['stoch_d'] and last['stoch_k'] > config['stoch_oversold']:
-        put_points += 2
+        put_points += 2.0
     elif last['stoch_k'] < last['stoch_d']:
-        put_points += 1
+        put_points += 1.0
     
     # 4. ADX
     if last['adx_neg'] > last['adx_pos'] and last['adx_neg'] > 25:
-        put_points += 2
+        put_points += 2.0
     elif last['adx_neg'] > last['adx_pos']:
-        put_points += 1
+        put_points += 1.0
     
     # 5. Bougie baissière
     if last['price_trend'] == 0:
-        put_points += 1
+        put_points += 1.0
     
     # 6. Qualité bougie
     if last['body_ratio'] > config['min_body_ratio']:
@@ -756,24 +775,24 @@ def rule_signal_high_quality(df, structure, is_near_high):
     
     # Conditions CALL
     call_conditions = [
-        last['ema_5'] > last['ema_13'],
-        last['rsi_7'] > 52,
-        last['stoch_k'] > last['stoch_d'],
-        last['adx_pos'] > last['adx_neg'],
-        last['price_trend'] == 1,
-        last['body_ratio'] > config['min_body_ratio'],
-        last['wick_ratio'] < config['max_wick_ratio'],
+        bool(last['ema_5'] > last['ema_13']),
+        bool(last['rsi_7'] > 52),
+        bool(last['stoch_k'] > last['stoch_d']),
+        bool(last['adx_pos'] > last['adx_neg']),
+        bool(last['price_trend'] == 1),
+        bool(last['body_ratio'] > config['min_body_ratio']),
+        bool(last['wick_ratio'] < config['max_wick_ratio']),
     ]
     
     # Conditions PUT
     put_conditions = [
-        last['ema_5'] < last['ema_13'],
-        last['rsi_7'] < 48,
-        last['stoch_k'] < last['stoch_d'],
-        last['adx_neg'] > last['adx_pos'],
-        last['price_trend'] == 0,
-        last['body_ratio'] > config['min_body_ratio'],
-        last['wick_ratio'] < config['max_wick_ratio'],
+        bool(last['ema_5'] < last['ema_13']),
+        bool(last['rsi_7'] < 48),
+        bool(last['stoch_k'] < last['stoch_d']),
+        bool(last['adx_neg'] > last['adx_pos']),
+        bool(last['price_trend'] == 0),
+        bool(last['body_ratio'] > config['min_body_ratio']),
+        bool(last['wick_ratio'] < config['max_wick_ratio']),
     ]
     
     call_score = sum(call_conditions) + call_adj
@@ -809,17 +828,17 @@ def rule_signal_guarantee_mode(df, structure, is_near_high):
     
     # Conditions simples
     call_conditions = [
-        last['ema_5'] > last['ema_13'],
-        last['rsi_7'] > 50,
-        last['stoch_k'] > last['stoch_d'],
-        last['price_trend'] == 1,
+        bool(last['ema_5'] > last['ema_13']),
+        bool(last['rsi_7'] > 50),
+        bool(last['stoch_k'] > last['stoch_d']),
+        bool(last['price_trend'] == 1),
     ]
     
     put_conditions = [
-        last['ema_5'] < last['ema_13'],
-        last['rsi_7'] < 50,
-        last['stoch_k'] < last['stoch_d'],
-        last['price_trend'] == 0,
+        bool(last['ema_5'] < last['ema_13']),
+        bool(last['rsi_7'] < 50),
+        bool(last['stoch_k'] < last['stoch_d']),
+        bool(last['price_trend'] == 0),
     ]
     
     call_score = sum(call_conditions) + call_adj
@@ -1018,7 +1037,7 @@ def rule_signal(df):
     return result['signal'] if result else None
 
 def get_signal_with_metadata(df, signal_count=0, total_signals=8):
-    """Fonction principale pour le bot"""
+    """Fonction principale pour le bot - CORRIGÉ POUR JSON"""
     result = rule_signal_saint_graal_with_guarantee(df, signal_count, total_signals)
     
     if result:
@@ -1042,6 +1061,16 @@ def get_signal_with_metadata(df, signal_count=0, total_signals=8):
         else:
             reason = base_reason
         
+        # Préparer les données structure pour JSON
+        structure_info = {
+            'market_structure': str(structure),
+            'strength': float(strength),
+            'near_swing_high': bool(is_near_high),
+            'distance_to_high': float(distance),
+            'pattern_detected': str(pattern_type),
+            'pattern_confidence': int(pattern_conf)
+        }
+        
         mode_display = {
             'MAX_QUALITY': '🔵 STRICT',
             'HIGH_QUALITY': '🟡 HIGH',
@@ -1060,16 +1089,9 @@ def get_signal_with_metadata(df, signal_count=0, total_signals=8):
             'direction': result['signal'],
             'mode': result['mode'],
             'quality': result['quality'],
-            'score': result['score'],
+            'score': float(result['score']),  # Convertir en float pour JSON
             'reason': reason,
-            'structure_info': {
-                'market_structure': structure,
-                'strength': strength,
-                'near_swing_high': is_near_high,
-                'distance_to_high': distance,
-                'pattern_detected': pattern_type,
-                'pattern_confidence': pattern_conf
-            },
+            'structure_info': structure_info,
             'session_info': {
                 'current_signal': signal_count + 1,
                 'total_signals': total_signals,
@@ -1089,8 +1111,16 @@ def get_signal_with_metadata(df, signal_count=0, total_signals=8):
         'direction': forced_direction,
         'mode': 'FALLBACK',
         'quality': 'MINIMUM',
-        'score': 50,
+        'score': 50.0,
         'reason': f"FALLBACK {forced_direction} - Aucun signal trouvé",
+        'structure_info': {
+            'market_structure': 'UNKNOWN',
+            'strength': 0.0,
+            'near_swing_high': False,
+            'distance_to_high': 0.0,
+            'pattern_detected': 'NO_PATTERN',
+            'pattern_confidence': 0
+        },
         'session_info': {
             'current_signal': signal_count + 1,
             'total_signals': total_signals,
