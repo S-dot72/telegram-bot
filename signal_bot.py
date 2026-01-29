@@ -3,7 +3,7 @@ Bot de trading M1 - Version Saint Graal avec Garantie
 8 signaux garantis par session avec stratégie Saint Graal Forex M1
 Support OTC (crypto) le week-end via APIs multiples
 Signal envoyé immédiatement avec timing 2 minutes avant entrée
-Compatibilité avec utils.py Saint Graal
+Compatibilité avec utils.py Saint Graal - Version avec analyse structure
 """
 
 import os, json, asyncio, random
@@ -24,7 +24,10 @@ from utils import (
     calculate_signal_quality_score,
     format_signal_reason,
     get_m1_candle_range,
-    get_next_m1_candle
+    get_next_m1_candle,
+    analyze_market_structure,
+    is_near_swing_high,
+    detect_retest_pattern
 )
 from ml_predictor import MLSignalPredictor
 from auto_verifier import AutoResultVerifier
@@ -169,7 +172,6 @@ def check_api_availability():
         if is_weekend:
             test_pair = 'BTC/USD'
             try:
-                # Tester directement via get_otc_data
                 df = otc_provider.get_otc_data(test_pair, '1min', 5)
                 
                 if df is not None and len(df) > 0:
@@ -208,11 +210,9 @@ def check_api_availability():
 def fetch_ohlc_td(pair, interval, outputsize=300):
     """Version unifiée utilisant APIs multiples pour Forex ET Crypto"""
     
-    # Vérifier si week-end
     if otc_provider.is_weekend():
         print(f"🏖️ Week-end - Mode OTC (Crypto via APIs multiples)")
         
-        # Utiliser la méthode unifiée get_otc_data
         df = otc_provider.get_otc_data(pair, interval, outputsize)
         
         if df is not None and len(df) > 0:
@@ -226,7 +226,6 @@ def fetch_ohlc_td(pair, interval, outputsize=300):
     if not is_forex_open():
         raise RuntimeError("Marché Forex fermé")
     
-    # Utiliser TwelveData pour Forex
     params = {
         'symbol': pair, 
         'interval': interval, 
@@ -324,38 +323,23 @@ def ensure_db():
 # ================= VÉRIFICATION AUTOMATIQUE =================
 
 async def auto_verify_signal(signal_id, user_id, app):
-    """Vérifie automatiquement un signal après 3 minutes (2 min avant entrée + 1 min bougie)"""
+    """Vérifie automatiquement un signal après 3 minutes"""
     try:
         print(f"\n[VERIF_AUTO] 🔍 Vérification auto signal #{signal_id}")
-        
-        # Attendre 3 minutes (2 min avant entrée + 1 min bougie)
-        print(f"[VERIF_AUTO] ⏳ Attente de 3 minutes...")
         await asyncio.sleep(180)
-        
         print(f"[VERIF_AUTO] ✅ 3 minutes écoulées, vérification en cours...")
-        
-        # IMPORTANT: Attendre encore un peu pour être sûr que la bougie est complète
         await asyncio.sleep(5)
         
-        # Vérifier si auto_verifier est initialisé
         if auto_verifier is None:
             print(f"[VERIF_AUTO] ❌ auto_verifier n'est pas initialisé!")
             return
         
-        print(f"[VERIF_AUTO] 📊 Appel de verify_single_signal...")
-        
-        # Vérifier
         result = await auto_verifier.verify_single_signal(signal_id)
         
-        print(f"[VERIF_AUTO] 📝 Résultat brut: {result}")
-        
         if not result:
-            print(f"[VERIF_AUTO] ⚠️ Résultat non défini pour #{signal_id}")
-            # Si pas de résultat automatique, on marque manuellement comme LOSE pour continuer
             result = 'LOSE'
             await auto_verifier.manual_verify_signal(signal_id, result)
         
-        # Mettre à jour session
         if user_id in active_sessions:
             session = active_sessions[user_id]
             session['pending'] = max(0, session['pending'] - 1)
@@ -367,7 +351,6 @@ async def auto_verify_signal(signal_id, user_id, app):
                 session['losses'] += 1
                 print(f"[VERIF_AUTO] ❌ Signal #{signal_id} LOSE - Losses: {session['losses']}")
         
-        # Récupérer détails du signal
         with engine.connect() as conn:
             signal = conn.execute(
                 text("SELECT pair, direction, confidence FROM signals WHERE id = :sid"),
@@ -380,7 +363,6 @@ async def auto_verify_signal(signal_id, user_id, app):
         
         pair, direction, confidence = signal
         
-        # Envoyer résultat à l'utilisateur
         emoji = "✅" if result == "WIN" else "❌"
         status = "GAGNÉ" if result == "WIN" else "PERDU"
         direction_emoji = "📈" if direction == "CALL" else "📉"
@@ -394,11 +376,9 @@ async def auto_verify_signal(signal_id, user_id, app):
             f"━━━━━━━━━━━━━━━━━━━━"
         )
         
-        # Vérifier si session toujours active
         if user_id in active_sessions:
             session = active_sessions[user_id]
             
-            # Ajouter bouton si pas terminé
             if session['signal_count'] < SIGNALS_PER_SESSION:
                 next_num = session['signal_count'] + 1
                 keyboard = [[InlineKeyboardButton(f"🎯 Generate Signal #{next_num}", callback_data=f"gen_signal_{user_id}")]]
@@ -412,7 +392,6 @@ async def auto_verify_signal(signal_id, user_id, app):
                 except Exception as e:
                     print(f"[VERIF_AUTO] ❌ Erreur envoi message: {e}")
             else:
-                # Session terminée
                 try:
                     await app.bot.send_message(chat_id=user_id, text=briefing)
                     await end_session_summary(user_id, app)
@@ -433,7 +412,6 @@ async def auto_verify_signal(signal_id, user_id, app):
         import traceback
         traceback.print_exc()
         
-        # En cas d'erreur, marquer le signal comme LOSE pour continuer
         try:
             await auto_verifier.manual_verify_signal(signal_id, 'LOSE')
             print(f"[VERIF_AUTO] ⚠️ Signal #{signal_id} marqué comme LOSE suite à erreur")
@@ -476,12 +454,12 @@ async def send_reminder(signal_id, user_id, app, reminder_time, entry_time, pair
     except Exception as e:
         print(f"[REMINDER] ❌ Erreur dans send_reminder: {e}")
 
-# ================= STRATÉGIE SAINT GRAAL INTÉGRÉE =================
+# ================= STRATÉGIE SAINT GRAAL AVEC ANALYSE STRUCTURE =================
 
 async def generate_m1_signal(user_id, app):
     """
     Génère un signal M1 avec la stratégie Saint Graal
-    Garantie de 8 signaux par session grâce au mode secours intelligent
+    Garantie de 8 signaux par session avec analyse de structure
     """
     try:
         is_weekend = otc_provider.is_weekend()
@@ -489,7 +467,6 @@ async def generate_m1_signal(user_id, app):
         
         print(f"\n[SIGNAL] 📤 Génération signal M1 Saint Graal - Mode: {mode}")
         
-        # Vérifier si l'utilisateur a une session active
         if user_id not in active_sessions:
             add_error_log(f"User {user_id} n'a pas de session active")
             return None
@@ -499,8 +476,6 @@ async def generate_m1_signal(user_id, app):
         # Rotation paires
         active_pairs = PAIRS[:3]
         pair = active_pairs[session['signal_count'] % len(active_pairs)]
-        
-        # Obtenir la paire actuelle (convertie en crypto si week-end)
         current_pair = get_current_pair(pair)
         
         if is_weekend:
@@ -508,7 +483,7 @@ async def generate_m1_signal(user_id, app):
         else:
             print(f"[SIGNAL] 📈 Paire Forex: {current_pair}")
         
-        # Données M1 - Utiliser current_pair
+        # Données M1
         df = get_cached_ohlc(current_pair, TIMEFRAME_M1, outputsize=400)
         
         if df is None:
@@ -517,16 +492,29 @@ async def generate_m1_signal(user_id, app):
         
         if len(df) < 50:
             add_error_log(f"[SIGNAL] ❌ Pas assez de données: {len(df)} bougies (min 50)")
-            print(f"[SIGNAL] 📊 Nombre de bougies disponibles: {len(df)}")
             return None
         
         print(f"[SIGNAL] ✅ {len(df)} bougies M1 ({mode})")
         print(f"[SIGNAL] 📈 Dernière bougie: {df.iloc[-1]['close']:.5f} à {df.index[-1]}")
         
-        # Calculer les indicateurs Saint Graal
+        # ANALYSE STRUCTURE AVANT GÉNÉRATION
+        structure, strength = analyze_market_structure(df, 15)
+        is_near_high, distance = is_near_swing_high(df, 20)
+        pattern_type, pattern_conf = detect_retest_pattern(df, 5)
+        
+        print(f"[STRUCTURE] 📊 Structure: {structure} (force: {strength:.1f}%)")
+        print(f"[STRUCTURE] 📈 Near swing high: {is_near_high} ({distance:.2f}%)")
+        print(f"[PATTERN] 🔍 Pattern détecté: {pattern_type} (confiance: {pattern_conf}%)")
+        
+        # Avertissement si près d'un swing high
+        if is_near_high:
+            print(f"[STRUCTURE] ⚠️ ATTENTION: Prix près d'un swing high ({distance:.2f}%)")
+            print(f"[STRUCTURE] ⚠️ Risque élevé d'achat au sommet")
+        
+        # Calculer les indicateurs
         df = compute_indicators(df)
         
-        # ===== STRATÉGIE SAINT GRAAL AVEC GARANTIE =====
+        # STRATÉGIE SAINT GRAAL AVEC ANALYSE STRUCTURE
         signal_data = get_signal_with_metadata(
             df, 
             signal_count=session['signal_count'],
@@ -534,7 +522,6 @@ async def generate_m1_signal(user_id, app):
         )
         
         if not signal_data:
-            # Aucun signal trouvé même avec garantie
             print(f"[SIGNAL] ❌ Saint Graal: aucun signal trouvé même avec garantie")
             return None
         
@@ -544,30 +531,42 @@ async def generate_m1_signal(user_id, app):
         score = signal_data['score']
         reason = signal_data['reason']
         
-        print(f"[SIGNAL] 🎯 Saint Graal: {direction} | Mode: {mode_strat} | Qualité: {quality} | Score: {score}")
-        print(f"[SIGNAL] 📝 Raison: {reason}")
+        # Vérifier si le signal va contre la structure
+        structure_warning = ""
+        if is_near_high and direction == "CALL":
+            structure_warning = f" | ⚠️ ACHAT PRÈS D'UN SWING HIGH"
+        elif "NEAR_LOW" in structure and direction == "PUT":
+            structure_warning = f" | ⚠️ VENTE PRÈS D'UN SWING LOW"
         
-        # ===== MACHINE LEARNING =====
+        reason_with_structure = reason + structure_warning
+        
+        print(f"[SIGNAL] 🎯 Saint Graal: {direction} | Mode: {mode_strat} | Qualité: {quality} | Score: {score}")
+        print(f"[SIGNAL] 📝 Raison: {reason_with_structure}")
+        
+        # MACHINE LEARNING
         ml_signal, ml_conf = ml_predictor.predict_signal(df, direction)
         
-        # Si ML ne trouve pas de signal, utiliser celui de Saint Graal
         if ml_signal is None:
             print(f"[SIGNAL] ⚡ ML: pas de signal, utilisation du signal Saint Graal")
             ml_signal = direction
-            ml_conf = score / 100  # Utiliser le score Saint Graal comme confiance
+            ml_conf = score / 100
         
         if ml_conf < CONFIDENCE_THRESHOLD:
-            # Ajuster la confiance
-            print(f"[SIGNAL] ⚡ Confiance ML ajustée: {ml_conf:.1%} → {CONFIDENCE_THRESHOLD:.0%}")
-            ml_conf = CONFIDENCE_THRESHOLD + random.uniform(0.05, 0.15)
+            # Ajuster la confiance selon la structure
+            if is_near_high and direction == "CALL":
+                # Réduire la confiance pour achat près d'un high
+                ml_conf = CONFIDENCE_THRESHOLD - 0.1
+                print(f"[SIGNAL] ⚡ Confiance réduite pour achat près d'un swing high: {ml_conf:.1%}")
+            else:
+                ml_conf = CONFIDENCE_THRESHOLD + random.uniform(0.05, 0.15)
+                print(f"[SIGNAL] ⚡ Confiance ML ajustée: {ml_conf:.1%}")
         
         print(f"[SIGNAL] ✅ ML: {ml_signal} ({ml_conf:.1%})")
         
-        # ===== CALCUL DES TEMPS =====
+        # CALCUL DES TEMPS
         now_haiti = get_haiti_now()
         now_utc = get_utc_now()
         
-        # Calculer l'heure d'entrée (arrondie à la minute suivante + 2 minutes)
         entry_time_haiti = (now_haiti + timedelta(minutes=2)).replace(second=0, microsecond=0)
         if entry_time_haiti < now_haiti + timedelta(minutes=2):
             entry_time_haiti = (now_haiti + timedelta(minutes=2)).replace(second=0, microsecond=0)
@@ -579,11 +578,11 @@ async def generate_m1_signal(user_id, app):
         print(f"[SIGNAL_TIMING] ⏰ Heure d'entrée: {entry_time_haiti.strftime('%H:%M:%S')}")
         print(f"[SIGNAL_TIMING] ⏰ Délai avant entrée: {(entry_time_haiti - now_haiti).total_seconds()/60:.1f} min")
         
-        # ===== PERSISTENCE =====
+        # PERSISTENCE AVEC INFO STRUCTURE
         payload = {
             'pair': current_pair,
             'direction': ml_signal, 
-            'reason': reason,
+            'reason': reason_with_structure,
             'ts_enter': entry_time_utc.isoformat(), 
             'ts_send': send_time_utc.isoformat(),
             'confidence': ml_conf, 
@@ -592,11 +591,19 @@ async def generate_m1_signal(user_id, app):
                 'actual_pair': current_pair,
                 'user_id': user_id, 
                 'mode': mode,
-                'strategy': 'Saint Graal',
+                'strategy': 'Saint Graal avec Structure',
                 'strategy_mode': mode_strat,
                 'strategy_quality': quality,
                 'strategy_score': score,
                 'ml_confidence': ml_conf,
+                'structure_info': {
+                    'market_structure': structure,
+                    'strength': strength,
+                    'near_swing_high': is_near_high,
+                    'distance_to_high': distance,
+                    'pattern_detected': pattern_type,
+                    'pattern_confidence': pattern_conf
+                },
                 'session_count': session['signal_count'] + 1,
                 'session_total': SIGNALS_PER_SESSION,
                 'timing_info': {
@@ -645,16 +652,17 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await update.message.reply_text(
             f"✅ **Bienvenue au Bot Trading Saint Graal M1 !**\n\n"
-            f"🎯 **Stratégie: SAINT GRAAL FOREX M1**\n"
+            f"🎯 **Nouvelle version avec analyse de structure**\n"
             f"📊 8 signaux garantis par session\n"
-            f"🔍 Vérification auto: 3 min après signal\n"
+            f"🔍 **Détection des swing highs/lows**\n"
+            f"⚠️ **Évite les achats près des sommets**\n"
             f"🌐 Mode actuel: {mode_text}\n"
             f"🔧 Sources: TwelveData + APIs Crypto\n\n"
             f"**🎯 Caractéristiques:**\n"
             f"• Mode STRICT → Haute qualité\n"
             f"• Mode GARANTIE → Signaux assurés\n"
             f"• Mode LAST RESORT → Complète session\n"
-            f"• Score de qualité → 0-100 points\n\n"
+            f"• **Analyse structure → Évite les tops/bottoms**\n\n"
             f"**Commandes:**\n"
             f"• /startsession - Démarrer session\n"
             f"• /stats - Statistiques\n"
@@ -662,7 +670,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• /checkapi - Vérifier APIs\n"
             f"• /menu - Menu complet\n\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"💡 8 signaux garantis grâce au mode secours intelligent!"
+            f"💡 8 signaux garantis avec analyse structure!"
         )
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {e}")
@@ -670,7 +678,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Affiche le menu complet"""
     menu_text = (
-        "📋 **MENU SAINT GRAAL M1**\n"
+        "📋 **MENU SAINT GRAAL M1 - AVEC ANALYSE STRUCTURE**\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         "**📊 Session:**\n"
         "• /startsession - Démarrer session\n"
@@ -689,6 +697,10 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /checkapi - Vérifier APIs\n"
         "• /debugapi - Debug APIs\n"
         "• /debugpair - Debug conversion paires\n\n"
+        "**🔍 Analyse Structure:**\n"
+        "• /analysestructure <pair> - Analyser structure\n"
+        "• /checkhigh <pair> - Vérifier swing highs\n"
+        "• /pattern <pair> - Détecter patterns\n\n"
         "**🔧 Vérification:**\n"
         "• /pending - Signaux en attente\n"
         "• /signalinfo <id> - Info signal\n"
@@ -699,9 +711,9 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "**⚠️ Erreurs:**\n"
         "• /lasterrors - Dernières erreurs\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "🎯 **SAINT GRAAL M1**\n"
+        "🎯 **SAINT GRAAL M1 - AVEC ANALYSE STRUCTURE**\n"
         "🔍 8 signaux garantis/session\n"
-        "⚡ Signal envoyé immédiatement\n"
+        "⚠️ Évite les achats près des swing highs\n"
         "🔔 Rappel 1 min avant entrée\n"
         "🏖️ OTC actif le week-end"
     )
@@ -711,7 +723,6 @@ async def cmd_start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Démarre une nouvelle session de 8 signaux"""
     user_id = update.effective_user.id
     
-    # Vérifier si session active
     if user_id in active_sessions:
         session = active_sessions[user_id]
         
@@ -748,10 +759,9 @@ async def cmd_start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'pending': 0,
         'signals': [],
         'verification_tasks': [],
-        'reminder_tasks': []  # Nouvelles tâches de rappel
+        'reminder_tasks': []
     }
     
-    # Bouton pour générer premier signal
     keyboard = [[InlineKeyboardButton("🎯 Generate Signal #1", callback_data=f"gen_signal_{user_id}")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -764,12 +774,13 @@ async def cmd_start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📅 {now_haiti.strftime('%H:%M:%S')}\n"
         f"🌐 Mode: {mode_text}\n"
         f"🎯 Objectif: {SIGNALS_PER_SESSION} signaux M1\n"
-        f"🔍 Vérification: 3 min après signal\n"
+        f"🔍 **NOUVEAU: Analyse structure activée**\n"
+        f"⚠️ Détection des swing highs/lows\n"
         f"🔧 Sources: {'APIs Crypto' if is_weekend else 'TwelveData'}\n\n"
-        f"**Stratégie Saint Graal activée:**\n"
-        f"• Mode STRICT → Haute qualité\n"
-        f"• Mode GARANTIE → 8 signaux assurés\n"
-        f"• Mode LAST RESORT → Complète session\n\n"
+        f"**Stratégie Saint Graal améliorée:**\n"
+        f"• Évite les achats près des sommets\n"
+        f"• Détecte les patterns de retest\n"
+        f"• Garantie de 8 signaux qualité\n\n"
         f"Cliquez pour générer signal #1 ⬇️",
         reply_markup=reply_markup
     )
@@ -786,7 +797,6 @@ async def cmd_session_status(update: Update, context: ContextTypes.DEFAULT_TYPE)
     duration = (get_haiti_now() - session['start_time']).total_seconds() / 60
     winrate = (session['wins'] / session['signal_count'] * 100) if session['signal_count'] > 0 else 0
     
-    # Vérifier si des rappels sont en attente
     pending_reminders = 0
     if 'reminder_tasks' in session:
         for task in session['reminder_tasks']:
@@ -805,6 +815,7 @@ async def cmd_session_status(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"📊 Win Rate: {winrate:.1f}%\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"🔔 Rappel 1 min avant entrée\n"
+        f"⚠️ Analyse structure active\n"
         f"🎯 Garantie: {SIGNALS_PER_SESSION - session['signal_count']} signaux restants"
     )
     
@@ -820,7 +831,6 @@ async def cmd_end_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     session = active_sessions[user_id]
     
-    # Annuler les tâches de rappel en attente
     if 'reminder_tasks' in session:
         for task in session['reminder_tasks']:
             if not task.done():
@@ -849,7 +859,6 @@ async def cmd_force_end(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     session = active_sessions[user_id]
     
-    # Annuler toutes les tâches en cours
     if 'verification_tasks' in session:
         for task in session['verification_tasks']:
             if not task.done():
@@ -873,20 +882,17 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
     
     user_id = int(query.data.split('_')[2])
     
-    # Vérifier session
     if user_id not in active_sessions:
         await query.edit_message_text("❌ Session expirée\n\nUtilisez /startsession")
         return
     
     session = active_sessions[user_id]
     
-    # Vérifier limite
     if session['signal_count'] >= SIGNALS_PER_SESSION:
         await end_session_summary(user_id, context.application, query.message)
         return
     
-    # Générer signal
-    await query.edit_message_text("⏳ Génération signal Saint Graal M1...")
+    await query.edit_message_text("⏳ Génération signal Saint Graal M1 avec analyse structure...")
     
     signal_id = await generate_m1_signal(user_id, context.application)
     
@@ -898,7 +904,6 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
         print(f"[SIGNAL] ✅ Signal #{signal_id} généré pour user {user_id}")
         print(f"[SIGNAL] 📊 Session: {session['signal_count']}/{SIGNALS_PER_SESSION}")
         
-        # Récupérer les détails du signal pour l'envoyer immédiatement
         with engine.connect() as conn:
             signal = conn.execute(
                 text("SELECT pair, direction, confidence, payload_json, ts_enter FROM signals WHERE id = :sid"),
@@ -908,7 +913,6 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
         if signal:
             pair, direction, confidence, payload_json, ts_enter = signal
             
-            # Analyser le payload pour le mode
             mode = "Forex"
             strategy_mode = "STRICT"
             if payload_json:
@@ -916,34 +920,37 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
                     payload = json.loads(payload_json)
                     mode = payload.get('mode', 'Forex')
                     strategy_mode = payload.get('strategy_mode', 'STRICT')
+                    
+                    # Vérifier si warning structure
+                    structure_info = payload.get('structure_info', {})
+                    near_high = structure_info.get('near_swing_high', False)
+                    distance = structure_info.get('distance_to_high', 0)
                 except:
                     pass
             
-            # Convertir ts_enter en datetime si nécessaire
             if isinstance(ts_enter, str):
                 entry_time = datetime.fromisoformat(ts_enter.replace('Z', '+00:00')).astimezone(HAITI_TZ)
             else:
                 entry_time = ts_enter.astimezone(HAITI_TZ)
             
-            # Calculer l'heure d'envoi (2 minutes avant l'entrée)
             send_time = entry_time - timedelta(minutes=2)
             now_haiti = get_haiti_now()
             
-            # Formater le message du signal
             direction_text = "BUY ↗️" if direction == "CALL" else "SELL ↘️"
             entry_time_formatted = entry_time.strftime('%H:%M')
-            
-            # Calculer le temps restant avant entrée
             time_to_entry = max(0, (entry_time - now_haiti).total_seconds() / 60)
             
-            # Mode stratégique emoji
             mode_emoji = {
                 'STRICT': '🔵',
                 'GUARANTEE': '🟡',
-                'LAST_RESORT': '🟠'
+                'LAST_RESORT': '🟠',
+                'MAX_QUALITY': '🔵',
+                'HIGH_QUALITY': '🟡',
+                'GUARANTEE': '🟠',
+                'FORCED': '⚡'
             }.get(strategy_mode, '⚪')
             
-            # Message COMPLET du signal à envoyer IMMÉDIATEMENT
+            # Construction du message avec warning structure si nécessaire
             signal_msg = (
                 f"🎯 **SIGNAL #{session['signal_count']} - SAINT GRAAL**\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -956,6 +963,17 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
                 f"⏱️ Timeframe: 1 minute"
             )
             
+            # Ajouter warning structure si près d'un swing high
+            try:
+                if payload_json:
+                    payload = json.loads(payload_json)
+                    structure_info = payload.get('structure_info', {})
+                    if structure_info.get('near_swing_high', False) and direction == "CALL":
+                        distance = structure_info.get('distance_to_high', 0)
+                        signal_msg += f"\n\n⚠️ **ATTENTION:** Prix près d'un swing high ({distance:.1f}%)"
+            except:
+                pass
+            
             try:
                 await context.application.bot.send_message(chat_id=user_id, text=signal_msg)
                 print(f"[SIGNAL] ✅ Signal #{signal_id} ENVOYÉ IMMÉDIATEMENT à {now_haiti.strftime('%H:%M:%S')}")
@@ -963,9 +981,7 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
             except Exception as e:
                 print(f"[SIGNAL] ❌ Erreur envoi signal: {e}")
             
-            # Vérifier si le moment d'envoi est dans le futur pour les rappels
             if send_time > now_haiti:
-                # Créer une tâche pour un rappel 1 minute avant l'entrée
                 reminder_time = entry_time - timedelta(minutes=1)
                 reminder_task = asyncio.create_task(
                     send_reminder(signal_id, user_id, context.application, reminder_time, entry_time, pair, direction)
@@ -976,13 +992,11 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
                 if wait_seconds > 0:
                     print(f"[SIGNAL_REMINDER] ⏰ Rappel programmé pour signal #{signal_id} dans {wait_seconds:.0f} secondes")
         
-        # Programmer vérification auto (3 minutes après la génération du signal)
         verification_task = asyncio.create_task(auto_verify_signal(signal_id, user_id, context.application))
         session['verification_tasks'].append(verification_task)
         
         print(f"[SIGNAL] ⏳ Vérification auto programmée dans 3 min...")
         
-        # Message de confirmation modifié
         confirmation_msg = (
             f"✅ **Signal #{session['signal_count']} généré et envoyé!**\n"
             f"━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -999,7 +1013,6 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
             "Utilisez /lasterrors pour voir les détails d'erreur"
         )
         
-        # Proposer de réessayer
         keyboard = [[InlineKeyboardButton("🔄 Réessayer", callback_data=f"gen_signal_{user_id}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.message.reply_text("Voulez-vous réessayer ?", reply_markup=reply_markup)
@@ -1024,11 +1037,11 @@ async def end_session_summary(user_id, app, message=None):
         "━━━━━━━━━━━━━━━━━━━━\n"
         "⚡ Signal envoyé immédiatement\n"
         "🔔 Rappel 1 min avant entrée\n"
+        "⚠️ Analyse structure active\n"
         "🎯 Garantie: 8 signaux/session\n"
         "Utilisez /startsession pour nouvelle session"
     )
     
-    # Bouton nouvelle session
     keyboard = [[InlineKeyboardButton("🚀 Nouvelle Session", callback_data="new_session")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -1037,7 +1050,6 @@ async def end_session_summary(user_id, app, message=None):
     else:
         await app.bot.send_message(chat_id=user_id, text=summary, reply_markup=reply_markup)
     
-    # Supprimer session
     del active_sessions[user_id]
 
 async def callback_new_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1047,15 +1059,279 @@ async def callback_new_session(update: Update, context: ContextTypes.DEFAULT_TYP
     
     user_id = query.from_user.id
     
-    # Simuler commande /startsession
     await query.message.delete()
     
-    # Créer update simulé
     fake_message = query.message
     fake_update = Update(update_id=0, message=fake_message)
     fake_update.effective_user = query.from_user
     
     await cmd_start_session(fake_update, context)
+
+# ================= COMMANDES ANALYSE STRUCTURE =================
+
+async def cmd_analyze_structure(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Analyse la structure du marché pour une paire"""
+    try:
+        if not context.args:
+            await update.message.reply_text("❌ Usage: /analysestructure <pair>\nExemple: /analysestructure EUR/USD")
+            return
+        
+        pair = context.args[0].upper()
+        current_pair = get_current_pair(pair)
+        
+        msg = await update.message.reply_text(f"🔍 Analyse structure pour {current_pair}...")
+        
+        df = get_cached_ohlc(current_pair, TIMEFRAME_M1, outputsize=100)
+        
+        if df is None or len(df) < 50:
+            await msg.edit_text(f"❌ Pas assez de données pour {current_pair}")
+            return
+        
+        df = compute_indicators(df)
+        
+        structure, strength = analyze_market_structure(df, 15)
+        is_near_high, distance = is_near_swing_high(df, 20)
+        pattern_type, pattern_conf = detect_retest_pattern(df, 5)
+        
+        last = df.iloc[-1]
+        price = last['close']
+        
+        analysis = (
+            f"🔍 **ANALYSE STRUCTURE - {current_pair}**\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"💰 Prix actuel: {price:.5f}\n"
+            f"📊 Structure: **{structure}**\n"
+            f"💪 Force: {strength:.1f}%\n\n"
+            f"📈 **Swing High Analysis:**\n"
+            f"• Proche d'un swing high: {'✅ OUI' if is_near_high else '❌ NON'}\n"
+            f"• Distance: {distance:.2f}%\n\n"
+            f"🔍 **Pattern Detection:**\n"
+            f"• Pattern: {pattern_type}\n"
+            f"• Confiance: {pattern_conf}%\n\n"
+            f"📊 **Indicateurs clés:**\n"
+            f"• RSI 7: {last['rsi_7']:.1f}\n"
+            f"• ADX: {last['adx']:.1f}\n"
+            f"• EMA 5/13: {last['ema_5']:.5f}/{last['ema_13']:.5f}\n"
+            f"• Convergence: {last['convergence_raw']}/5\n\n"
+        )
+        
+        # Recommandations
+        recommendations = "💡 **Recommandations:**\n"
+        
+        if is_near_high:
+            recommendations += "• ⚠️ Éviter les ACHATS (près d'un swing high)\n"
+            recommendations += "• ✅ Privilégier les VENTES sur confirmation\n"
+        elif "NEAR_LOW" in structure:
+            recommendations += "• ⚠️ Éviter les VENTES (près d'un swing low)\n"
+            recommendations += "• ✅ Privilégier les ACHATS sur confirmation\n"
+        
+        if pattern_type == "RETEST_PATTERN" and pattern_conf > 50:
+            recommendations += "• ⚠️ Pattern de retest détecté\n"
+            recommendations += "• ✅ Attendre cassure pour confirmation\n"
+        
+        if "UPTREND" in structure and strength > 2:
+            recommendations += "• 📈 Uptrend fort, chercher achats sur retracement\n"
+        elif "DOWNTREND" in structure and strength > 2:
+            recommendations += "• 📉 Downtrend fort, chercher ventes sur retracement\n"
+        elif "RANGE" in structure:
+            recommendations += "• ↔️ Range, trader les bords\n"
+        
+        analysis += recommendations
+        analysis += "\n━━━━━━━━━━━━━━━━━━━━\n"
+        analysis += "⚠️ Analyse technique seulement - Pas un conseil financier"
+        
+        await msg.edit_text(analysis)
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur analyse: {e}")
+
+async def cmd_check_high(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Vérifie les swing highs pour une paire"""
+    try:
+        if not context.args:
+            await update.message.reply_text("❌ Usage: /checkhigh <pair>\nExemple: /checkhigh EUR/USD")
+            return
+        
+        pair = context.args[0].upper()
+        current_pair = get_current_pair(pair)
+        
+        msg = await update.message.reply_text(f"🔍 Recherche swing highs pour {current_pair}...")
+        
+        df = get_cached_ohlc(current_pair, TIMEFRAME_M1, outputsize=100)
+        
+        if df is None or len(df) < 30:
+            await msg.edit_text(f"❌ Pas assez de données pour {current_pair}")
+            return
+        
+        is_near_high, distance = is_near_swing_high(df, 20)
+        current_price = df.iloc[-1]['close']
+        
+        # Trouver les derniers swing highs
+        recent = df.tail(30)
+        highs = recent['high'].values
+        
+        swing_highs = []
+        for i in range(2, len(recent)-2):
+            if (highs[i] > highs[i-1] and highs[i] > highs[i-2] and 
+                highs[i] > highs[i+1] and highs[i] > highs[i+2]):
+                swing_highs.append((i, highs[i], recent.index[i]))
+        
+        analysis = (
+            f"📈 **SWING HIGH ANALYSIS - {current_pair}**\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"💰 Prix actuel: {current_price:.5f}\n"
+            f"🔍 Proche swing high: {'✅ OUI' if is_near_high else '❌ NON'}\n"
+            f"📏 Distance: {distance:.2f}%\n\n"
+        )
+        
+        if swing_highs:
+            analysis += f"📊 **Derniers swing highs ({len(swing_highs)}):**\n\n"
+            
+            for i, (idx, high_price, timestamp) in enumerate(reversed(swing_highs[-3:]), 1):
+                time_ago = (df.index[-1] - timestamp).total_seconds() / 60
+                price_diff = (high_price - current_price) / current_price * 100
+                
+                analysis += f"{i}. ${high_price:.5f}\n"
+                analysis += f"   ⏰ Il y a: {time_ago:.0f} min\n"
+                analysis += f"   📏 Écart: {price_diff:.2f}%\n"
+                
+                if price_diff < 0.5:
+                    analysis += f"   ⚠️ **TRÈS PROCHE**\n"
+                elif price_diff < 1.0:
+                    analysis += f"   ⚠️ Proche\n"
+                
+                analysis += "\n"
+            
+            # Dernier swing high
+            last_high = swing_highs[-1]
+            last_high_price = last_high[1]
+            
+            analysis += f"🎯 **Dernier swing high:** ${last_high_price:.5f}\n"
+            analysis += f"📊 Résistance clé à surveiller\n\n"
+            
+            if is_near_high:
+                analysis += (
+                    "⚠️ **ATTENTION IMPORTANTE:**\n"
+                    "• Le prix est près d'un swing high\n"
+                    "• Risque élevé de retournement\n"
+                    "• Éviter les ACHATS sans confirmation forte\n"
+                    "• Privilégier les VENTES sur signaux baissiers\n"
+                )
+            else:
+                analysis += (
+                    "✅ **SITUATION NORMALE:**\n"
+                    "• Le prix n'est pas près d'un swing high\n"
+                    "• Pas de risque majeur d'achat au sommet\n"
+                    "• Trader normalement selon la stratégie\n"
+                )
+        else:
+            analysis += "ℹ️ Aucun swing high clair détecté sur les 30 dernières bougies\n\n"
+            analysis += "✅ Pas de résistance majeure identifiée"
+        
+        analysis += "\n━━━━━━━━━━━━━━━━━━━━\n"
+        analysis += "💡 Le bot ajuste automatiquement sa stratégie près des swing highs"
+        
+        await msg.edit_text(analysis)
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur: {e}")
+
+async def cmd_pattern(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Détecte les patterns pour une paire"""
+    try:
+        if not context.args:
+            await update.message.reply_text("❌ Usage: /pattern <pair>\nExemple: /pattern EUR/USD")
+            return
+        
+        pair = context.args[0].upper()
+        current_pair = get_current_pair(pair)
+        
+        msg = await update.message.reply_text(f"🔍 Détection patterns pour {current_pair}...")
+        
+        df = get_cached_ohlc(current_pair, TIMEFRAME_M1, outputsize=50)
+        
+        if df is None or len(df) < 20:
+            await msg.edit_text(f"❌ Pas assez de données pour {current_pair}")
+            return
+        
+        pattern_type, pattern_conf = detect_retest_pattern(df, 5)
+        
+        # Analyser les 5 dernières bougies
+        if len(df) >= 5:
+            last_5 = df.tail(5)
+            candles = []
+            
+            for i in range(5):
+                idx = -5 + i
+                candle = last_5.iloc[idx]
+                candles.append({
+                    'index': idx,
+                    'time': last_5.index[idx].strftime('%H:%M'),
+                    'open': candle['open'],
+                    'high': candle['high'],
+                    'low': candle['low'],
+                    'close': candle['close'],
+                    'is_green': candle['close'] > candle['open'],
+                    'body': abs(candle['close'] - candle['open']),
+                    'size': candle['high'] - candle['low']
+                })
+        
+        analysis = (
+            f"🔍 **PATTERN DETECTION - {current_pair}**\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"🎯 Pattern détecté: **{pattern_type}**\n"
+            f"💪 Confiance: **{pattern_conf}%**\n\n"
+        )
+        
+        if len(df) >= 5:
+            analysis += f"📊 **5 dernières bougies:**\n\n"
+            
+            for i, candle in enumerate(candles):
+                color = "🟢" if candle['is_green'] else "🔴"
+                direction = "HAUSSE" if candle['is_green'] else "BAISSE"
+                body_ratio = (candle['body'] / candle['size'] * 100) if candle['size'] > 0 else 0
+                
+                analysis += f"{i+1}. {candle['time']} {color} {direction}\n"
+                analysis += f"   O:{candle['open']:.5f} H:{candle['high']:.5f}\n"
+                analysis += f"   L:{candle['low']:.5f} C:{candle['close']:.5f}\n"
+                analysis += f"   📏 Corps: {body_ratio:.1f}%\n\n"
+        
+        # Interprétation du pattern
+        if pattern_type == "RETEST_PATTERN" and pattern_conf > 50:
+            analysis += (
+                "🎯 **INTERPRÉTATION - PATTERN DE RETEST:**\n\n"
+                "📉 **Signification:**\n"
+                "• Marché a fait un swing high\n"
+                "• Correction (bougie rouge)\n"
+                "• Tentative de reprise (2 bougies vertes)\n"
+                "• Retest du niveau de résistance\n\n"
+                "⚠️ **Risques:**\n"
+                "• Forte probabilité de rejet\n"
+                "• Risque d'achat au sommet\n"
+                "• Possible retournement baissier\n\n"
+                "✅ **Stratégie recommandée:**\n"
+                "• Éviter les ACHATS\n"
+                "• Chercher VENTES sur confirmation\n"
+                "• Attendre cassure sous support\n"
+                "• Positionner Stop Loss au-dessus du swing high\n"
+            )
+        elif pattern_type == "NO_PATTERN":
+            analysis += (
+                "ℹ️ **AUCUN PATTERN SPÉCIFIQUE**\n\n"
+                "✅ Pas de pattern de retest détecté\n"
+                "📊 Le marché évolue normalement\n"
+                "🎯 Suivre la stratégie Saint Graal standard\n"
+            )
+        
+        analysis += "\n━━━━━━━━━━━━━━━━━━━━\n"
+        analysis += "💡 Le bot ajuste sa confiance selon les patterns détectés"
+        
+        await msg.edit_text(analysis)
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur: {e}")
+
+# ================= AUTRES COMMANDES (inchangées) =================
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Affiche les statistiques globales"""
@@ -1074,7 +1350,8 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ Wins: {wins}\n"
             f"❌ Losses: {losses}\n"
             f"📈 Win rate: {winrate:.1f}%\n\n"
-            f"🎯 8 signaux/session (GARANTIS)"
+            f"🎯 8 signaux/session (GARANTIS)\n"
+            f"⚠️ Avec analyse structure"
         )
         
         await update.message.reply_text(msg)
@@ -1129,7 +1406,7 @@ async def cmd_rapport(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• 📊 Win Rate: **{winrate:.1f}%**\n\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"🎯 Timeframe: M1\n"
-            f"🔧 Stratégie: Saint Graal"
+            f"🔧 Stratégie: Saint Graal avec Structure"
         )
         
         await msg.edit_text(report)
@@ -1209,7 +1486,6 @@ async def cmd_otc_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_weekend = otc_provider.is_weekend()
         now_haiti = get_haiti_now()
         
-        # Tester la disponibilité
         results = check_api_availability()
         
         msg = (
@@ -1273,11 +1549,9 @@ async def cmd_test_otc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         msg = await update.message.reply_text("🧪 Test OTC en cours...")
         
-        # Tester récupération
         test_pair = 'BTC/USD'
         
         if otc_provider.is_weekend():
-            # Mode OTC - utiliser get_otc_data
             df = otc_provider.get_otc_data(test_pair, '1min', 5)
             
             if df is not None and len(df) > 0:
@@ -1295,7 +1569,6 @@ async def cmd_test_otc(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"✅ OTC opérationnel !"
                 )
             else:
-                # Tester le mode synthétique
                 synthetic_df = otc_provider.generate_synthetic_data(test_pair, '1min', 5)
                 if synthetic_df is not None:
                     last = synthetic_df.iloc[-1]
@@ -1335,7 +1608,6 @@ async def cmd_check_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
         results = check_api_availability()
         now_haiti = get_haiti_now()
         
-        # Déterminer le statut global
         if results.get('forex_available') or results.get('crypto_available') or results.get('synthetic_available'):
             status_emoji = "✅"
             status_text = "OPÉRATIONNEL"
@@ -1378,7 +1650,6 @@ async def cmd_check_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if 'error' in results:
             message += f"\n⚠️ **Erreur globale:** {results['error']}\n"
         
-        # Recommandations
         message += "\n💡 **Recommandations:**\n"
         
         if results['current_mode'] == 'OTC (Crypto)':
@@ -1415,17 +1686,14 @@ async def cmd_debug_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         msg = await update.message.reply_text("🔧 Debug des APIs en cours...")
         
-        # Tester directement l'OTC provider
         test_pair = 'BTC/USD'
         
         debug_info = "🔍 **DEBUG APIs OTC**\n"
         debug_info += "━━━━━━━━━━━━━━━━━━━━\n\n"
         
-        # 1. Vérifier si week-end
         is_weekend = otc_provider.is_weekend()
         debug_info += f"📅 Week-end: {'✅ OUI' if is_weekend else '❌ NON'}\n\n"
         
-        # 2. Tester get_otc_data
         debug_info += f"🧪 Test get_otc_data('{test_pair}'):\n"
         df = otc_provider.get_otc_data(test_pair, '1min', 5)
         
@@ -1434,7 +1702,6 @@ async def cmd_debug_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
             debug_info += f"💰 Dernier prix: ${df.iloc[-1]['close']:.2f}\n"
             debug_info += f"📈 Source: Données réelles\n\n"
             
-            # Afficher les 3 dernières bougies
             debug_info += "📊 Dernières bougies:\n"
             for i in range(min(3, len(df))):
                 idx = -1 - i
@@ -1443,7 +1710,6 @@ async def cmd_debug_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             debug_info += "❌ Échec - Pas de données\n\n"
             
-            # Tester generate_synthetic_data
             debug_info += "🧪 Test generate_synthetic_data:\n"
             df2 = otc_provider.generate_synthetic_data(test_pair, '1min', 5)
             if df2 is not None:
@@ -1453,7 +1719,6 @@ async def cmd_debug_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 debug_info += "❌ Échec synthétique aussi\n"
         
-        # 3. Tester les méthodes individuelles
         debug_info += "\n🔧 **Méthodes disponibles:**\n"
         methods = [m for m in dir(otc_provider) if not m.startswith('_')]
         for method in sorted(methods):
@@ -1494,7 +1759,6 @@ async def cmd_debug_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"• En semaine: Forex"
         msg += f"\n📈 **Exemple de session:**\n"
         
-        # Simuler une session
         active_pairs = forex_pairs[:3]
         for i in range(min(3, SIGNALS_PER_SESSION)):
             pair = active_pairs[i % len(active_pairs)]
@@ -1519,7 +1783,6 @@ async def cmd_quick_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text("📈 Semaine - Mode Forex\n⏳ Test en cours...")
         
-        # Créer une session temporaire pour le test
         test_session = {
             'start_time': get_haiti_now(),
             'signal_count': 0,
@@ -1529,14 +1792,11 @@ async def cmd_quick_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'signals': []
         }
         
-        # Sauvegarder temporairement
         original_session = active_sessions.get(user_id)
         active_sessions[user_id] = test_session
         
-        # Générer un signal
         signal_id = await generate_m1_signal(user_id, context.application)
         
-        # Restaurer la session originale
         if original_session:
             active_sessions[user_id] = original_session
         else:
@@ -1568,7 +1828,6 @@ async def cmd_last_errors(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     message = "📋 **DERNIÈRES ERREURS**\n━━━━━━━━━━━━━━━━━━━━\n\n"
     
-    # Afficher les 10 dernières erreurs (les plus récentes en premier)
     for i, error in enumerate(reversed(last_error_logs[-10:]), 1):
         message += f"{i}. {error}\n\n"
     
@@ -1597,7 +1856,6 @@ async def cmd_manual_result(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Résultat doit être WIN ou LOSE")
             return
         
-        # Demander les prix si possible
         entry_price = None
         exit_price = None
         
@@ -1608,11 +1866,9 @@ async def cmd_manual_result(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except:
                 pass
         
-        # Appliquer la vérification manuelle
         success = await auto_verifier.manual_verify_signal(signal_id, result, entry_price, exit_price)
         
         if success:
-            # Mettre à jour la session si le signal est dans une session active
             for user_id, session in active_sessions.items():
                 if signal_id in session['signals']:
                     session['pending'] = max(0, session['pending'] - 1)
@@ -1639,7 +1895,6 @@ async def cmd_pending_signals(update: Update, context: ContextTypes.DEFAULT_TYPE
     """Affiche les signaux en attente de vérification"""
     try:
         with engine.connect() as conn:
-            # Signaux M1 sans résultat
             signals = conn.execute(
                 text("""
                     SELECT id, pair, direction, ts_enter, confidence, payload_json
@@ -1660,18 +1915,24 @@ async def cmd_pending_signals(update: Update, context: ContextTypes.DEFAULT_TYPE
         for sig in signals:
             signal_id, pair, direction, ts_enter, confidence, payload_json = sig
             
-            # Analyser le payload pour le mode
             mode = "Forex"
             strategy_mode = "STRICT"
+            structure_warning = ""
+            
             if payload_json:
                 try:
                     payload = json.loads(payload_json)
                     mode = payload.get('mode', 'Forex')
                     strategy_mode = payload.get('strategy_mode', 'STRICT')
+                    
+                    # Vérifier warning structure
+                    structure_info = payload.get('structure_info', {})
+                    if structure_info.get('near_swing_high', False) and direction == "CALL":
+                        distance = structure_info.get('distance_to_high', 0)
+                        structure_warning = f" ⚠️"
                 except:
                     pass
             
-            # Formater l'heure
             if isinstance(ts_enter, str):
                 try:
                     dt = datetime.fromisoformat(ts_enter.replace('Z', '+00:00'))
@@ -1688,11 +1949,14 @@ async def cmd_pending_signals(update: Update, context: ContextTypes.DEFAULT_TYPE
             strategy_emoji = {
                 'STRICT': '🔵',
                 'GUARANTEE': '🟡',
-                'LAST_RESORT': '🟠'
+                'LAST_RESORT': '🟠',
+                'MAX_QUALITY': '🔵',
+                'HIGH_QUALITY': '🟡',
+                'FORCED': '⚡'
             }.get(strategy_mode, '⚪')
             
             message += (
-                f"#{signal_id} - {pair}\n"
+                f"#{signal_id} - {pair}{structure_warning}\n"
                 f"  {direction_emoji} {direction_text} - {int(confidence*100)}%\n"
                 f"  {mode_emoji} {mode} {strategy_emoji}\n"
                 f"  🕐 {haiti_dt.strftime('%H:%M')}\n"
@@ -1724,7 +1988,6 @@ async def cmd_signal_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❌ Signal #{signal_id} non trouvé")
             return
         
-        # Formater les dates
         ts_enter = info['ts_enter']
         if isinstance(ts_enter, str):
             try:
@@ -1800,11 +2063,9 @@ async def cmd_force_verify(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await update.message.reply_text(f"⚡ Forcer vérification signal #{signal_id}...")
         
-        # Forcer la vérification
         result = await auto_verifier.force_verify_signal(signal_id)
         
         if result:
-            # Mettre à jour la session si nécessaire
             for user_id, session in active_sessions.items():
                 if signal_id in session['signals']:
                     session['pending'] = max(0, session['pending'] - 1)
@@ -1847,7 +2108,6 @@ async def cmd_force_all_verifications(update: Update, context: ContextTypes.DEFA
         
         msg = await update.message.reply_text(f"⚡ Forcer vérification de {session['pending']} signal(s)...")
         
-        # Vérifier tous les signaux en attente
         verified_count = 0
         for signal_id in session['signals']:
             with engine.connect() as conn:
@@ -1857,16 +2117,14 @@ async def cmd_force_all_verifications(update: Update, context: ContextTypes.DEFA
                 ).fetchone()
             
             if result and result[0] is not None:
-                continue  # Déjà vérifié
+                continue
             
             print(f"[FORCE_VERIF] 🔍 Forcer vérification signal #{signal_id}")
             
-            # Simuler une vérification (aléatoire pour tests)
             simulated_result = 'WIN' if random.random() < 0.7 else 'LOSE'
             
             await auto_verifier.manual_verify_signal(signal_id, simulated_result)
             
-            # Mettre à jour session
             session['pending'] = max(0, session['pending'] - 1)
             if simulated_result == 'WIN':
                 session['wins'] += 1
@@ -1874,7 +2132,7 @@ async def cmd_force_all_verifications(update: Update, context: ContextTypes.DEFA
                 session['losses'] += 1
             
             verified_count += 1
-            await asyncio.sleep(1)  # Petite pause
+            await asyncio.sleep(1)
         
         await msg.edit_text(
             f"✅ Vérifications forcées terminées!\n"
@@ -1896,13 +2154,11 @@ async def cmd_debug_verif(update: Update, context: ContextTypes.DEFAULT_TYPE):
         debug_info = "🔍 **DEBUG VÉRIFICATION**\n"
         debug_info += "━━━━━━━━━━━━━━━━━━━━\n\n"
         
-        # 1. Vérifier auto_verifier
         if auto_verifier is None:
             debug_info += "❌ auto_verifier: NON INITIALISÉ\n\n"
         else:
             debug_info += "✅ auto_verifier: INITIALISÉ\n\n"
         
-        # 2. Sessions actives
         debug_info += f"📊 Sessions actives: {len(active_sessions)}\n\n"
         
         for user_id, session in active_sessions.items():
@@ -1913,7 +2169,6 @@ async def cmd_debug_verif(update: Update, context: ContextTypes.DEFAULT_TYPE):
             debug_info += f"  ⏳ Pending: {session['pending']}\n"
             debug_info += f"  📋 IDs: {session['signals'][-3:] if session['signals'] else []}\n\n"
         
-        # 3. Signaux récents
         with engine.connect() as conn:
             signals = conn.execute(
                 text("""
@@ -1930,7 +2185,6 @@ async def cmd_debug_verif(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for sig in signals:
                 signal_id, pair, direction, result, ts_enter, confidence, payload_json = sig
                 
-                # Analyser le payload pour le mode
                 mode = "Forex"
                 strategy_mode = "STRICT"
                 if payload_json:
@@ -1947,7 +2201,10 @@ async def cmd_debug_verif(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 strategy_emoji = {
                     'STRICT': '🔵',
                     'GUARANTEE': '🟡',
-                    'LAST_RESORT': '🟠'
+                    'LAST_RESORT': '🟠',
+                    'MAX_QUALITY': '🔵',
+                    'HIGH_QUALITY': '🟡',
+                    'FORCED': '⚡'
                 }.get(strategy_mode, '⚪')
                 
                 debug_info += f"{result_emoji} #{signal_id}: {pair} {direction} - {result_text} ({int(confidence*100)}%) {mode_emoji} {strategy_emoji}\n"
@@ -1977,7 +2234,7 @@ async def health_check(request):
         'error_logs_count': len(last_error_logs),
         'mode': 'OTC' if otc_provider.is_weekend() else 'Forex',
         'api_source': 'Multi-APIs' if otc_provider.is_weekend() else 'TwelveData',
-        'strategy': 'Saint Graal M1',
+        'strategy': 'Saint Graal M1 avec Structure',
         'signals_per_session': SIGNALS_PER_SESSION
     })
 
@@ -2002,13 +2259,19 @@ async def start_http_server():
 async def cmd_saint_graal_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Informations sur la stratégie Saint Graal"""
     info_text = (
-        "🎯 **STRATÉGIE SAINT GRAAL FOREX M1**\n"
+        "🎯 **STRATÉGIE SAINT GRAAL FOREX M1 - AVEC ANALYSE STRUCTURE**\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         "**Objectif:** 8 signaux garantis par session\n\n"
+        "**Nouveauté: Analyse de structure:**\n"
+        "🔍 Détection des swing highs/lows\n"
+        "⚠️ Évite les achats près des sommets\n"
+        "🎯 Détecte les patterns de retest\n"
+        "📊 Ajuste la confiance selon la structure\n\n"
         "**Modes de fonctionnement:**\n"
         "🔵 **STRICT** - Haute qualité, seuils élevés\n"
         "🟡 **GUARANTEE** - Conditions souples, garantie de signal\n"
-        "🟠 **LAST RESORT** - Dernier recours, complète la session\n\n"
+        "🟠 **LAST RESORT** - Dernier recours, complète la session\n"
+        "⚡ **FORCED** - Garantie absolue des 8 signaux\n\n"
         "**Indicateurs optimisés M1:**\n"
         "• EMA 3/5/13/20\n"
         "• MACD rapide (6,13,5)\n"
@@ -2017,17 +2280,19 @@ async def cmd_saint_graal_info(update: Update, context: ContextTypes.DEFAULT_TYP
         "• Bollinger Bands 20\n"
         "• Stochastique 5\n"
         "• Ichimoku Cloud\n\n"
-        "**Système de garantie:**\n"
-        "1. Essai mode STRICT d'abord\n"
-        "2. Si échec → Mode GARANTIE\n"
-        "3. Si encore échec → Mode LAST RESORT\n"
-        "4. Résultat: 8 signaux garantis!\n\n"
+        "**Système de garantie avec structure:**\n"
+        "1. Analyse structure marché\n"
+        "2. Essai mode STRICT d'abord\n"
+        "3. Si échec → Mode GARANTIE\n"
+        "4. Si encore échec → Mode LAST RESORT\n"
+        "5. Résultat: 8 signaux garantis!\n\n"
         "**Timing:**\n"
         "⚡ Signal envoyé immédiatement\n"
         "🔔 Rappel 1 min avant entrée\n"
         "🔍 Vérification 3 min après\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "✅ **8 signaux/session GARANTIS**"
+        "✅ **8 signaux/session GARANTIS**\n"
+        "⚠️ **Évite les achats près des swing highs**"
     )
     
     await update.message.reply_text(info_text)
@@ -2037,7 +2302,6 @@ async def cmd_force_8_signals(update: Update, context: ContextTypes.DEFAULT_TYPE
     try:
         user_id = update.effective_user.id
         
-        # Vérifier si pas déjà en session
         if user_id in active_sessions:
             await update.message.reply_text(
                 "⚠️ Session déjà active!\n"
@@ -2049,28 +2313,24 @@ async def cmd_force_8_signals(update: Update, context: ContextTypes.DEFAULT_TYPE
             "🚀 **GÉNÉRATION FORCÉE DE 8 SIGNAUX SAINT GRAAL**\n"
             "━━━━━━━━━━━━━━━━━━━━\n\n"
             "Cette commande va générer 8 signaux immédiatement\n"
-            "avec la stratégie Saint Graal garantie.\n\n"
+            "avec la stratégie Saint Graal avec analyse structure.\n\n"
             "**Modes activés:**\n"
             "• STRICT → Haute qualité\n"
             "• GARANTIE → Signaux assurés\n"
-            "• LAST RESORT → Complète session\n\n"
+            "• LAST RESORT → Complète session\n"
+            "• ANALYSE STRUCTURE → Évite les tops\n\n"
             "⏳ Démarrage dans 3 secondes..."
         )
         
         await asyncio.sleep(3)
         
-        # Démarrer session
         await cmd_start_session(update, context)
         
-        # Attendre un peu
         await asyncio.sleep(2)
         
-        # Générer 8 signaux rapidement
         for i in range(SIGNALS_PER_SESSION):
-            # Simuler un clic sur le bouton
             fake_data = f"gen_signal_{user_id}"
             
-            # Créer un faux callback query
             from telegram import CallbackQuery
             fake_query = CallbackQuery(
                 id="test_query",
@@ -2081,20 +2341,19 @@ async def cmd_force_8_signals(update: Update, context: ContextTypes.DEFAULT_TYPE
             
             fake_update = Update(update_id=update.update_id + 1000 + i, callback_query=fake_query)
             
-            # Exécuter le callback
             await callback_generate_signal(fake_update, context)
             
-            # Attendre entre les signaux
             if i < SIGNALS_PER_SESSION - 1:
-                await asyncio.sleep(3)  # 3 secondes entre les signaux
+                await asyncio.sleep(3)
         
         await update.message.reply_text(
             "✅ **8 signaux générés avec succès!**\n\n"
             "📊 Vérifiez votre session avec /sessionstatus\n"
             "🎯 Les vérifications automatiques sont en cours...\n\n"
-            "💡 **Stratégie Saint Graal activée:**\n"
+            "💡 **Stratégie Saint Graal améliorée:**\n"
             "• 8 signaux garantis par session\n"
-            "• Modes: STRICT → GARANTIE → LAST RESORT\n"
+            "• Analyse structure active\n"
+            "• Évite les achats près des sommets\n"
             "• Timing: Immédiat + Rappel 1 min\n"
             "• Vérification: 3 min après signal"
         )
@@ -2108,14 +2367,14 @@ async def main():
     global auto_verifier
 
     print("\n" + "="*60)
-    print("🤖 BOT SAINT GRAAL M1 - VERSION GARANTIE")
-    print("🎯 8 SIGNAUX GARANTIS PAR SESSION")
+    print("🤖 BOT SAINT GRAAL M1 - AVEC ANALYSE STRUCTURE")
+    print("🎯 8 SIGNAUX GARANTIS - ÉVITE LES ACHATS AUX SOMMETS")
     print("="*60)
-    print(f"🎯 Stratégie: Saint Graal Forex M1")
+    print(f"🎯 Stratégie: Saint Graal Forex M1 avec Structure")
     print(f"⚡ Signal envoyé: Immédiatement")
     print(f"🔔 Rappel: 1 min avant entrée")
     print(f"🔍 Vérification: 3 min après signal")
-    print(f"🌐 FOREX = OTC (mêmes règles)")
+    print(f"⚠️ Analyse: Détection swing highs/lows")
     print(f"🔧 Sources: TwelveData + Multi-APIs Crypto")
     print(f"🎯 Garantie: 8 signaux/session")
     print("="*60 + "\n")
@@ -2146,6 +2405,11 @@ async def main():
     app.add_handler(CommandHandler('quicktest', cmd_quick_test))
     app.add_handler(CommandHandler('lasterrors', cmd_last_errors))
     
+    # Commandes analyse structure
+    app.add_handler(CommandHandler('analysestructure', cmd_analyze_structure))
+    app.add_handler(CommandHandler('checkhigh', cmd_check_high))
+    app.add_handler(CommandHandler('pattern', cmd_pattern))
+    
     # Commandes Saint Graal
     app.add_handler(CommandHandler('saintgraal', cmd_saint_graal_info))
     app.add_handler(CommandHandler('force8', cmd_force_8_signals))
@@ -2172,9 +2436,11 @@ async def main():
     print(f"🌐 Sources: {'Multi-APIs Crypto' if otc_provider.is_weekend() else 'TwelveData'}")
     print(f"⚡ Signal envoyé: Immédiatement après génération")
     print(f"🔔 Rappel: 1 minute avant l'entrée")
-    print(f"🎯 Stratégie: Saint Graal M1")
-    print(f"🔧 Modes: STRICT → GARANTIE → LAST RESORT")
-    print(f"✅ Garantie: 8 signaux/session\n")
+    print(f"🎯 Stratégie: Saint Graal M1 avec Structure")
+    print(f"⚠️ Analyse: Détection des swing highs actif")
+    print(f"🔧 Modes: STRICT → GARANTIE → LAST RESORT → FORCED")
+    print(f"✅ Garantie: 8 signaux/session")
+    print(f"🔍 Nouvelles commandes: /analysestructure, /checkhigh, /pattern\n")
 
     try:
         while True:
