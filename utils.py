@@ -188,6 +188,67 @@ def compute_saint_graal_indicators(df):
     
     return df
 
+# ================= FONCTION MANQUANTE calculate_signal_quality_score =================
+
+def calculate_signal_quality_score(df):
+    """
+    Calcule un score de qualité global du signal (0-100)
+    Compatibilité avec l'ancien code
+    """
+    if len(df) < 20:
+        return 0
+    
+    last = df.iloc[-1]
+    score = 0
+    
+    # Convergence (30 points max)
+    convergence = last.get('convergence_score', 0.5)
+    score += convergence * 30
+    
+    # Force de la tendance (25 points)
+    adx = last.get('adx', 0)
+    if adx > 30:
+        score += 25
+    elif adx > 25:
+        score += 20
+    elif adx > 20:
+        score += 15
+    elif adx > 15:
+        score += 10
+    
+    # Alignement des indicateurs (20 points)
+    aligned_indicators = 0
+    if last.get('ema_trend', 0) == 1:
+        aligned_indicators += 1
+    if last.get('rsi_trend', 0) == 1:
+        aligned_indicators += 1
+    if last.get('stoch_trend', 0) == 1:
+        aligned_indicators += 1
+    if last.get('adx_trend', 0) == 1:
+        aligned_indicators += 1
+    
+    score += (aligned_indicators / 4) * 20
+    
+    # Volatilité contrôlée (15 points)
+    bb_width = last.get('bb_width', 0)
+    if 0.01 < bb_width < 0.03:
+        score += 15
+    elif 0.005 < bb_width < 0.04:
+        score += 10
+    elif 0.002 < bb_width < 0.05:
+        score += 5
+    
+    # Qualité de la bougie (10 points)
+    body_ratio = last.get('body_ratio', 0)
+    wick_ratio = last.get('wick_ratio', 0)
+    
+    if body_ratio > 0.4 and wick_ratio < 0.3:
+        score += 10
+    elif body_ratio > 0.3 and wick_ratio < 0.4:
+        score += 5
+    
+    return min(score, 100)
+
 # ================= FILTRES ANTI-MANIPULATION RENFORCÉS =================
 
 def check_anti_manipulation(df, strict_mode=True):
@@ -494,9 +555,12 @@ def calculate_signal_quality(df, direction):
     
     return min(score, 100)
 
-def format_signal_reason(direction, quality_score, indicators):
-    """Formate la raison du signal"""
+def format_signal_reason(direction, confidence, indicators):
+    """Formate la raison du signal - Compatibilité avec ancien code"""
     last = indicators.iloc[-1]
+    
+    # Utiliser le score de qualité global
+    quality_score = calculate_signal_quality_score(indicators)
     
     reason_parts = [f"🎯 {direction} - QUALITÉ MAX"]
     
@@ -571,7 +635,7 @@ def get_signal_with_metadata(df, signal_count=0, total_signals=6):
 
 # ================= FONCTIONS DE TIMING OPTIMAL =================
 
-def is_optimal_trading_hour(hour_utc):
+def is_kill_zone_optimal(hour_utc):
     """Heures de trading optimales (London/NY)"""
     # London Open (7-10 UTC) - Meilleure liquidité
     if 7 <= hour_utc < 10:
