@@ -1,57 +1,62 @@
-
 """
-utils.py - STRATÉGIE SAINT GRAAL FOREX M1 AVEC GARANTIE
-Version ultra-optimisée pour le trading binaire M1 avec expiration 1 minute
-Garantie de 8 signaux par session grâce au mode secours intelligent
+utils.py - STRATÉGIE FOREX M1 - 6 SIGNAUX QUALITÉ MAXIMALE
+Version optimisée pour 6 signaux haute qualité, extensible à 8 si conditions optimales
 """
 
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta, timezone
-from ta.trend import EMAIndicator, MACD, ADXIndicator, IchimokuIndicator
-from ta.momentum import RSIIndicator, StochasticOscillator, ROCIndicator
-from ta.volatility import BollingerBands, AverageTrueRange, DonchianChannel
-from ta.volume import VolumeWeightedAveragePrice, AccDistIndexIndicator
-from scipy import stats
+from ta.trend import EMAIndicator, MACD, ADXIndicator
+from ta.momentum import RSIIndicator, StochasticOscillator
+from ta.volatility import BollingerBands, AverageTrueRange
 import warnings
 warnings.filterwarnings('ignore')
 
-# ================= CONFIGURATION SAINT GRAAL AVEC GARANTIE =================
+# ================= CONFIGURATION QUALITÉ MAXIMALE =================
 
 SAINT_GRAAL_CONFIG = {
-    # Timeframes optimisés pour M1
+    # Indicateurs M1 optimisés
     'rsi_period': 7,
     'ema_fast': 5,
     'ema_slow': 13,
     'stoch_period': 5,
-    'macd_fast': 6,
-    'macd_slow': 13,
-    'macd_signal': 5,
-    'bb_period': 20,
-    'adx_period': 10,
     
-    # Seuils pour mode STRICT
-    'strict': {
-        'rsi_overbought': 68,
-        'rsi_oversold': 32,
-        'adx_min': 22,
-        'min_score_required': 7.0,
-        'min_percentage_required': 65.0
+    # Seuils QUALITÉ MAXIMALE (6 signaux)
+    'max_quality': {
+        'rsi_overbought': 67,
+        'rsi_oversold': 33,
+        'adx_min': 24,
+        'stoch_overbought': 73,
+        'stoch_oversold': 27,
+        'min_confluence_points': 8,  # 8/10 points minimum
+        'min_body_ratio': 0.45,
+        'max_wick_ratio': 0.4,
     },
     
-    # Seuils pour mode GARANTIE (plus souples)
-    'guarantee': {
-        'rsi_overbought': 72,
-        'rsi_oversold': 28,
-        'adx_min': 18,
-        'min_score_required': 5.0,
-        'min_percentage_required': 55.0
+    # Seuils QUALITÉ ÉLEVÉE (extensible à 8 signaux)
+    'high_quality': {
+        'rsi_overbought': 70,
+        'rsi_oversold': 30,
+        'adx_min': 20,
+        'stoch_overbought': 75,
+        'stoch_oversold': 25,
+        'min_confluence_points': 6,  # 6/10 points minimum
+        'min_body_ratio': 0.35,
+        'max_wick_ratio': 0.5,
+    },
+    
+    # Filtres anti-manipulation renforcés
+    'anti_manip': {
+        'max_wick_ratio': 0.55,
+        'max_candle_size_ratio': 2.2,
+        'min_ema_spread': 0.0008,
+        'max_volatility': 0.035,
+        'min_data_quality': 0.85,
     },
     
     # Paramètres généraux
-    'min_volume_ratio': 0.7,
-    'max_volatility': 0.04,
-    'min_price_change': 0.0002,
+    'target_signals': 6,  # Objectif principal
+    'max_signals': 8,     # Maximum possible
 }
 
 # ================= FONCTIONS DE BASE =================
@@ -67,17 +72,11 @@ def get_next_m1_candle(dt):
     current_candle = round_to_m1_candle(dt)
     return current_candle + timedelta(minutes=1)
 
-def get_m1_candle_range(dt):
-    """Retourne le début et la fin de la bougie M1"""
-    start = round_to_m1_candle(dt)
-    end = start + timedelta(minutes=1)
-    return start, end
-
-# ================= INDICATEURS SAINT GRAAL =================
+# ================= INDICATEURS QUALITÉ MAX =================
 
 def compute_saint_graal_indicators(df):
     """
-    Calcule TOUS les indicateurs pour la stratégie Saint Graal Forex M1
+    Calcule les indicateurs pour qualité maximale
     """
     df = df.copy()
     
@@ -92,46 +91,19 @@ def compute_saint_graal_indicators(df):
     
     config = SAINT_GRAAL_CONFIG
     
-    # ===== 1. INDICATEURS DE TENDANCE OPTIMISÉS =====
+    # ===== 1. INDICATEURS PRINCIPAUX =====
     
-    df['ema_3'] = EMAIndicator(close=df['close'], window=3).ema_indicator()
+    # EMA 5 & 13 (tendance)
     df['ema_5'] = EMAIndicator(close=df['close'], window=config['ema_fast']).ema_indicator()
     df['ema_13'] = EMAIndicator(close=df['close'], window=config['ema_slow']).ema_indicator()
-    df['ema_20'] = EMAIndicator(close=df['close'], window=20).ema_indicator()
+    df['ema_spread'] = abs(df['ema_5'] - df['ema_13']) / df['close']
+    df['ema_trend'] = (df['ema_5'] > df['ema_13']).astype(int)
     
-    # MACD rapide (6,13,5)
-    macd = MACD(
-        close=df['close'],
-        window_fast=config['macd_fast'],
-        window_slow=config['macd_slow'],
-        window_sign=config['macd_signal']
-    )
-    df['macd'] = macd.macd()
-    df['macd_signal'] = macd.macd_signal()
-    df['macd_diff'] = macd.macd_diff()
-    
-    # MACD ultra-rapide (3,7,2)
-    macd_ultra = MACD(close=df['close'], window_fast=3, window_slow=7, window_sign=2)
-    df['macd_ultra'] = macd_ultra.macd()
-    df['macd_signal_ultra'] = macd_ultra.macd_signal()
-    
-    # ADX rapide
-    adx = ADXIndicator(
-        high=df['high'],
-        low=df['low'],
-        close=df['close'],
-        window=config['adx_period']
-    )
-    df['adx'] = adx.adx()
-    df['adx_pos'] = adx.adx_pos()
-    df['adx_neg'] = adx.adx_neg()
-    
-    # ===== 2. INDICATEURS DE MOMENTUM OPTIMISÉS =====
-    
+    # RSI 7 (momentum)
     df['rsi_7'] = RSIIndicator(close=df['close'], window=config['rsi_period']).rsi()
-    df['rsi_3'] = RSIIndicator(close=df['close'], window=3).rsi()
+    df['rsi_trend'] = (df['rsi_7'] > 50).astype(int)
     
-    # Stochastique rapide
+    # Stochastique 5,3,3 (sur-achat/vente)
     stoch = StochasticOscillator(
         high=df['high'],
         low=df['low'],
@@ -141,26 +113,23 @@ def compute_saint_graal_indicators(df):
     )
     df['stoch_k'] = stoch.stoch()
     df['stoch_d'] = stoch.stoch_signal()
+    df['stoch_trend'] = (df['stoch_k'] > df['stoch_d']).astype(int)
     
-    # Rate of Change
-    df['roc_5'] = ROCIndicator(close=df['close'], window=5).roc()
-    df['roc_10'] = ROCIndicator(close=df['close'], window=10).roc()
-    
-    # ===== 3. VOLATILITÉ ET VOLUME =====
-    
-    # Bollinger Bands
-    bb = BollingerBands(
+    # ADX 10 (force de tendance)
+    adx = ADXIndicator(
+        high=df['high'],
+        low=df['low'],
         close=df['close'],
-        window=config['bb_period'],
-        window_dev=2
+        window=10
     )
-    df['bb_upper'] = bb.bollinger_hband()
-    df['bb_middle'] = bb.bollinger_mavg()
-    df['bb_lower'] = bb.bollinger_lband()
-    df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['bb_middle']
-    df['bb_position'] = (df['close'] - df['bb_lower']) / (df['bb_upper'] - df['bb_lower'])
+    df['adx'] = adx.adx()
+    df['adx_pos'] = adx.adx_pos()
+    df['adx_neg'] = adx.adx_neg()
+    df['adx_trend'] = (df['adx_pos'] > df['adx_neg']).astype(int)
     
-    # ATR pour le risque
+    # ===== 2. VOLATILITÉ ET RISQUE =====
+    
+    # ATR 10
     df['atr_10'] = AverageTrueRange(
         high=df['high'],
         low=df['low'],
@@ -168,77 +137,49 @@ def compute_saint_graal_indicators(df):
         window=10
     ).average_true_range()
     
-    # Donchian Channel
-    donchian = DonchianChannel(
-        high=df['high'],
-        low=df['low'],
-        close=df['close'],
-        window=10
-    )
-    df['donchian_high'] = donchian.donchian_channel_hband()
-    df['donchian_low'] = donchian.donchian_channel_lband()
+    # Bollinger Bands
+    bb = BollingerBands(close=df['close'], window=20, window_dev=2)
+    df['bb_upper'] = bb.bollinger_hband()
+    df['bb_middle'] = bb.bollinger_mavg()
+    df['bb_lower'] = bb.bollinger_lband()
+    df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['bb_middle']
+    df['bb_position'] = (df['close'] - df['bb_lower']) / (df['bb_upper'] - df['bb_lower'])
     
-    # ===== 4. INDICATEURS AVANCÉS =====
+    # ===== 3. PRICE ACTION DÉTAILLÉE =====
     
-    # Ichimoku Cloud (version light)
-    ichimoku = IchimokuIndicator(
-        high=df['high'],
-        low=df['low'],
-        window1=9,
-        window2=26,
-        window3=52
-    )
-    df['ichimoku_a'] = ichimoku.ichimoku_a()
-    df['ichimoku_b'] = ichimoku.ichimoku_b()
-    
-    # Volume Weighted Average Price
-    if 'volume' in df.columns:
-        vwap = VolumeWeightedAveragePrice(
-            high=df['high'],
-            low=df['low'],
-            close=df['close'],
-            volume=df['volume'],
-            window=20
-        )
-        df['vwap'] = vwap.volume_weighted_average_price()
-        df['price_vs_vwap'] = df['close'] / df['vwap'] - 1
-    
-    # ===== 5. MOMENTUM ET PRICE ACTION =====
-    
-    df['momentum_1'] = df['close'].pct_change(1) * 100
-    df['momentum_3'] = df['close'].pct_change(3) * 100
-    df['momentum_5'] = df['close'].pct_change(5) * 100
-    
-    df['acceleration'] = df['momentum_1'].diff()
-    df['volatility_10'] = df['close'].rolling(10).std() / df['close'].rolling(10).mean()
-    df['range_ratio'] = (df['high'] - df['low']) / df['close']
-    
-    # ===== 6. PATTERNS DE BOUGIES =====
-    
+    # Bougie actuelle
     df['candle_body'] = df['close'] - df['open']
     df['candle_size'] = df['high'] - df['low']
     df['body_ratio'] = abs(df['candle_body']) / df['candle_size'].replace(0, 0.00001)
     
-    df['bullish_candle'] = (df['close'] > df['open']).astype(int)
-    df['bearish_candle'] = (df['close'] < df['open']).astype(int)
+    # Mèches
+    df['upper_wick'] = df['high'] - df[['open', 'close']].max(axis=1)
+    df['lower_wick'] = df[['open', 'close']].min(axis=1) - df['low']
+    df['total_wick'] = df['upper_wick'] + df['lower_wick']
+    df['wick_ratio'] = df['total_wick'] / abs(df['candle_body']).replace(0, 0.00001)
     
-    # ===== 7. CONVERGENCE =====
+    # Tendance prix
+    df['price_trend'] = (df['close'] > df['open']).astype(int)
+    df['momentum_1'] = df['close'].pct_change(1) * 100
     
-    df['trend_score'] = (
-        (df['ema_5'] > df['ema_13']).astype(int) +
-        (df['macd'] > df['macd_signal']).astype(int) +
-        (df['adx_pos'] > df['adx_neg']).astype(int) +
-        (df['stoch_k'] > df['stoch_d']).astype(int) +
-        (df['rsi_7'] > 50).astype(int)
-    ) / 5.0
+    # ===== 4. QUALITÉ ET CONVERGENCE =====
     
-    # ===== 8. QUALITÉ DES DONNÉES =====
+    # Score de convergence (5 indicateurs alignés)
+    df['convergence_raw'] = (
+        df['ema_trend'] + 
+        df['rsi_trend'] + 
+        df['stoch_trend'] + 
+        df['adx_trend'] + 
+        df['price_trend']
+    )
+    df['convergence_score'] = df['convergence_raw'] / 5.0
     
+    # Qualité globale
     df['data_quality'] = (
         (df['close'].notna()).astype(int) +
-        (df['volume'].notna() if 'volume' in df.columns else 1) +
-        (df['volatility_10'] < 0.1).astype(int) +
-        (df['range_ratio'] > 0).astype(int)
+        (df['bb_width'] < 0.04).astype(int) +
+        (df['wick_ratio'] < 0.6).astype(int) +
+        (df['body_ratio'] > 0.2).astype(int)
     ) / 4.0
     
     # Remplir les derniers NaN
@@ -247,279 +188,341 @@ def compute_saint_graal_indicators(df):
     
     return df
 
-# ================= STRATÉGIE SAINT GRAAL AVEC GARANTIE =================
+# ================= FILTRES ANTI-MANIPULATION RENFORCÉS =================
 
-def rule_signal_saint_graal_with_guarantee(df, session_priority=3, signal_count=0, total_signals_needed=8):
-    """
-    STRATÉGIE SAINT GRAAL FOREX M1 AVEC GARANTIE DE 8 SIGNAUX
+def check_anti_manipulation(df, strict_mode=True):
+    """Vérifie les conditions anti-manipulation renforcées"""
+    if len(df) < 15:
+        return False, "Données insuffisantes"
     
-    Logique :
-    1. D'abord essayer mode STRICT (haute qualité)
-    2. Si pas de signal strict ET besoin de garantie → mode GARANTIE
-    3. Mode GARANTIE : conditions plus souples mais filtrées
-    4. Dernier recours : signal minimal pour compléter la session
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    anti = SAINT_GRAAL_CONFIG['anti_manip']
+    
+    # 1. Qualité des données minimale
+    if last['data_quality'] < anti['min_data_quality']:
+        return False, f"Qualité données faible: {last['data_quality']:.2f}"
+    
+    # 2. Mèches suspectes
+    max_wick = anti['max_wick_ratio'] * (0.9 if strict_mode else 1.0)
+    if last['wick_ratio'] > max_wick:
+        return False, f"Mèche suspecte: {last['wick_ratio']:.1%}"
+    
+    # 3. Bougie anormale
+    if last['candle_size'] > last['atr_10'] * 3:
+        return False, f"Bougie trop grande: {last['candle_size']:.5f} > ATRx3"
+    
+    # 4. Volatilité excessive
+    if last['bb_width'] > anti['max_volatility']:
+        return False, f"Volatilité excessive: {last['bb_width']:.3%}"
+    
+    # 5. EMA trop plates
+    if last['ema_spread'] < anti['min_ema_spread']:
+        return False, f"EMA plates: écart {last['ema_spread']:.5%}"
+    
+    # 6. ADX trop faible (pas de tendance)
+    if last['adx'] < 15:
+        return False, f"ADX faible: {last['adx']:.1f}"
+    
+    return True, "OK"
+
+# ================= STRATÉGIE 6 SIGNAUX QUALITÉ MAX =================
+
+def rule_signal_saint_graal_with_guarantee(df, signal_count=0, total_signals_needed=6):
+    """
+    STRATÉGIE - 6 signaux qualité maximale
+    
+    Priorités absolues:
+    1. QUALITÉ MAXIMALE pour 6 signaux
+    2. Pas de compromis sur les filtres
+    3. Si conditions optimales, extension à 8 signaux
     """
     
     if len(df) < 30:
-        print("[SAINT-GRAAL] ⚠️ Données insuffisantes")
+        print("[STRATEGIE] ⚠️ Données insuffisantes")
         return None
     
-    # Calculer le besoin de garantie
-    signals_still_needed = total_signals_needed - signal_count
-    signals_remaining = total_signals_needed - signal_count if signal_count < total_signals_needed else 0
+    # Objectif principal: 6 signaux qualité max
+    target_signals = SAINT_GRAAL_CONFIG['target_signals']
+    max_signals = SAINT_GRAAL_CONFIG['max_signals']
     
-    # Déterminer la sévérité basée sur la progression de la session
-    if signal_count == 0:
-        # Premier signal : mode strict
-        mode = "STRICT"
-        guarantee_needed = False
-    elif signals_still_needed > 3:
-        # Encore beaucoup de signaux nécessaires : mode normal
-        mode = "STRICT"
-        guarantee_needed = False
-    elif signals_still_needed > 0:
-        # Peu de signaux restants : activer garantie si nécessaire
-        mode = "STRICT"
-        guarantee_needed = True
-    else:
-        # Session complète
+    # Calculer l'urgence réelle
+    signals_remaining = target_signals - signal_count
+    urgency = signals_remaining / target_signals if signals_remaining > 0 else 0
+    
+    print(f"\n[STRATEGIE] 🎯 Signal #{signal_count+1}/{target_signals} | Urgence: {urgency:.0%}")
+    
+    # Vérifier anti-manipulation STRICT (toujours)
+    manip_ok, manip_reason = check_anti_manipulation(df, strict_mode=True)
+    if not manip_ok:
+        print(f"[STRATEGIE] ⚠️ Anti-manip: {manip_reason}")
         return None
     
-    print(f"\n[SAINT-GRAAL] 🔍 Mode: {mode} | Signal: {signal_count+1}/8")
-    print(f"[SAINT-GRAAL] 📊 Signaux restants: {signals_still_needed}")
-    
-    # ===== 1. ESSAYER MODE STRICT D'ABORD =====
-    
-    strict_signal = rule_signal_saint_graal_strict(df)
-    
-    if strict_signal:
-        print(f"[SAINT-GRAAL] ✅ Signal STRICT trouvé: {strict_signal}")
-        return {
-            'signal': strict_signal,
-            'mode': 'STRICT',
-            'quality': 'HIGH',
-            'score': calculate_signal_quality_score(df)
-        }
-    
-    print(f"[SAINT-GRAAL] ⚠️ Pas de signal strict")
-    
-    # ===== 2. SI GARANTIE NÉCESSAIRE, ESSAYER MODE GARANTIE =====
-    
-    if guarantee_needed and signals_still_needed > 0:
-        print(f"[SAINT-GRAAL] 🔄 Activation mode GARANTIE (signaux restants: {signals_still_needed})")
-        
-        guarantee_signal = rule_signal_saint_graal_guarantee(df)
-        
-        if guarantee_signal:
-            print(f"[SAINT-GRAAL] ✅ Signal GARANTIE trouvé: {guarantee_signal}")
-            return {
-                'signal': guarantee_signal,
-                'mode': 'GUARANTEE',
-                'quality': 'MEDIUM',
-                'score': calculate_signal_quality_score(df) * 0.8  # Réduction de 20% pour garantie
-            }
-        
-        print(f"[SAINT-GRAAL] ⚠️ Pas de signal garantie")
-    
-    # ===== 3. DERNIER RECOURS POUR GARANTIR LA SESSION =====
-    
-    if signals_still_needed > 0 and signal_count < total_signals_needed:
-        # Calculer l'urgence (plus on approche de la fin, plus on est urgent)
-        urgency = (total_signals_needed - signal_count) / total_signals_needed
-        
-        if urgency > 0.5:  # Plus de la moitié des signaux manquants
-            print(f"[SAINT-GRAAL] 🚨 DERNIER RECOURS (urgence: {urgency:.0%})")
-            
-            last_resort_signal = rule_signal_last_resort(df)
-            
-            if last_resort_signal:
-                print(f"[SAINT-GRAAL] ✅ Signal DERNIER RECOURS: {last_resort_signal}")
+    # ===== 1. QUALITÉ MAXIMALE (signaux 1-6) =====
+    if signal_count < target_signals:
+        max_quality_signal = rule_signal_max_quality(df)
+        if max_quality_signal:
+            quality_score = calculate_signal_quality(df, max_quality_signal)
+            if quality_score >= 85:  # Seuil très élevé
+                print(f"[STRATEGIE] ✅ Signal QUALITÉ MAX #{signal_count+1} | Score: {quality_score}/100")
                 return {
-                    'signal': last_resort_signal,
-                    'mode': 'LAST_RESORT',
-                    'quality': 'LOW',
-                    'score': calculate_signal_quality_score(df) * 0.6  # Réduction de 40%
+                    'signal': max_quality_signal,
+                    'mode': 'MAX_QUALITY',
+                    'quality': 'EXCELLENT',
+                    'score': quality_score
+                }
+            else:
+                print(f"[STRATEGIE] ⚠️ Qualité insuffisante: {quality_score}/100")
+    
+    # ===== 2. EXTENSION OPTIONNELLE (signaux 7-8) =====
+    elif signal_count < max_signals:
+        print(f"[STRATEGIE] 🔄 Mode extension (signal {signal_count+1})")
+        extended_signal = rule_signal_high_quality(df)
+        if extended_signal:
+            quality_score = calculate_signal_quality(df, extended_signal)
+            if quality_score >= 70:  # Seuil élevé pour extension
+                print(f"[STRATEGIE] ✅ Signal EXTENSION #{signal_count+1} | Score: {quality_score}/100")
+                return {
+                    'signal': extended_signal,
+                    'mode': 'EXTENSION',
+                    'quality': 'HIGH',
+                    'score': quality_score
                 }
     
-    print(f"[SAINT-GRAAL] ❌ Aucun signal possible")
+    print(f"[STRATEGIE] ❌ Pas de signal qualité suffisante")
     return None
 
-def rule_signal_saint_graal_strict(df):
-    """Mode STRICT - Haute qualité, seuils élevés"""
-    if len(df) < 30:
+def rule_signal_max_quality(df):
+    """QUALITÉ MAXIMALE - Filtres très stricts"""
+    if len(df) < 25:
         return None
     
-    config = SAINT_GRAAL_CONFIG['strict']
+    config = SAINT_GRAAL_CONFIG['max_quality']
     last = df.iloc[-1]
     prev = df.iloc[-2]
     
-    # ===== FILTRES DE SÉCURITÉ STRICTS =====
+    # ===== FILTRES ABSOLUS =====
     
-    if last['data_quality'] < 0.8:
+    # 1. Qualité données exceptionnelle
+    if last['data_quality'] < 0.9:
         return None
     
-    if last['bb_width'] > 0.035:
-        return None
-    
+    # 2. ADX fort (tendance claire)
     if last['adx'] < config['adx_min']:
         return None
     
-    if last['rsi_7'] > config['rsi_overbought'] or last['rsi_7'] < config['rsi_oversold']:
+    # 3. Convergence très forte (4+/5 indicateurs alignés)
+    if last['convergence_raw'] < 4:
         return None
     
-    # ===== ANALYSE CALL STRICTE =====
+    # 4. Bougie de qualité (corps significatif)
+    if last['body_ratio'] < config['min_body_ratio']:
+        return None
     
-    call_score = 0
-    max_call_score = 12
+    # 5. Pas de mèches suspectes
+    if last['wick_ratio'] > config['max_wick_ratio']:
+        return None
     
-    # 1. Tendance (3 points)
-    if last['ema_5'] > last['ema_13'] > last['ema_20']:
-        call_score += 3
+    # ===== ANALYSE CALL MAX QUALITY =====
     
-    # 2. MACD (2 points)
-    if last['macd'] > last['macd_signal'] and last['macd_diff'] > 0:
-        call_score += 2
+    call_points = 0
+    max_points = 10
     
-    # 3. RSI optimal (2 points)
-    if 55 < last['rsi_7'] < 65:
-        call_score += 2
+    # 1. EMA alignées et écarté (3 points)
+    if last['ema_5'] > last['ema_13'] and last['ema_spread'] > 0.001:
+        call_points += 3
     
-    # 4. ADX +DI (2 points)
-    if last['adx_pos'] > last['adx_neg'] and last['adx_pos'] > 25:
-        call_score += 2
+    # 2. RSI optimal (58-67) (2 points)
+    if 58 < last['rsi_7'] < config['rsi_overbought']:
+        call_points += 2
     
-    # 5. Stochastic (1 point)
-    if last['stoch_k'] > last['stoch_d'] and 50 < last['stoch_k'] < 75:
-        call_score += 1
+    # 3. Stochastique directionnel mais pas overbought (2 points)
+    if last['stoch_k'] > last['stoch_d'] and last['stoch_k'] < config['stoch_overbought']:
+        call_points += 2
     
-    # 6. Price action (2 points)
-    if last['bullish_candle'] == 1 and last['body_ratio'] > 0.4:
-        call_score += 2
+    # 4. ADX +DI fort (2 points)
+    if last['adx_pos'] > last['adx_neg'] and last['adx_pos'] > 28:
+        call_points += 2
     
-    call_percentage = (call_score / max_call_score) * 100
+    # 5. Bougie haussière forte (1 point)
+    if last['price_trend'] == 1 and last['candle_body'] > 0:
+        call_points += 1
     
-    # ===== ANALYSE PUT STRICTE =====
+    # ===== ANALYSE PUT MAX QUALITY =====
     
-    put_score = 0
-    max_put_score = 12
+    put_points = 0
     
-    # 1. Tendance (3 points)
-    if last['ema_5'] < last['ema_13'] < last['ema_20']:
-        put_score += 3
+    # 1. EMA alignées et écarté
+    if last['ema_5'] < last['ema_13'] and last['ema_spread'] > 0.001:
+        put_points += 3
     
-    # 2. MACD (2 points)
-    if last['macd'] < last['macd_signal'] and last['macd_diff'] < 0:
-        put_score += 2
+    # 2. RSI optimal (33-42)
+    if config['rsi_oversold'] < last['rsi_7'] < 42:
+        put_points += 2
     
-    # 3. RSI optimal (2 points)
-    if 35 < last['rsi_7'] < 45:
-        put_score += 2
+    # 3. Stochastique directionnel mais pas oversold
+    if last['stoch_k'] < last['stoch_d'] and last['stoch_k'] > config['stoch_oversold']:
+        put_points += 2
     
-    # 4. ADX -DI (2 points)
-    if last['adx_neg'] > last['adx_pos'] and last['adx_neg'] > 25:
-        put_score += 2
+    # 4. ADX -DI fort
+    if last['adx_neg'] > last['adx_pos'] and last['adx_neg'] > 28:
+        put_points += 2
     
-    # 5. Stochastic (1 point)
-    if last['stoch_k'] < last['stoch_d'] and 25 < last['stoch_k'] < 50:
-        put_score += 1
+    # 5. Bougie baissière forte
+    if last['price_trend'] == 0 and last['candle_body'] < 0:
+        put_points += 1
     
-    # 6. Price action (2 points)
-    if last['bearish_candle'] == 1 and last['body_ratio'] > 0.4:
-        put_score += 2
+    # ===== DÉCISION STRICTE =====
     
-    put_percentage = (put_score / max_put_score) * 100
+    min_points = config['min_confluence_points']
     
-    # ===== DÉCISION =====
-    
-    min_score = config['min_score_required']
-    min_percentage = config['min_percentage_required']
-    
-    if call_score >= min_score and call_percentage >= min_percentage and call_score > put_score:
+    if call_points >= min_points and call_points > put_points:
         return 'CALL'
-    
-    if put_score >= min_score and put_percentage >= min_percentage and put_score > call_score:
+    if put_points >= min_points and put_points > call_points:
         return 'PUT'
+    
+    # Si égalité mais points élevés, choisir basé sur RSI
+    if call_points == put_points and call_points >= min_points:
+        if last['rsi_7'] > 50:
+            return 'CALL'
+        else:
+            return 'PUT'
     
     return None
 
-def rule_signal_saint_graal_guarantee(df):
-    """Mode GARANTIE - Conditions plus souples mais filtrées"""
+def rule_signal_high_quality(df):
+    """QUALITÉ ÉLEVÉE - Pour extension à 8 signaux"""
     if len(df) < 20:
         return None
     
-    config = SAINT_GRAAL_CONFIG['guarantee']
+    config = SAINT_GRAAL_CONFIG['high_quality']
     last = df.iloc[-1]
     prev = df.iloc[-2]
     
-    # ===== FILTRES DE SÉCURITÉ MODÉRÉS =====
-    
-    if last['data_quality'] < 0.6:
+    # Filtres toujours stricts
+    if last['data_quality'] < 0.8:
         return None
-    
-    if last['bb_width'] > 0.045:
-        return None
-    
     if last['adx'] < config['adx_min']:
         return None
     
-    # ===== ANALYSE CALL GARANTIE =====
+    # Conditions simplifiées mais robustes
+    call_conditions = [
+        last['ema_5'] > last['ema_13'],
+        last['rsi_7'] > 52,
+        last['stoch_k'] > last['stoch_d'],
+        last['adx_pos'] > last['adx_neg'],
+        last['close'] > prev['close'],
+        last['body_ratio'] > config['min_body_ratio'],
+        last['wick_ratio'] < config['max_wick_ratio'],
+    ]
     
-    call_conditions = []
-    
-    # Conditions plus souples
-    call_conditions.append(last['ema_5'] > last['ema_13'])
-    call_conditions.append(last['macd'] > last['macd_signal'])
-    call_conditions.append(50 < last['rsi_7'] < 70)
-    call_conditions.append(last['adx_pos'] > last['adx_neg'])
-    call_conditions.append(last['stoch_k'] > last['stoch_d'])
-    call_conditions.append(last['close'] > prev['close'])
+    put_conditions = [
+        last['ema_5'] < last['ema_13'],
+        last['rsi_7'] < 48,
+        last['stoch_k'] < last['stoch_d'],
+        last['adx_neg'] > last['adx_pos'],
+        last['close'] < prev['close'],
+        last['body_ratio'] > config['min_body_ratio'],
+        last['wick_ratio'] < config['max_wick_ratio'],
+    ]
     
     call_score = sum(call_conditions)
-    
-    # ===== ANALYSE PUT GARANTIE =====
-    
-    put_conditions = []
-    
-    put_conditions.append(last['ema_5'] < last['ema_13'])
-    put_conditions.append(last['macd'] < last['macd_signal'])
-    put_conditions.append(30 < last['rsi_7'] < 50)
-    put_conditions.append(last['adx_neg'] > last['adx_pos'])
-    put_conditions.append(last['stoch_k'] < last['stoch_d'])
-    put_conditions.append(last['close'] < prev['close'])
-    
     put_score = sum(put_conditions)
     
-    # ===== DÉCISION =====
-    
-    min_conditions = 4  # 4/6 conditions minimum
+    min_conditions = config['min_confluence_points']
     
     if call_score >= min_conditions and call_score > put_score:
         return 'CALL'
-    
     if put_score >= min_conditions and put_score > call_score:
         return 'PUT'
     
     return None
 
-def rule_signal_last_resort(df):
-    """Dernier recours - Conditions minimales pour compléter la session"""
-    if len(df) < 10:
-        return None
+# ================= FONCTIONS DE QUALITÉ =================
+
+def calculate_signal_quality(df, direction):
+    """Calcule un score de qualité (0-100) très strict"""
+    if len(df) < 20:
+        return 0
     
     last = df.iloc[-1]
+    score = 0
     
-    # Analyse très simple basée sur RSI et prix
-    if last['rsi_7'] > 50 and last['close'] > last['ema_5']:
-        return 'CALL'
-    elif last['rsi_7'] < 50 and last['close'] < last['ema_5']:
-        return 'PUT'
+    # 1. CONVERGENCE (40 points max)
+    convergence = last['convergence_raw']
+    if convergence == 5:
+        score += 40
+    elif convergence == 4:
+        score += 30
+    elif convergence == 3:
+        score += 20
     
-    # Dernier recours absolu : direction du dernier mouvement
-    prices = df['close'].tail(5).values
-    if prices[-1] > prices[-2]:
-        return 'CALL'
+    # 2. FORCE DE TENDANCE (30 points)
+    if last['adx'] > 30:
+        score += 30
+    elif last['adx'] > 25:
+        score += 25
+    elif last['adx'] > 20:
+        score += 20
+    
+    # 3. QUALITÉ BOUGIE (20 points)
+    if last['body_ratio'] > 0.5:
+        score += 15
+    elif last['body_ratio'] > 0.4:
+        score += 10
+    elif last['body_ratio'] > 0.3:
+        score += 5
+    
+    if last['wick_ratio'] < 0.3:
+        score += 5
+    
+    # 4. MOMENTUM (10 points)
+    if direction == 'CALL':
+        if 60 < last['rsi_7'] < 65:
+            score += 10
+        elif 55 < last['rsi_7'] < 70:
+            score += 7
+        elif last['rsi_7'] > 50:
+            score += 4
+    else:  # PUT
+        if 35 < last['rsi_7'] < 40:
+            score += 10
+        elif 30 < last['rsi_7'] < 45:
+            score += 7
+        elif last['rsi_7'] < 50:
+            score += 4
+    
+    return min(score, 100)
+
+def format_signal_reason(direction, quality_score, indicators):
+    """Formate la raison du signal"""
+    last = indicators.iloc[-1]
+    
+    reason_parts = [f"🎯 {direction} - QUALITÉ MAX"]
+    
+    # Évaluation qualité
+    if quality_score >= 90:
+        reason_parts.append("⭐⭐⭐⭐⭐")
+    elif quality_score >= 85:
+        reason_parts.append("⭐⭐⭐⭐")
+    elif quality_score >= 80:
+        reason_parts.append("⭐⭐⭐")
+    elif quality_score >= 75:
+        reason_parts.append("⭐⭐")
     else:
-        return 'PUT'
+        reason_parts.append("⭐")
+    
+    # Indicateurs clés
+    reason_parts.append(f"RSI7: {last['rsi_7']:.1f}")
+    reason_parts.append(f"ADX: {last['adx']:.1f}")
+    
+    # Convergence
+    if last['convergence_raw'] >= 4:
+        reason_parts.append("CONVERGENCE: EXCELLENTE")
+    elif last['convergence_raw'] >= 3:
+        reason_parts.append("CONVERGENCE: BONNE")
+    
+    return " | ".join(reason_parts)
 
 # ================= FONCTIONS DE COMPATIBILITÉ =================
 
@@ -527,136 +530,26 @@ def compute_indicators(df, ema_fast=8, ema_slow=21, rsi_len=14, bb_len=20):
     """Wrapper pour compatibilité"""
     return compute_saint_graal_indicators(df)
 
-def rule_signal_ultra_strict(df, session_priority=3):
-    """Wrapper pour compatibilité avec le bot existant"""
-    # Pour utiliser avec le bot, nous avons besoin de signal_count et total_signals
-    # Par défaut, nous utilisons une version simple
-    result = rule_signal_saint_graal_with_guarantee(
-        df, 
-        session_priority, 
-        signal_count=0,  # À remplacer par le vrai count dans le bot
-        total_signals_needed=8
-    )
-    
-    if result:
-        return result['signal']
-    return None
-
 def rule_signal(df):
-    """Par défaut, utilise Saint Graal avec garantie"""
-    result = rule_signal_saint_graal_with_guarantee(df, signal_count=0, total_signals_needed=8)
-    if result:
-        return result['signal']
-    return None
+    """Version par défaut (6 signaux qualité max)"""
+    result = rule_signal_saint_graal_with_guarantee(df, signal_count=0, total_signals_needed=6)
+    return result['signal'] if result else None
 
-def calculate_signal_quality_score(df):
-    """Calcule un score de qualité global du signal (0-100)"""
-    if len(df) < 20:
-        return 0
-    
-    last = df.iloc[-1]
-    score = 0
-    
-    # Convergence (30 points max)
-    convergence = last.get('trend_score', 0.5)
-    score += convergence * 30
-    
-    # Force de la tendance (25 points)
-    adx = last.get('adx', 0)
-    if adx > 30:
-        score += 25
-    elif adx > 25:
-        score += 20
-    elif adx > 20:
-        score += 15
-    elif adx > 15:
-        score += 10
-    
-    # Alignement des indicateurs (20 points)
-    aligned_indicators = 0
-    if last.get('ema_5', 0) > last.get('ema_13', 0):
-        aligned_indicators += 1
-    if last.get('macd', 0) > last.get('macd_signal', 0):
-        aligned_indicators += 1
-    if last.get('rsi_7', 50) > 50:
-        aligned_indicators += 1
-    if last.get('stoch_k', 50) > last.get('stoch_d', 50):
-        aligned_indicators += 1
-    
-    score += (aligned_indicators / 4) * 20
-    
-    # Volatilité contrôlée (15 points)
-    bb_width = last.get('bb_width', 0)
-    if 0.01 < bb_width < 0.03:
-        score += 15
-    elif 0.005 < bb_width < 0.04:
-        score += 10
-    elif 0.002 < bb_width < 0.05:
-        score += 5
-    
-    # Volume (10 points) - si disponible
-    if 'price_vs_vwap' in last:
-        if abs(last['price_vs_vwap']) < 0.002:
-            score += 10
-        elif abs(last['price_vs_vwap']) < 0.005:
-            score += 5
-    
-    return min(score, 100)
-
-def format_signal_reason(direction, confidence, indicators):
-    """Formate une raison lisible pour le signal"""
-    last = indicators.iloc[-1]
-    
-    reason_parts = [f"SAINT-GRAAL {direction}"]
-    
-    # Qualité du signal
-    quality_score = calculate_signal_quality_score(indicators)
-    if quality_score >= 80:
-        reason_parts.append("QUALITÉ: EXCELLENTE")
-    elif quality_score >= 70:
-        reason_parts.append("QUALITÉ: BONNE")
-    elif quality_score >= 60:
-        reason_parts.append("QUALITÉ: MOYENNE")
-    else:
-        reason_parts.append("QUALITÉ: FAIBLE")
-    
-    # Indicateurs clés
-    reason_parts.append(f"RSI7: {last.get('rsi_7', 0):.1f}")
-    reason_parts.append(f"ADX: {last.get('adx', 0):.1f}")
-    
-    # Convergence
-    convergence = last.get('trend_score', 0)
-    if convergence > 0.7:
-        reason_parts.append("CONVERGENCE: FORTE")
-    
-    return " | ".join(reason_parts)
-
-def is_kill_zone_optimal(hour_utc):
-    """Zones temporelles optimales"""
-    if 7 <= hour_utc < 10:
-        return True, "London Open", 5
-    if 13 <= hour_utc < 16:
-        return True, "NY Open", 5
-    if 10 <= hour_utc < 12:
-        return True, "London/NY Overlap", 5
-    if 1 <= hour_utc < 4:
-        return True, "Asia Close", 3
-    return False, None, 0
-
-# ================= FONCTIONS DE GESTION =================
-
-def get_signal_with_metadata(df, signal_count=0, total_signals=8):
-    """
-    Fonction principale pour obtenir un signal avec métadonnées
-    À utiliser dans le bot pour suivre la progression
-    """
-    result = rule_signal_saint_graal_with_guarantee(
-        df, 
-        signal_count=signal_count,
-        total_signals_needed=total_signals
-    )
+def get_signal_with_metadata(df, signal_count=0, total_signals=6):
+    """Fonction principale pour le bot"""
+    result = rule_signal_saint_graal_with_guarantee(df, signal_count, total_signals)
     
     if result:
+        # Adapter total_signals si extension
+        if signal_count >= 6 and result['mode'] == 'EXTENSION':
+            total_signals = 8
+        
+        quality_text = {
+            'EXCELLENT': 'EXCELLENTE',
+            'HIGH': 'ÉLEVÉE',
+            'EXTENSION': 'EXTENSION'
+        }.get(result['quality'], 'STANDARD')
+        
         return {
             'direction': result['signal'],
             'mode': result['mode'],
@@ -664,9 +557,51 @@ def get_signal_with_metadata(df, signal_count=0, total_signals=8):
             'score': result['score'],
             'reason': format_signal_reason(
                 result['signal'], 
-                result['score']/100, 
+                result['score'], 
                 df
-            )
+            ),
+            'session_info': {
+                'current_signal': signal_count + 1,
+                'total_signals': total_signals,
+                'target_quality': 'MAXIMALE'
+            }
         }
     
     return None
+
+# ================= FONCTIONS DE TIMING OPTIMAL =================
+
+def is_optimal_trading_hour(hour_utc):
+    """Heures de trading optimales (London/NY)"""
+    # London Open (7-10 UTC) - Meilleure liquidité
+    if 7 <= hour_utc < 10:
+        return True, "London Open", 10
+    
+    # NY Open (13-16 UTC) - Volatilité élevée
+    if 13 <= hour_utc < 16:
+        return True, "NY Open", 9
+    
+    # Overlap London/NY (10-12 UTC)
+    if 10 <= hour_utc < 12:
+        return True, "London/NY Overlap", 8
+    
+    # Asia Close (1-4 UTC) - Mouvements techniques
+    if 1 <= hour_utc < 4:
+        return True, "Asia Close", 6
+    
+    return False, "Heure non optimale", 3
+
+def check_timing_quality(current_minute, current_second):
+    """Vérifie la qualité du timing"""
+    # Éviter début/fin de bougie
+    if current_second < 10:
+        return False, f"Début bougie ({current_second}s)"
+    
+    if current_second > 50:
+        return False, f"Fin bougie ({current_second}s)"
+    
+    # Préférer milieu de bougie
+    if 20 <= current_second <= 40:
+        return True, "Timing optimal"
+    
+    return True, "Timing acceptable"
