@@ -474,7 +474,7 @@ async def generate_m1_signal(user_id, app):
         session = active_sessions[user_id]
         
         # Rotation paires
-        active_pairs = PAIRS[:3]
+        active_pairs = PAIRS[:4]
         pair = active_pairs[session['signal_count'] % len(active_pairs)]
         current_pair = get_current_pair(pair)
         
