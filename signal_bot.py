@@ -1,9 +1,10 @@
 """
-Bot de trading M1 - Version Saint Graal avec Garantie
+Bot de trading M1 - Version Saint Graal avec Garantie et Analyse Structure
 8 signaux garantis par session avec stratégie Saint Graal Forex M1
 Support OTC (crypto) le week-end via APIs multiples
 Signal envoyé immédiatement avec timing 2 minutes avant entrée
 Compatibilité avec utils.py Saint Graal - Version avec analyse structure
+Débogage détaillé: heures, prix, paires, APIs, broker Pocket Option
 """
 
 import os, json, asyncio, random
@@ -708,6 +709,10 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /forceverify <id> - Forcer vérification\n"
         "• /forceall - Forcer toutes vérifications\n"
         "• /debugverif - Debug vérification\n\n"
+        "**🐛 Debug Signal:**\n"
+        "• /debugsignal <id> - Debug complet signal\n"
+        "• /debugrecent [n] - Debug derniers signaux\n"
+        "• /debugpo <id> - Debug Pocket Option\n\n"
         "**⚠️ Erreurs:**\n"
         "• /lasterrors - Dernières erreurs\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
@@ -1331,7 +1336,648 @@ async def cmd_pattern(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {e}")
 
-# ================= AUTRES COMMANDES (inchangées) =================
+# ================= COMMANDES DEBUG SIGNAL =================
+
+async def cmd_debug_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Débogue un signal spécifique avec toutes les informations techniques
+    Inclut: heures, prix, paire, API utilisée, broker Pocket Option
+    """
+    try:
+        if not context.args:
+            await update.message.reply_text(
+                "❌ Usage: /debugsignal <signal_id>\n"
+                "Exemple: /debugsignal 123\n\n"
+                "ℹ️ Affiche tous les détails techniques du signal:\n"
+                "• Heures d'entrée/sortie (UTC/Haïti)\n"
+                "• Prix d'entrée/sortie\n"
+                "• Paire (originale/convertie)\n"
+                "• API utilisée (TwelveData/OTC)\n"
+                "• Détails broker Pocket Option\n"
+                "• Analyse structure\n"
+                "• Stratégie utilisée\n"
+                "• Confiance ML\n"
+                "• Timing exact"
+            )
+            return
+        
+        signal_id = int(context.args[0])
+        
+        msg = await update.message.reply_text(f"🔍 Debug signal #{signal_id}...")
+        
+        with engine.connect() as conn:
+            # Récupérer le signal avec toutes les colonnes
+            signal = conn.execute(
+                text("""
+                    SELECT 
+                        id, pair, direction, reason, ts_enter, ts_exit,
+                        entry_price, exit_price, result, confidence,
+                        payload_json, ts_send, timeframe
+                    FROM signals 
+                    WHERE id = :sid
+                """),
+                {"sid": signal_id}
+            ).fetchone()
+            
+            if not signal:
+                await msg.edit_text(f"❌ Signal #{signal_id} non trouvé")
+                return
+            
+            # Récupérer les résultats de vérification si disponibles
+            verification = None
+            if signal.result:
+                verification = conn.execute(
+                    text("""
+                        SELECT verification_method, verified_at, 
+                               broker_trade_id, broker_response
+                        FROM signal_verifications 
+                        WHERE signal_id = :sid
+                    """),
+                    {"sid": signal_id}
+                ).fetchone()
+        
+        # Extraire les données du signal
+        (sig_id, pair, direction, reason, ts_enter, ts_exit,
+         entry_price, exit_price, result, confidence,
+         payload_json, ts_send, timeframe) = signal
+        
+        # Parser le payload JSON
+        payload = {}
+        mode = "Forex"
+        api_source = "TwelveData"
+        structure_info = {}
+        timing_info = {}
+        
+        if payload_json:
+            try:
+                payload = json.loads(payload_json)
+                mode = payload.get('mode', 'Forex')
+                api_source = payload.get('strategy', 'Saint Graal avec Structure')
+                structure_info = payload.get('structure_info', {})
+                timing_info = payload.get('timing_info', {})
+            except:
+                pass
+        
+        # Déterminer l'API utilisée
+        if mode == "OTC":
+            api_used = "APIs Crypto Multiples (Bybit/Binance/KuCoin/CoinGecko)"
+        else:
+            api_used = "TwelveData Forex"
+        
+        # Convertir les timestamps
+        def format_timestamp(ts, include_date=True):
+            if not ts:
+                return "N/A"
+            try:
+                if isinstance(ts, str):
+                    try:
+                        dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+                    except:
+                        dt = datetime.strptime(ts, '%Y-%m-%d %H:%M:%S')
+                else:
+                    dt = ts
+                
+                dt_utc = dt.astimezone(timezone.utc)
+                dt_haiti = dt_utc.astimezone(HAITI_TZ)
+                
+                if include_date:
+                    return f"{dt_haiti.strftime('%H:%M:%S')} ({dt_haiti.strftime('%d/%m/%Y')})"
+                else:
+                    return dt_haiti.strftime('%H:%M:%S')
+            except:
+                return str(ts)
+        
+        # Calculer les durées
+        if ts_enter and ts_exit:
+            if isinstance(ts_enter, str):
+                try:
+                    enter_dt = datetime.fromisoformat(ts_enter.replace('Z', '+00:00'))
+                except:
+                    enter_dt = datetime.strptime(ts_enter, '%Y-%m-%d %H:%M:%S')
+            else:
+                enter_dt = ts_enter
+                
+            if isinstance(ts_exit, str):
+                try:
+                    exit_dt = datetime.fromisoformat(ts_exit.replace('Z', '+00:00'))
+                except:
+                    exit_dt = datetime.strptime(ts_exit, '%Y-%m-%d %H:%M:%S')
+            else:
+                exit_dt = ts_exit
+            
+            duration = (exit_dt - enter_dt).total_seconds()
+        else:
+            duration = None
+        
+        # Construire le message de débogage
+        debug_msg = (
+            f"🔍 **DEBUG SIGNAL #{signal_id}**\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📊 **INFORMATIONS DE BASE**\n"
+            f"• ID: #{signal_id}\n"
+            f"• Paire: {pair}\n"
+            f"• Direction: {direction}\n"
+            f"• Timeframe: {timeframe} minute{'s' if timeframe != 1 else ''}\n"
+            f"• Résultat: {'✅ WIN' if result == 'WIN' else '❌ LOSE' if result == 'LOSE' else '⏳ En attente'}\n"
+            f"• Confiance: {int(confidence*100)}%\n\n"
+        )
+        
+        # Section TIMING
+        debug_msg += f"⏰ **TIMING DU TRADE**\n"
+        debug_msg += f"• Signal généré: {format_timestamp(ts_send)}\n"
+        debug_msg += f"• Entrée prévue: {format_timestamp(ts_enter)}\n"
+        
+        if timing_info:
+            signal_gen = timing_info.get('signal_generated')
+            entry_sched = timing_info.get('entry_scheduled')
+            reminder_sched = timing_info.get('reminder_scheduled')
+            delay = timing_info.get('delay_before_entry_minutes', 2)
+            
+            if signal_gen:
+                debug_msg += f"• Généré à: {format_timestamp(signal_gen)}\n"
+            if entry_sched:
+                debug_msg += f"• Entrée programmée: {format_timestamp(entry_sched)}\n"
+            if reminder_sched:
+                debug_msg += f"• Rappel programmé: {format_timestamp(reminder_sched)}\n"
+            debug_msg += f"• Délai avant entrée: {delay} minutes\n"
+        
+        debug_msg += f"• Sortie réelle: {format_timestamp(ts_exit)}\n"
+        
+        if duration:
+            debug_msg += f"• Durée du trade: {duration:.0f} secondes ({duration/60:.1f} minutes)\n"
+        
+        debug_msg += "\n"
+        
+        # Section PRIX
+        debug_msg += f"💰 **PRIX DU TRADE**\n"
+        if entry_price:
+            debug_msg += f"• Prix d'entrée: {entry_price:.5f}\n"
+        else:
+            debug_msg += f"• Prix d'entrée: Non enregistré\n"
+        
+        if exit_price:
+            debug_msg += f"• Prix de sortie: {exit_price:.5f}\n"
+            
+            if entry_price:
+                # Calculer le profit en pips
+                if 'JPY' in pair:
+                    pips = abs(exit_price - entry_price) * 100
+                else:
+                    pips = abs(exit_price - entry_price) * 10000
+                
+                profit = exit_price - entry_price if direction == 'CALL' else entry_price - exit_price
+                profit_pips = pips if profit > 0 else -pips
+                
+                debug_msg += f"• Profit/Pertes: {profit:.5f} ({profit_pips:.1f} pips)\n"
+                debug_msg += f"• Pourcentage: {(profit/entry_price*100):.2f}%\n"
+        else:
+            debug_msg += f"• Prix de sortie: Non enregistré\n"
+        
+        debug_msg += "\n"
+        
+        # Section BROKER POCKET OPTION
+        debug_msg += f"🎯 **BROKER: POCKET OPTION**\n"
+        
+        # Détails spécifiques Pocket Option pour le trade M1
+        debug_msg += f"• Type: Options binaires\n"
+        debug_msg += f"• Durée: 1 minute (M1)\n"
+        debug_msg += f"• Expiration: {format_timestamp(ts_exit) if ts_exit else 'N/A'}\n"
+        
+        if entry_price:
+            # Pour Pocket Option, le payout typique est ~85-90%
+            payout_percentage = 88  # Moyenne Pocket Option
+            debug_msg += f"• Payout typique: {payout_percentage}%\n"
+            
+            if result == 'WIN':
+                profit_amount = entry_price * (payout_percentage/100)
+                debug_msg += f"• Profit estimé: +{profit_amount:.2f}% du montant investi\n"
+            elif result == 'LOSE':
+                debug_msg += f"• Perte estimée: -100% du montant investi (perte totale)\n"
+        
+        debug_msg += f"• Avance/Recul: Oui (peut être fermé avant expiration)\n"
+        debug_msg += f"• Montant min: $1\n"
+        debug_msg += f"• Montant max: $5000\n\n"
+        
+        # Section API ET DONNÉES
+        debug_msg += f"🌐 **SOURCE DES DONNÉES**\n"
+        debug_msg += f"• Mode: {mode}\n"
+        debug_msg += f"• API utilisée: {api_used}\n"
+        
+        if payload:
+            original_pair = payload.get('original_pair', 'N/A')
+            actual_pair = payload.get('actual_pair', 'N/A')
+            
+            if original_pair != actual_pair:
+                debug_msg += f"• Paire originale: {original_pair}\n"
+                debug_msg += f"• Paire convertie: {actual_pair}\n"
+            
+            strategy_mode = payload.get('strategy_mode', 'N/A')
+            strategy_quality = payload.get('strategy_quality', 'N/A')
+            strategy_score = payload.get('strategy_score', 'N/A')
+            
+            debug_msg += f"• Stratégie: {payload.get('strategy', 'N/A')}\n"
+            debug_msg += f"• Mode stratégie: {strategy_mode}\n"
+            debug_msg += f"• Qualité: {strategy_quality}\n"
+            debug_msg += f"• Score: {strategy_score}\n"
+        
+        debug_msg += "\n"
+        
+        # Section ANALYSE STRUCTURE
+        if structure_info:
+            debug_msg += f"📊 **ANALYSE STRUCTURE**\n"
+            market_structure = structure_info.get('market_structure', 'N/A')
+            strength = structure_info.get('strength', 0)
+            near_swing_high = structure_info.get('near_swing_high', False)
+            distance_to_high = structure_info.get('distance_to_high', 0)
+            pattern_detected = structure_info.get('pattern_detected', 'N/A')
+            pattern_confidence = structure_info.get('pattern_confidence', 0)
+            
+            debug_msg += f"• Structure marché: {market_structure}\n"
+            debug_msg += f"• Force: {strength:.1f}%\n"
+            debug_msg += f"• Proche swing high: {'✅ OUI' if near_swing_high else '❌ NON'}\n"
+            
+            if near_swing_high:
+                debug_msg += f"• Distance au high: {distance_to_high:.2f}%\n"
+                if direction == 'CALL':
+                    debug_msg += f"• ⚠️ ATTENTION: ACHAT près d'un swing high\n"
+            
+            debug_msg += f"• Pattern détecté: {pattern_detected}\n"
+            debug_msg += f"• Confiance pattern: {pattern_confidence}%\n\n"
+        
+        # Section VÉRIFICATION
+        if verification:
+            debug_msg += f"🔍 **VÉRIFICATION**\n"
+            verification_method = verification[0] or 'N/A'
+            verified_at = verification[1]
+            broker_trade_id = verification[2] or 'N/A'
+            broker_response = verification[3]
+            
+            debug_msg += f"• Méthode: {verification_method}\n"
+            debug_msg += f"• Vérifié à: {format_timestamp(verified_at)}\n"
+            debug_msg += f"• ID trade broker: {broker_trade_id}\n"
+            
+            if broker_response:
+                try:
+                    broker_data = json.loads(broker_response)
+                    if isinstance(broker_data, dict):
+                        for key, value in broker_data.items():
+                            debug_msg += f"• {key}: {value}\n"
+                except:
+                    debug_msg += f"• Réponse broker: {broker_response[:100]}...\n"
+            
+            debug_msg += "\n"
+        
+        # Section RECOMMANDATIONS POCKET OPTION
+        debug_msg += f"💡 **RECOMMANDATIONS POCKET OPTION**\n"
+        
+        if result == 'WIN':
+            debug_msg += (
+                f"✅ Trade réussi!\n"
+                f"• Payout: Environ 88%\n"
+                f"• Stratégie valide pour M1\n"
+                f"• Temps d'entrée optimal\n"
+            )
+        elif result == 'LOSE':
+            debug_msg += (
+                f"❌ Trade perdu\n"
+                f"• Analysez pourquoi:\n"
+                f"  - Timing d'entrée\n"
+                f"  - Analyse structure\n"
+                f"  - Niveau de confiance\n"
+                f"• Vérifiez les indicateurs\n"
+            )
+        else:
+            debug_msg += (
+                f"⏳ En attente de résultat\n"
+                f"• Trade toujours ouvert\n"
+                f"• Expiration dans 1 minute\n"
+                f"• Surveillez le prix\n"
+            )
+        
+        debug_msg += "\n"
+        
+        # Section LOGS D'ERREUR (si disponibles)
+        debug_msg += f"📋 **LOGS ASSOCIÉS**\n"
+        
+        # Chercher des erreurs dans les logs pour ce signal
+        signal_errors = []
+        for log in last_error_logs:
+            if str(signal_id) in log:
+                signal_errors.append(log)
+        
+        if signal_errors:
+            for error in signal_errors[-3:]:  # Dernières 3 erreurs
+                debug_msg += f"• {error}\n"
+        else:
+            debug_msg += f"• Aucun log d'erreur trouvé\n"
+        
+        debug_msg += "\n━━━━━━━━━━━━━━━━━━━━\n"
+        debug_msg += "🔧 Utilisez /signalinfo pour un résumé rapide"
+        
+        await msg.edit_text(debug_msg)
+        
+    except Exception as e:
+        error_msg = f"❌ Erreur debug signal: {str(e)[:200]}"
+        print(error_msg)
+        import traceback
+        traceback.print_exc()
+        await update.message.reply_text(error_msg)
+
+async def cmd_debug_recent_signals(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Débogue les derniers signaux avec informations essentielles"""
+    try:
+        limit = 5
+        if context.args:
+            try:
+                limit = int(context.args[0])
+                limit = min(limit, 10)  # Limiter à 10 signaux max
+            except:
+                pass
+        
+        with engine.connect() as conn:
+            signals = conn.execute(
+                text("""
+                    SELECT 
+                        id, pair, direction, ts_enter, ts_exit,
+                        entry_price, exit_price, result, confidence,
+                        payload_json
+                    FROM signals 
+                    WHERE timeframe = 1
+                    ORDER BY id DESC
+                    LIMIT :limit
+                """),
+                {"limit": limit}
+            ).fetchall()
+        
+        if not signals:
+            await update.message.reply_text("ℹ️ Aucun signal M1 trouvé")
+            return
+        
+        debug_msg = f"🔍 **DEBUG {len(signals)} DERNIERS SIGNAUX M1**\n"
+        debug_msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
+        
+        for signal in signals:
+            (sig_id, pair, direction, ts_enter, ts_exit,
+             entry_price, exit_price, result, confidence,
+             payload_json) = signal
+            
+            # Parser payload pour API utilisée
+            api_used = "TwelveData"
+            mode = "Forex"
+            if payload_json:
+                try:
+                    payload = json.loads(payload_json)
+                    mode = payload.get('mode', 'Forex')
+                    if mode == "OTC":
+                        api_used = "APIs Crypto"
+                except:
+                    pass
+            
+            # Formater les timestamps
+            def format_time(ts):
+                if not ts:
+                    return "N/A"
+                try:
+                    if isinstance(ts, str):
+                        try:
+                            dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+                        except:
+                            dt = datetime.strptime(ts, '%Y-%m-%d %H:%M:%S')
+                    else:
+                        dt = ts
+                    
+                    return dt.astimezone(HAITI_TZ).strftime('%H:%M')
+                except:
+                    return "N/A"
+            
+            # Calculer le résultat
+            result_emoji = "✅" if result == 'WIN' else "❌" if result == 'LOSE' else "⏳"
+            result_text = result if result else "En cours"
+            
+            # Calculer profit si disponible
+            profit_text = ""
+            if entry_price and exit_price:
+                if 'JPY' in pair:
+                    pips = abs(exit_price - entry_price) * 100
+                else:
+                    pips = abs(exit_price - entry_price) * 10000
+                
+                profit = exit_price - entry_price if direction == 'CALL' else entry_price - exit_price
+                profit_pips = pips if profit > 0 else -pips
+                profit_text = f" | {profit_pips:+.1f} pips"
+            
+            debug_msg += (
+                f"#{sig_id} - {pair}\n"
+                f"  {direction} | {int(confidence*100)}% | {result_emoji} {result_text}{profit_text}\n"
+                f"  Entrée: {format_time(ts_enter)} | Sortie: {format_time(ts_exit)}\n"
+                f"  API: {api_used} | Prix: {entry_price or 'N/A'} → {exit_price or 'N/A'}\n"
+            )
+            
+            # Ajouter info structure si disponible
+            if payload_json:
+                try:
+                    payload = json.loads(payload_json)
+                    structure_info = payload.get('structure_info', {})
+                    if structure_info.get('near_swing_high', False) and direction == 'CALL':
+                        distance = structure_info.get('distance_to_high', 0)
+                        debug_msg += f"  ⚠️ Achat près swing high ({distance:.1f}%)\n"
+                except:
+                    pass
+            
+            debug_msg += "\n"
+        
+        debug_msg += "━━━━━━━━━━━━━━━━━━━━\n"
+        debug_msg += f"💡 Utilisez /debugsignal <id> pour plus de détails"
+        
+        await update.message.reply_text(debug_msg)
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur: {e}")
+
+async def cmd_debug_pocket_option(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Débogue spécifiquement pour Pocket Option avec paramètres de trading"""
+    try:
+        if not context.args:
+            await update.message.reply_text(
+                "❌ Usage: /debugpo <signal_id>\n"
+                "Exemple: /debugpo 123\n\n"
+                "ℹ️ Affiche les paramètres Pocket Option:\n"
+                "• Montant recommandé\n"
+                "• Heure d'expiration\n"
+                "• Payout estimé\n"
+                "• Stop Loss/Take Profit virtuels\n"
+                "• Risque/Récompense\n"
+                "• Statut du trade"
+            )
+            return
+        
+        signal_id = int(context.args[0])
+        
+        with engine.connect() as conn:
+            signal = conn.execute(
+                text("""
+                    SELECT 
+                        id, pair, direction, ts_enter, ts_exit,
+                        entry_price, result, confidence
+                    FROM signals 
+                    WHERE id = :sid
+                """),
+                {"sid": signal_id}
+            ).fetchone()
+            
+            if not signal:
+                await update.message.reply_text(f"❌ Signal #{signal_id} non trouvé")
+                return
+        
+        (sig_id, pair, direction, ts_enter, ts_exit,
+         entry_price, result, confidence) = signal
+        
+        # Paramètres Pocket Option
+        investment_amount = 10  # $10 par défaut
+        payout_percentage = 88  # 88% payout typique
+        
+        # Calculer le profit potentiel
+        potential_profit = investment_amount * (payout_percentage/100)
+        potential_loss = investment_amount  # Perte totale en cas d'échec
+        
+        # Calculer le risque/récompense
+        risk_reward = potential_profit / potential_loss
+        
+        # Déterminer l'expiration
+        expiration_time = "1 minute après entrée"
+        
+        # Formater l'heure d'entrée
+        if ts_enter:
+            try:
+                if isinstance(ts_enter, str):
+                    try:
+                        enter_dt = datetime.fromisoformat(ts_enter.replace('Z', '+00:00'))
+                    except:
+                        enter_dt = datetime.strptime(ts_enter, '%Y-%m-%d %H:%M:%S')
+                else:
+                    enter_dt = ts_enter
+                
+                enter_haiti = enter_dt.astimezone(HAITI_TZ)
+                entry_time_formatted = enter_haiti.strftime('%H:%M:%S')
+                
+                # Calculer l'expiration (entrée + 1 minute)
+                expiration_dt = enter_haiti + timedelta(minutes=1)
+                expiration_formatted = expiration_dt.strftime('%H:%M:%S')
+                expiration_time = f"{expiration_formatted} ({enter_haiti.strftime('%d/%m')})"
+            except:
+                entry_time_formatted = "N/A"
+                expiration_time = "N/A"
+        else:
+            entry_time_formatted = "N/A"
+        
+        # Construire le message Pocket Option
+        po_msg = (
+            f"🎯 **POCKET OPTION - SIGNAL #{signal_id}**\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📊 **PARAMÈTRES DU TRADE**\n"
+            f"• Paire: {pair}\n"
+            f"• Direction: {direction}\n"
+            f"• Type: Option binaire\n"
+            f"• Durée: 1 minute (M1)\n"
+            f"• Expiration: {expiration_time}\n"
+            f"• Montant: ${investment_amount}\n"
+            f"• Payout: {payout_percentage}%\n\n"
+        )
+        
+        # Section CALCULS
+        po_msg += f"💰 **CALCULS FINANCIERS**\n"
+        po_msg += f"• Profit potentiel: +${potential_profit:.2f}\n"
+        po_msg += f"• Perte potentielle: -${potential_loss:.2f}\n"
+        po_msg += f"• Risque/Récompense: 1:{risk_reward:.2f}\n"
+        po_msg += f"• Probabilité estimée: {int(confidence*100)}%\n\n"
+        
+        # Section TIMING
+        po_msg += f"⏰ **TIMING**\n"
+        po_msg += f"• Heure d'entrée: {entry_time_formatted}\n"
+        po_msg += f"• Heure d'expiration: {expiration_time}\n"
+        
+        if ts_exit:
+            try:
+                if isinstance(ts_exit, str):
+                    try:
+                        exit_dt = datetime.fromisoformat(ts_exit.replace('Z', '+00:00'))
+                    except:
+                        exit_dt = datetime.strptime(ts_exit, '%Y-%m-%d %H:%M:%S')
+                else:
+                    exit_dt = ts_exit
+                
+                exit_haiti = exit_dt.astimezone(HAITI_TZ)
+                exit_time_formatted = exit_haiti.strftime('%H:%M:%S')
+                po_msg += f"• Heure de sortie réelle: {exit_time_formatted}\n"
+            except:
+                pass
+        
+        po_msg += "\n"
+        
+        # Section RÉSULTAT
+        po_msg += f"📈 **RÉSULTAT DU TRADE**\n"
+        
+        if result == 'WIN':
+            po_msg += (
+                f"✅ **TRADE GAGNANT**\n"
+                f"• Profit réalisé: +${potential_profit:.2f}\n"
+                f"• Retour sur investissement: +{payout_percentage}%\n"
+                f"• Trade valide pour la stratégie M1\n"
+            )
+        elif result == 'LOSE':
+            po_msg += (
+                f"❌ **TRADE PERDANT**\n"
+                f"• Perte réalisée: -${potential_loss:.2f}\n"
+                f"• Retour sur investissement: -100%\n"
+                f"• Analysez les raisons de l'échec\n"
+            )
+        else:
+            po_msg += (
+                f"⏳ **TRADE EN COURS**\n"
+                f"• Statut: Non expiré\n"
+                f"• Profit potentiel: +${potential_profit:.2f}\n"
+                f"• Surveillez l'expiration\n"
+            )
+        
+        po_msg += "\n"
+        
+        # Section RECOMMANDATIONS
+        po_msg += f"💡 **RECOMMANDATIONS POCKET OPTION**\n"
+        
+        if confidence > 0.8:
+            po_msg += (
+                f"• Confiance élevée ({int(confidence*100)}%)\n"
+                f"• Trade recommandé\n"
+                f"• Montant: ${investment_amount * 2} (risque modéré)\n"
+            )
+        elif confidence > 0.65:
+            po_msg += (
+                f"• Confiance moyenne ({int(confidence*100)}%)\n"
+                f"• Trade acceptable\n"
+                f"• Montant: ${investment_amount} (risque normal)\n"
+            )
+        else:
+            po_msg += (
+                f"• Confiance faible ({int(confidence*100)}%)\n"
+                f"• Trade risqué\n"
+                f"• Montant: ${investment_amount / 2} (risque réduit)\n"
+            )
+        
+        po_msg += (
+            f"• Avance/Recul: Disponible\n"
+            f"• Fermeture anticipée: Possible\n"
+            f"• Stop Loss virtuel: Non applicable (option binaire)\n"
+        )
+        
+        po_msg += "\n━━━━━━━━━━━━━━━━━━━━\n"
+        po_msg += f"🔧 Pour plus de détails: /debugsignal {signal_id}"
+        
+        await update.message.reply_text(po_msg)
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur debug Pocket Option: {e}")
+
+# ================= AUTRES COMMANDES =================
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Affiche les statistiques globales"""
@@ -2221,39 +2867,6 @@ async def cmd_debug_verif(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur debug: {e}")
 
-# ================= SERVEUR HTTP =================
-
-async def health_check(request):
-    """Endpoint de santé pour le serveur HTTP"""
-    return web.json_response({
-        'status': 'ok',
-        'timestamp': get_haiti_now().isoformat(),
-        'forex_open': is_forex_open(),
-        'otc_active': otc_provider.is_weekend(),
-        'active_sessions': len(active_sessions),
-        'error_logs_count': len(last_error_logs),
-        'mode': 'OTC' if otc_provider.is_weekend() else 'Forex',
-        'api_source': 'Multi-APIs' if otc_provider.is_weekend() else 'TwelveData',
-        'strategy': 'Saint Graal M1 avec Structure',
-        'signals_per_session': SIGNALS_PER_SESSION
-    })
-
-async def start_http_server():
-    """Démarre le serveur HTTP pour les checks de santé"""
-    app = web.Application()
-    app.router.add_get('/health', health_check)
-    app.router.add_get('/', health_check)
-    
-    runner = web.AppRunner(app)
-    await runner.setup()
-    
-    port = int(os.getenv('PORT', 10000))
-    site = web.TCPSite(runner, '0.0.0.0', port)
-    await site.start()
-    
-    print(f"✅ HTTP server running on :{port}")
-    return runner
-
 # ================= COMMANDES SPÉCIFIQUES SAINT GRAAL =================
 
 async def cmd_saint_graal_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2361,6 +2974,39 @@ async def cmd_force_8_signals(update: Update, context: ContextTypes.DEFAULT_TYPE
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {e}")
 
+# ================= SERVEUR HTTP =================
+
+async def health_check(request):
+    """Endpoint de santé pour le serveur HTTP"""
+    return web.json_response({
+        'status': 'ok',
+        'timestamp': get_haiti_now().isoformat(),
+        'forex_open': is_forex_open(),
+        'otc_active': otc_provider.is_weekend(),
+        'active_sessions': len(active_sessions),
+        'error_logs_count': len(last_error_logs),
+        'mode': 'OTC' if otc_provider.is_weekend() else 'Forex',
+        'api_source': 'Multi-APIs' if otc_provider.is_weekend() else 'TwelveData',
+        'strategy': 'Saint Graal M1 avec Structure',
+        'signals_per_session': SIGNALS_PER_SESSION
+    })
+
+async def start_http_server():
+    """Démarre le serveur HTTP pour les checks de santé"""
+    app = web.Application()
+    app.router.add_get('/health', health_check)
+    app.router.add_get('/', health_check)
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    
+    port = int(os.getenv('PORT', 10000))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    
+    print(f"✅ HTTP server running on :{port}")
+    return runner
+
 # ================= POINT D'ENTRÉE =================
 
 async def main():
@@ -2369,6 +3015,7 @@ async def main():
     print("\n" + "="*60)
     print("🤖 BOT SAINT GRAAL M1 - AVEC ANALYSE STRUCTURE")
     print("🎯 8 SIGNAUX GARANTIS - ÉVITE LES ACHATS AUX SOMMETS")
+    print("🔧 NOUVEAU: Debug complet signal avec Pocket Option")
     print("="*60)
     print(f"🎯 Stratégie: Saint Graal Forex M1 avec Structure")
     print(f"⚡ Signal envoyé: Immédiatement")
@@ -2377,6 +3024,7 @@ async def main():
     print(f"⚠️ Analyse: Détection swing highs/lows")
     print(f"🔧 Sources: TwelveData + Multi-APIs Crypto")
     print(f"🎯 Garantie: 8 signaux/session")
+    print(f"🐛 Debug: /debugsignal, /debugpo, /debugrecent")
     print("="*60 + "\n")
 
     ensure_db()
@@ -2414,6 +3062,11 @@ async def main():
     app.add_handler(CommandHandler('saintgraal', cmd_saint_graal_info))
     app.add_handler(CommandHandler('force8', cmd_force_8_signals))
     
+    # Commandes debug signal
+    app.add_handler(CommandHandler('debugsignal', cmd_debug_signal))
+    app.add_handler(CommandHandler('debugrecent', cmd_debug_recent_signals))
+    app.add_handler(CommandHandler('debugpo', cmd_debug_pocket_option))
+    
     # Commandes de vérification
     app.add_handler(CommandHandler('manualresult', cmd_manual_result))
     app.add_handler(CommandHandler('pending', cmd_pending_signals))
@@ -2440,7 +3093,10 @@ async def main():
     print(f"⚠️ Analyse: Détection des swing highs actif")
     print(f"🔧 Modes: STRICT → GARANTIE → LAST RESORT → FORCED")
     print(f"✅ Garantie: 8 signaux/session")
-    print(f"🔍 Nouvelles commandes: /analysestructure, /checkhigh, /pattern\n")
+    print(f"🔍 Nouvelles commandes de débogage:")
+    print(f"   • /debugsignal <id> - Debug complet signal")
+    print(f"   • /debugpo <id> - Debug Pocket Option")
+    print(f"   • /debugrecent [n] - Debug derniers signaux\n")
 
     try:
         while True:
