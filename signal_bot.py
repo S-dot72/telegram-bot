@@ -300,26 +300,152 @@ def persist_signal(payload):
         result = conn.execute(q, payload)
     return result.lastrowid
 
-def ensure_db():
-    """Initialise la base de données"""
+def fix_database_structure():
+    """Corrige la structure de la base de données"""
     try:
-        sql = open('db_schema.sql').read()
         with engine.begin() as conn:
-            for stmt in sql.split(';'):
-                if stmt.strip():
-                    conn.execute(text(stmt.strip()))
-
-        with engine.begin() as conn:
+            # Vérifier quelles colonnes existent
             result = conn.execute(text("PRAGMA table_info(signals)")).fetchall()
             existing_cols = {row[1] for row in result}
             
-            if 'timeframe' not in existing_cols:
-                conn.execute(text("ALTER TABLE signals ADD COLUMN timeframe INTEGER DEFAULT 1"))
+            print("📊 Colonnes existantes dans signals:")
+            for col in existing_cols:
+                print(f"  • {col}")
             
-            print("✅ Base de données prête")
+            # Liste des colonnes nécessaires avec leurs définitions SQL
+            required_columns = {
+                'ts_exit': 'ALTER TABLE signals ADD COLUMN ts_exit DATETIME',
+                'entry_price': 'ALTER TABLE signals ADD COLUMN entry_price REAL',
+                'exit_price': 'ALTER TABLE signals ADD COLUMN exit_price REAL',
+                'result': 'ALTER TABLE signals ADD COLUMN result TEXT',
+                'max_gales': 'ALTER TABLE signals ADD COLUMN max_gales INTEGER DEFAULT 0',
+                'timeframe': 'ALTER TABLE signals ADD COLUMN timeframe INTEGER DEFAULT 1',
+                'ts_send': 'ALTER TABLE signals ADD COLUMN ts_send DATETIME',
+                'reason': 'ALTER TABLE signals ADD COLUMN reason TEXT',
+                'confidence': 'ALTER TABLE signals ADD COLUMN confidence REAL'
+            }
+            
+            # Ajouter les colonnes manquantes
+            for col, sql in required_columns.items():
+                if col not in existing_cols:
+                    print(f"⚠️ Ajout colonne manquante: {col}")
+                    try:
+                        conn.execute(text(sql))
+                        print(f"✅ Colonne {col} ajoutée")
+                    except Exception as e:
+                        print(f"⚠️ Erreur ajout {col}: {e}")
+            
+            # Créer la table signal_verifications si elle n'existe pas
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS signal_verifications (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    signal_id INTEGER,
+                    verification_method TEXT,
+                    verified_at DATETIME,
+                    broker_trade_id TEXT,
+                    broker_response TEXT,
+                    FOREIGN KEY (signal_id) REFERENCES signals(id)
+                )
+            """))
+            
+            print("✅ Structure de base de données vérifiée et corrigée")
+            
+    except Exception as e:
+        print(f"❌ Erreur correction DB: {e}")
+        import traceback
+        traceback.print_exc()
+
+def ensure_db():
+    """Initialise la base de données avec structure complète"""
+    try:
+        # Exécuter le schéma principal
+        try:
+            if os.path.exists('db_schema.sql'):
+                sql = open('db_schema.sql').read()
+                with engine.begin() as conn:
+                    for stmt in sql.split(';'):
+                        if stmt.strip():
+                            try:
+                                conn.execute(text(stmt.strip()))
+                            except Exception as e:
+                                print(f"⚠️ Erreur exécution SQL: {e}")
+            else:
+                print("⚠️ Fichier db_schema.sql non trouvé, création basique...")
+                with engine.begin() as conn:
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS signals (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            pair TEXT NOT NULL,
+                            direction TEXT NOT NULL,
+                            reason TEXT,
+                            ts_enter DATETIME NOT NULL,
+                            ts_send DATETIME,
+                            ts_exit DATETIME,
+                            entry_price REAL,
+                            exit_price REAL,
+                            result TEXT,
+                            confidence REAL,
+                            payload_json TEXT,
+                            max_gales INTEGER DEFAULT 0,
+                            timeframe INTEGER DEFAULT 1,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                        )
+                    """))
+                    
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS subscribers (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            user_id INTEGER UNIQUE NOT NULL,
+                            username TEXT,
+                            subscribed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            last_active DATETIME
+                        )
+                    """))
+                    
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS signal_verifications (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            signal_id INTEGER,
+                            verification_method TEXT,
+                            verified_at DATETIME,
+                            broker_trade_id TEXT,
+                            broker_response TEXT,
+                            FOREIGN KEY (signal_id) REFERENCES signals(id)
+                        )
+                    """))
+        except Exception as e:
+            print(f"⚠️ Erreur création tables: {e}")
+        
+        # Vérifier et corriger la structure
+        fix_database_structure()
+        
+        # Ajouter les colonnes manquantes de manière sûre
+        with engine.begin() as conn:
+            # Liste des colonnes à vérifier/ajouter
+            columns_to_check = [
+                ('ts_exit', 'DATETIME'),
+                ('entry_price', 'REAL'),
+                ('exit_price', 'REAL'),
+                ('result', 'TEXT'),
+                ('max_gales', 'INTEGER DEFAULT 0'),
+                ('timeframe', 'INTEGER DEFAULT 1'),
+                ('ts_send', 'DATETIME'),
+                ('reason', 'TEXT'),
+                ('confidence', 'REAL')
+            ]
+            
+            for col_name, col_type in columns_to_check:
+                try:
+                    conn.execute(text(f"ALTER TABLE signals ADD COLUMN IF NOT EXISTS {col_name} {col_type}"))
+                except Exception as e:
+                    print(f"⚠️ Impossible d'ajouter {col_name}: {e}")
+        
+        print("✅ Base de données prête avec structure complète")
 
     except Exception as e:
         print(f"⚠️ Erreur DB: {e}")
+        import traceback
+        traceback.print_exc()
 
 # ================= VÉRIFICATION AUTOMATIQUE =================
 
@@ -329,7 +455,6 @@ async def auto_verify_signal(signal_id, user_id, app):
         print(f"\n[VERIF_AUTO] 🔍 Vérification auto signal #{signal_id}")
         await asyncio.sleep(180)
         print(f"[VERIF_AUTO] ✅ 3 minutes écoulées, vérification en cours...")
-        await asyncio.sleep(5)
         
         if auto_verifier is None:
             print(f"[VERIF_AUTO] ❌ auto_verifier n'est pas initialisé!")
@@ -1366,16 +1491,34 @@ async def cmd_debug_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = await update.message.reply_text(f"🔍 Debug signal #{signal_id}...")
         
         with engine.connect() as conn:
-            # Récupérer le signal avec toutes les colonnes
+            # Vérifier quelles colonnes existent
+            result = conn.execute(text("PRAGMA table_info(signals)")).fetchall()
+            existing_cols = {row[1] for row in result}
+            
+            # Construire la requête dynamiquement
+            select_cols = ["id", "pair", "direction", "reason", "ts_enter", "confidence", "payload_json"]
+            
+            if 'ts_exit' in existing_cols:
+                select_cols.append("ts_exit")
+            if 'entry_price' in existing_cols:
+                select_cols.append("entry_price")
+            if 'exit_price' in existing_cols:
+                select_cols.append("exit_price")
+            if 'result' in existing_cols:
+                select_cols.append("result")
+            if 'timeframe' in existing_cols:
+                select_cols.append("timeframe")
+            if 'ts_send' in existing_cols:
+                select_cols.append("ts_send")
+            
+            query = f"""
+                SELECT {', '.join(select_cols)}
+                FROM signals 
+                WHERE id = :sid
+            """
+            
             signal = conn.execute(
-                text("""
-                    SELECT 
-                        id, pair, direction, reason, ts_enter, ts_exit,
-                        entry_price, exit_price, result, confidence,
-                        payload_json, ts_send, timeframe
-                    FROM signals 
-                    WHERE id = :sid
-                """),
+                text(query),
                 {"sid": signal_id}
             ).fetchone()
             
@@ -1385,7 +1528,7 @@ async def cmd_debug_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             # Récupérer les résultats de vérification si disponibles
             verification = None
-            if signal.result:
+            try:
                 verification = conn.execute(
                     text("""
                         SELECT verification_method, verified_at, 
@@ -1395,11 +1538,27 @@ async def cmd_debug_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     """),
                     {"sid": signal_id}
                 ).fetchone()
+            except:
+                pass
         
-        # Extraire les données du signal
-        (sig_id, pair, direction, reason, ts_enter, ts_exit,
-         entry_price, exit_price, result, confidence,
-         payload_json, ts_send, timeframe) = signal
+        # Organiser les données du signal
+        signal_data = {}
+        for i, col in enumerate(select_cols):
+            signal_data[col] = signal[i]
+        
+        sig_id = signal_data.get('id', signal_id)
+        pair = signal_data.get('pair', 'N/A')
+        direction = signal_data.get('direction', 'N/A')
+        reason = signal_data.get('reason', 'N/A')
+        ts_enter = signal_data.get('ts_enter')
+        ts_exit = signal_data.get('ts_exit')
+        entry_price = signal_data.get('entry_price')
+        exit_price = signal_data.get('exit_price')
+        result = signal_data.get('result')
+        confidence = signal_data.get('confidence', 0)
+        payload_json = signal_data.get('payload_json')
+        timeframe = signal_data.get('timeframe', 1)
+        ts_send = signal_data.get('ts_send')
         
         # Parser le payload JSON
         payload = {}
@@ -1433,58 +1592,64 @@ async def cmd_debug_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     try:
                         dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
                     except:
-                        dt = datetime.strptime(ts, '%Y-%m-%d %H:%M:%S')
+                        try:
+                            dt = datetime.strptime(ts, '%Y-%m-%d %H:%M:%S')
+                        except:
+                            return str(ts)
                 else:
                     dt = ts
                 
-                dt_utc = dt.astimezone(timezone.utc)
+                dt_utc = dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
                 dt_haiti = dt_utc.astimezone(HAITI_TZ)
                 
                 if include_date:
                     return f"{dt_haiti.strftime('%H:%M:%S')} ({dt_haiti.strftime('%d/%m/%Y')})"
                 else:
                     return dt_haiti.strftime('%H:%M:%S')
-            except:
+            except Exception as e:
                 return str(ts)
         
         # Calculer les durées
         if ts_enter and ts_exit:
-            if isinstance(ts_enter, str):
-                try:
-                    enter_dt = datetime.fromisoformat(ts_enter.replace('Z', '+00:00'))
-                except:
-                    enter_dt = datetime.strptime(ts_enter, '%Y-%m-%d %H:%M:%S')
-            else:
-                enter_dt = ts_enter
+            try:
+                if isinstance(ts_enter, str):
+                    try:
+                        enter_dt = datetime.fromisoformat(ts_enter.replace('Z', '+00:00'))
+                    except:
+                        enter_dt = datetime.strptime(ts_enter, '%Y-%m-%d %H:%M:%S')
+                else:
+                    enter_dt = ts_enter
+                    
+                if isinstance(ts_exit, str):
+                    try:
+                        exit_dt = datetime.fromisoformat(ts_exit.replace('Z', '+00:00'))
+                    except:
+                        exit_dt = datetime.strptime(ts_exit, '%Y-%m-%d %H:%M:%S')
+                else:
+                    exit_dt = ts_exit
                 
-            if isinstance(ts_exit, str):
-                try:
-                    exit_dt = datetime.fromisoformat(ts_exit.replace('Z', '+00:00'))
-                except:
-                    exit_dt = datetime.strptime(ts_exit, '%Y-%m-%d %H:%M:%S')
-            else:
-                exit_dt = ts_exit
-            
-            duration = (exit_dt - enter_dt).total_seconds()
+                duration = (exit_dt - enter_dt).total_seconds()
+            except:
+                duration = None
         else:
             duration = None
         
         # Construire le message de débogage
         debug_msg = (
-            f"🔍 **DEBUG SIGNAL #{signal_id}**\n"
+            f"🔍 **DEBUG SIGNAL #{sig_id}**\n"
             f"━━━━━━━━━━━━━━━━━━━━\n\n"
             f"📊 **INFORMATIONS DE BASE**\n"
-            f"• ID: #{signal_id}\n"
+            f"• ID: #{sig_id}\n"
             f"• Paire: {pair}\n"
             f"• Direction: {direction}\n"
             f"• Timeframe: {timeframe} minute{'s' if timeframe != 1 else ''}\n"
             f"• Résultat: {'✅ WIN' if result == 'WIN' else '❌ LOSE' if result == 'LOSE' else '⏳ En attente'}\n"
-            f"• Confiance: {int(confidence*100)}%\n\n"
+            f"• Confiance: {int(confidence*100) if confidence else 0}%\n\n"
         )
         
         # Section TIMING
         debug_msg += f"⏰ **TIMING DU TRADE**\n"
-        debug_msg += f"• Signal généré: {format_timestamp(ts_send)}\n"
+        debug_msg += f"• Signal envoyé: {format_timestamp(ts_send)}\n"
         debug_msg += f"• Entrée prévue: {format_timestamp(ts_enter)}\n"
         
         if timing_info:
@@ -1695,17 +1860,32 @@ async def cmd_debug_recent_signals(update: Update, context: ContextTypes.DEFAULT
                 pass
         
         with engine.connect() as conn:
+            # Vérifier quelles colonnes existent
+            result = conn.execute(text("PRAGMA table_info(signals)")).fetchall()
+            existing_cols = {row[1] for row in result}
+            
+            # Construire la requête dynamiquement
+            select_cols = ["id", "pair", "direction", "ts_enter", "confidence", "payload_json"]
+            
+            if 'ts_exit' in existing_cols:
+                select_cols.append("ts_exit")
+            if 'entry_price' in existing_cols:
+                select_cols.append("entry_price")
+            if 'exit_price' in existing_cols:
+                select_cols.append("exit_price")
+            if 'result' in existing_cols:
+                select_cols.append("result")
+            
+            query = f"""
+                SELECT {', '.join(select_cols)}
+                FROM signals 
+                WHERE timeframe = 1 OR timeframe IS NULL
+                ORDER BY id DESC
+                LIMIT :limit
+            """
+            
             signals = conn.execute(
-                text("""
-                    SELECT 
-                        id, pair, direction, ts_enter, ts_exit,
-                        entry_price, exit_price, result, confidence,
-                        payload_json
-                    FROM signals 
-                    WHERE timeframe = 1
-                    ORDER BY id DESC
-                    LIMIT :limit
-                """),
+                text(query),
                 {"limit": limit}
             ).fetchall()
         
@@ -1717,9 +1897,21 @@ async def cmd_debug_recent_signals(update: Update, context: ContextTypes.DEFAULT
         debug_msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
         
         for signal in signals:
-            (sig_id, pair, direction, ts_enter, ts_exit,
-             entry_price, exit_price, result, confidence,
-             payload_json) = signal
+            # Organiser les données du signal
+            signal_data = {}
+            for i, col in enumerate(select_cols):
+                signal_data[col] = signal[i]
+            
+            sig_id = signal_data.get('id')
+            pair = signal_data.get('pair', 'N/A')
+            direction = signal_data.get('direction', 'N/A')
+            ts_enter = signal_data.get('ts_enter')
+            ts_exit = signal_data.get('ts_exit')
+            entry_price = signal_data.get('entry_price')
+            exit_price = signal_data.get('exit_price')
+            result = signal_data.get('result')
+            confidence = signal_data.get('confidence', 0)
+            payload_json = signal_data.get('payload_json')
             
             # Parser payload pour API utilisée
             api_used = "TwelveData"
@@ -1756,7 +1948,7 @@ async def cmd_debug_recent_signals(update: Update, context: ContextTypes.DEFAULT
             
             # Calculer profit si disponible
             profit_text = ""
-            if entry_price and exit_price:
+            if entry_price and exit_price and entry_price != 0:
                 if 'JPY' in pair:
                     pips = abs(exit_price - entry_price) * 100
                 else:
@@ -1814,14 +2006,28 @@ async def cmd_debug_pocket_option(update: Update, context: ContextTypes.DEFAULT_
         signal_id = int(context.args[0])
         
         with engine.connect() as conn:
+            # Vérifier quelles colonnes existent
+            result = conn.execute(text("PRAGMA table_info(signals)")).fetchall()
+            existing_cols = {row[1] for row in result}
+            
+            # Construire la requête dynamiquement
+            select_cols = ["id", "pair", "direction", "ts_enter", "confidence"]
+            
+            if 'ts_exit' in existing_cols:
+                select_cols.append("ts_exit")
+            if 'entry_price' in existing_cols:
+                select_cols.append("entry_price")
+            if 'result' in existing_cols:
+                select_cols.append("result")
+            
+            query = f"""
+                SELECT {', '.join(select_cols)}
+                FROM signals 
+                WHERE id = :sid
+            """
+            
             signal = conn.execute(
-                text("""
-                    SELECT 
-                        id, pair, direction, ts_enter, ts_exit,
-                        entry_price, result, confidence
-                    FROM signals 
-                    WHERE id = :sid
-                """),
+                text(query),
                 {"sid": signal_id}
             ).fetchone()
             
@@ -1829,8 +2035,19 @@ async def cmd_debug_pocket_option(update: Update, context: ContextTypes.DEFAULT_
                 await update.message.reply_text(f"❌ Signal #{signal_id} non trouvé")
                 return
         
-        (sig_id, pair, direction, ts_enter, ts_exit,
-         entry_price, result, confidence) = signal
+        # Organiser les données du signal
+        signal_data = {}
+        for i, col in enumerate(select_cols):
+            signal_data[col] = signal[i]
+        
+        sig_id = signal_data.get('id', signal_id)
+        pair = signal_data.get('pair', 'N/A')
+        direction = signal_data.get('direction', 'N/A')
+        ts_enter = signal_data.get('ts_enter')
+        ts_exit = signal_data.get('ts_exit')
+        entry_price = signal_data.get('entry_price')
+        result = signal_data.get('result')
+        confidence = signal_data.get('confidence', 0)
         
         # Paramètres Pocket Option
         investment_amount = 10  # $10 par défaut
@@ -1857,7 +2074,7 @@ async def cmd_debug_pocket_option(update: Update, context: ContextTypes.DEFAULT_
                 else:
                     enter_dt = ts_enter
                 
-                enter_haiti = enter_dt.astimezone(HAITI_TZ)
+                enter_haiti = enter_dt.astimezone(HAITI_TZ) if enter_dt.tzinfo else enter_dt.replace(tzinfo=timezone.utc).astimezone(HAITI_TZ)
                 entry_time_formatted = enter_haiti.strftime('%H:%M:%S')
                 
                 # Calculer l'expiration (entrée + 1 minute)
@@ -1872,7 +2089,7 @@ async def cmd_debug_pocket_option(update: Update, context: ContextTypes.DEFAULT_
         
         # Construire le message Pocket Option
         po_msg = (
-            f"🎯 **POCKET OPTION - SIGNAL #{signal_id}**\n"
+            f"🎯 **POCKET OPTION - SIGNAL #{sig_id}**\n"
             f"━━━━━━━━━━━━━━━━━━━━\n\n"
             f"📊 **PARAMÈTRES DU TRADE**\n"
             f"• Paire: {pair}\n"
@@ -1906,7 +2123,7 @@ async def cmd_debug_pocket_option(update: Update, context: ContextTypes.DEFAULT_
                 else:
                     exit_dt = ts_exit
                 
-                exit_haiti = exit_dt.astimezone(HAITI_TZ)
+                exit_haiti = exit_dt.astimezone(HAITI_TZ) if exit_dt.tzinfo else exit_dt.replace(tzinfo=timezone.utc).astimezone(HAITI_TZ)
                 exit_time_formatted = exit_haiti.strftime('%H:%M:%S')
                 po_msg += f"• Heure de sortie réelle: {exit_time_formatted}\n"
             except:
@@ -2025,7 +2242,7 @@ async def cmd_rapport(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     SUM(CASE WHEN result = 'LOSE' THEN 1 ELSE 0 END) as losses
                 FROM signals
                 WHERE ts_send >= :start AND ts_send < :end
-                AND timeframe = 1
+                AND (timeframe = 1 OR timeframe IS NULL)
                 AND result IS NOT NULL
             """)
             
@@ -2512,6 +2729,10 @@ async def cmd_manual_result(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except:
                 pass
         
+        if auto_verifier is None:
+            await update.message.reply_text("❌ auto_verifier n'est pas initialisé")
+            return
+        
         success = await auto_verifier.manual_verify_signal(signal_id, result, entry_price, exit_price)
         
         if success:
@@ -2541,15 +2762,27 @@ async def cmd_pending_signals(update: Update, context: ContextTypes.DEFAULT_TYPE
     """Affiche les signaux en attente de vérification"""
     try:
         with engine.connect() as conn:
-            signals = conn.execute(
-                text("""
-                    SELECT id, pair, direction, ts_enter, confidence, payload_json
-                    FROM signals
-                    WHERE timeframe = 1 AND result IS NULL
-                    ORDER BY ts_enter DESC
-                    LIMIT 10
-                """)
-            ).fetchall()
+            # Vérifier quelles colonnes existent
+            result = conn.execute(text("PRAGMA table_info(signals)")).fetchall()
+            existing_cols = {row[1] for row in result}
+            
+            # Construire la requête dynamiquement
+            select_cols = ["id", "pair", "direction", "ts_enter", "confidence", "payload_json"]
+            
+            if 'result' in existing_cols:
+                where_clause = "WHERE (timeframe = 1 OR timeframe IS NULL) AND result IS NULL"
+            else:
+                where_clause = "WHERE (timeframe = 1 OR timeframe IS NULL)"
+            
+            query = f"""
+                SELECT {', '.join(select_cols)}
+                FROM signals
+                {where_clause}
+                ORDER BY ts_enter DESC
+                LIMIT 10
+            """
+            
+            signals = conn.execute(text(query)).fetchall()
         
         if not signals:
             await update.message.reply_text("✅ Aucun signal en attente de vérification")
@@ -2558,8 +2791,18 @@ async def cmd_pending_signals(update: Update, context: ContextTypes.DEFAULT_TYPE
         message = "📋 **SIGNAUX EN ATTENTE**\n"
         message += "━━━━━━━━━━━━━━━━━━━━\n\n"
         
-        for sig in signals:
-            signal_id, pair, direction, ts_enter, confidence, payload_json = sig
+        for signal in signals:
+            # Organiser les données du signal
+            signal_data = {}
+            for i, col in enumerate(select_cols):
+                signal_data[col] = signal[i]
+            
+            signal_id = signal_data.get('id')
+            pair = signal_data.get('pair', 'N/A')
+            direction = signal_data.get('direction', 'N/A')
+            ts_enter = signal_data.get('ts_enter')
+            confidence = signal_data.get('confidence', 0)
+            payload_json = signal_data.get('payload_json')
             
             mode = "Forex"
             strategy_mode = "STRICT"
@@ -2587,7 +2830,7 @@ async def cmd_pending_signals(update: Update, context: ContextTypes.DEFAULT_TYPE
             else:
                 dt = ts_enter
             
-            haiti_dt = dt.astimezone(HAITI_TZ)
+            haiti_dt = dt.astimezone(HAITI_TZ) if dt.tzinfo else dt.replace(tzinfo=timezone.utc).astimezone(HAITI_TZ)
             
             direction_emoji = "📈" if direction == "CALL" else "📉"
             direction_text = "BUY" if direction == "CALL" else "SELL"
@@ -2628,6 +2871,10 @@ async def cmd_signal_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         signal_id = int(context.args[0])
         
+        if auto_verifier is None:
+            await update.message.reply_text("❌ auto_verifier n'est pas initialisé")
+            return
+        
         info = auto_verifier.get_signal_status(signal_id)
         
         if not info:
@@ -2643,7 +2890,7 @@ async def cmd_signal_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             dt_enter = ts_enter
         
-        haiti_enter = dt_enter.astimezone(HAITI_TZ)
+        haiti_enter = dt_enter.astimezone(HAITI_TZ) if dt_enter.tzinfo else dt_enter.replace(tzinfo=timezone.utc).astimezone(HAITI_TZ)
         
         ts_exit = info.get('ts_exit')
         if ts_exit:
@@ -2655,7 +2902,7 @@ async def cmd_signal_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 dt_exit = ts_exit
             
-            haiti_exit = dt_exit.astimezone(HAITI_TZ)
+            haiti_exit = dt_exit.astimezone(HAITI_TZ) if dt_exit.tzinfo else dt_exit.replace(tzinfo=timezone.utc).astimezone(HAITI_TZ)
             exit_time = haiti_exit.strftime('%H:%M %d/%m')
         else:
             exit_time = "En attente"
@@ -2672,7 +2919,7 @@ async def cmd_signal_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🕐 Sortie: {exit_time}\n\n"
         )
         
-        if info['result']:
+        if info.get('result'):
             result_emoji = "✅" if info['result'] == 'WIN' else "❌"
             message += f"🎲 Résultat: {result_emoji} {info['result']}\n"
             
@@ -2708,6 +2955,10 @@ async def cmd_force_verify(update: Update, context: ContextTypes.DEFAULT_TYPE):
         signal_id = int(context.args[0])
         
         await update.message.reply_text(f"⚡ Forcer vérification signal #{signal_id}...")
+        
+        if auto_verifier is None:
+            await update.message.reply_text("❌ auto_verifier n'est pas initialisé")
+            return
         
         result = await auto_verifier.force_verify_signal(signal_id)
         
@@ -2757,19 +3008,28 @@ async def cmd_force_all_verifications(update: Update, context: ContextTypes.DEFA
         verified_count = 0
         for signal_id in session['signals']:
             with engine.connect() as conn:
-                result = conn.execute(
-                    text("SELECT result FROM signals WHERE id = :sid"),
-                    {"sid": signal_id}
-                ).fetchone()
-            
-            if result and result[0] is not None:
-                continue
+                # Vérifier si la colonne result existe
+                result = conn.execute(text("PRAGMA table_info(signals)")).fetchall()
+                existing_cols = {row[1] for row in result}
+                
+                if 'result' in existing_cols:
+                    current_result = conn.execute(
+                        text("SELECT result FROM signals WHERE id = :sid"),
+                        {"sid": signal_id}
+                    ).fetchone()
+                    
+                    if current_result and current_result[0] is not None:
+                        continue
+                else:
+                    # Si la colonne n'existe pas, on suppose qu'il n'est pas vérifié
+                    pass
             
             print(f"[FORCE_VERIF] 🔍 Forcer vérification signal #{signal_id}")
             
             simulated_result = 'WIN' if random.random() < 0.7 else 'LOSE'
             
-            await auto_verifier.manual_verify_signal(signal_id, simulated_result)
+            if auto_verifier:
+                await auto_verifier.manual_verify_signal(signal_id, simulated_result)
             
             session['pending'] = max(0, session['pending'] - 1)
             if simulated_result == 'WIN':
@@ -2816,20 +3076,42 @@ async def cmd_debug_verif(update: Update, context: ContextTypes.DEFAULT_TYPE):
             debug_info += f"  📋 IDs: {session['signals'][-3:] if session['signals'] else []}\n\n"
         
         with engine.connect() as conn:
-            signals = conn.execute(
-                text("""
-                    SELECT id, pair, direction, result, ts_enter, confidence, payload_json
-                    FROM signals
-                    WHERE timeframe = 1
-                    ORDER BY id DESC
-                    LIMIT 5
-                """)
-            ).fetchall()
+            # Vérifier quelles colonnes existent
+            result = conn.execute(text("PRAGMA table_info(signals)")).fetchall()
+            existing_cols = {row[1] for row in result}
+            
+            # Construire la requête dynamiquement
+            select_cols = ["id", "pair", "direction", "confidence", "payload_json"]
+            
+            if 'result' in existing_cols:
+                select_cols.append("result")
+            if 'ts_enter' in existing_cols:
+                select_cols.append("ts_enter")
+            
+            query = f"""
+                SELECT {', '.join(select_cols)}
+                FROM signals
+                WHERE timeframe = 1 OR timeframe IS NULL
+                ORDER BY id DESC
+                LIMIT 5
+            """
+            
+            signals = conn.execute(text(query)).fetchall()
         
         if signals:
             debug_info += "📋 **5 derniers signaux:**\n\n"
-            for sig in signals:
-                signal_id, pair, direction, result, ts_enter, confidence, payload_json = sig
+            for signal in signals:
+                # Organiser les données du signal
+                signal_data = {}
+                for i, col in enumerate(select_cols):
+                    signal_data[col] = signal[i]
+                
+                signal_id = signal_data.get('id')
+                pair = signal_data.get('pair', 'N/A')
+                direction = signal_data.get('direction', 'N/A')
+                confidence = signal_data.get('confidence', 0)
+                payload_json = signal_data.get('payload_json')
+                result = signal_data.get('result')
                 
                 mode = "Forex"
                 strategy_mode = "STRICT"
@@ -2974,6 +3256,71 @@ async def cmd_force_8_signals(update: Update, context: ContextTypes.DEFAULT_TYPE
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {e}")
 
+# ================= NOUVELLES COMMANDES POUR LA BASE DE DONNÉES =================
+
+async def cmd_check_columns(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Vérifie les colonnes de la table signals"""
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(text("PRAGMA table_info(signals)")).fetchall()
+            
+            msg = "📊 **STRUCTURE TABLE SIGNALS**\n"
+            msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
+            
+            for row in result:
+                not_null = "NOT NULL" if row[3] else "NULL"
+                primary_key = "PRIMARY KEY" if row[5] else ""
+                msg += f"• {row[1]} ({row[2]}) - {not_null} {primary_key}\n"
+            
+            # Compter le nombre de signaux
+            count = conn.execute(text("SELECT COUNT(*) FROM signals")).scalar()
+            msg += f"\n📈 **Total signaux:** {count}\n"
+            
+            # Vérifier les signaux M1
+            m1_count = conn.execute(text("SELECT COUNT(*) FROM signals WHERE timeframe = 1")).scalar()
+            msg += f"🎯 **Signaux M1:** {m1_count}\n"
+            
+            # Vérifier les signaux avec résultats
+            if 'result' in {row[1] for row in result}:
+                wins = conn.execute(text("SELECT COUNT(*) FROM signals WHERE result='WIN' AND timeframe = 1")).scalar()
+                losses = conn.execute(text("SELECT COUNT(*) FROM signals WHERE result='LOSE' AND timeframe = 1")).scalar()
+                msg += f"✅ **Wins M1:** {wins}\n"
+                msg += f"❌ **Losses M1:** {losses}\n"
+            
+            msg += "\n━━━━━━━━━━━━━━━━━━━━\n"
+            msg += "💡 Utilisez /fixdb pour corriger la structure"
+            
+            await update.message.reply_text(msg)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur: {e}")
+
+async def cmd_fix_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Corrige la structure de la base de données"""
+    try:
+        msg = await update.message.reply_text("🔧 Correction structure base de données...")
+        
+        # Appeler la fonction de correction
+        fix_database_structure()
+        
+        # Vérifier à nouveau la structure
+        with engine.connect() as conn:
+            result = conn.execute(text("PRAGMA table_info(signals)")).fetchall()
+            
+            msg_text = "✅ **STRUCTURE BASE DE DONNÉES CORRIGÉE**\n"
+            msg_text += "━━━━━━━━━━━━━━━━━━━━\n\n"
+            msg_text += "📊 **Colonnes disponibles:**\n\n"
+            
+            for row in result:
+                msg_text += f"• {row[1]}\n"
+            
+            msg_text += "\n━━━━━━━━━━━━━━━━━━━━\n"
+            msg_text += "🎯 Le bot peut maintenant fonctionner correctement!"
+        
+        await msg.edit_text(msg_text)
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur: {e}")
+
 # ================= SERVEUR HTTP =================
 
 async def health_check(request):
@@ -3015,7 +3362,7 @@ async def main():
     print("\n" + "="*60)
     print("🤖 BOT SAINT GRAAL M1 - AVEC ANALYSE STRUCTURE")
     print("🎯 8 SIGNAUX GARANTIS - ÉVITE LES ACHATS AUX SOMMETS")
-    print("🔧 NOUVEAU: Debug complet signal avec Pocket Option")
+    print("🔧 CORRECTION STRUCTURE BASE DE DONNÉES")
     print("="*60)
     print(f"🎯 Stratégie: Saint Graal Forex M1 avec Structure")
     print(f"⚡ Signal envoyé: Immédiatement")
@@ -3025,13 +3372,19 @@ async def main():
     print(f"🔧 Sources: TwelveData + Multi-APIs Crypto")
     print(f"🎯 Garantie: 8 signaux/session")
     print(f"🐛 Debug: /debugsignal, /debugpo, /debugrecent")
+    print(f"🔧 DB Tools: /checkcolumns, /fixdb")
     print("="*60 + "\n")
 
+    # Initialiser la base de données avec structure complète
     ensure_db()
+    
+    # Initialiser le vérificateur automatique
     auto_verifier = AutoResultVerifier(engine, TWELVEDATA_API_KEY)
 
+    # Démarrer le serveur HTTP
     http_runner = await start_http_server()
 
+    # Configurer l'application Telegram
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     
     # Commandes principales
@@ -3075,6 +3428,10 @@ async def main():
     app.add_handler(CommandHandler('forceall', cmd_force_all_verifications))
     app.add_handler(CommandHandler('debugverif', cmd_debug_verif))
     
+    # Nouvelles commandes base de données
+    app.add_handler(CommandHandler('checkcolumns', cmd_check_columns))
+    app.add_handler(CommandHandler('fixdb', cmd_fix_db))
+    
     # Callbacks
     app.add_handler(CallbackQueryHandler(callback_generate_signal, pattern=r'^gen_signal_'))
     app.add_handler(CallbackQueryHandler(callback_new_session, pattern=r'^new_session$'))
@@ -3096,7 +3453,9 @@ async def main():
     print(f"🔍 Nouvelles commandes de débogage:")
     print(f"   • /debugsignal <id> - Debug complet signal")
     print(f"   • /debugpo <id> - Debug Pocket Option")
-    print(f"   • /debugrecent [n] - Debug derniers signaux\n")
+    print(f"   • /debugrecent [n] - Debug derniers signaux")
+    print(f"   • /checkcolumns - Vérifier structure DB")
+    print(f"   • /fixdb - Corriger structure DB\n")
 
     try:
         while True:
