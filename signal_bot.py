@@ -43,7 +43,7 @@ CONFIDENCE_THRESHOLD = 0.65
 engine = create_engine(DB_URL, connect_args={'check_same_thread': False})
 ml_predictor = MLSignalPredictor()
 otc_provider = OTCDataProvider(TWELVEDATA_API_KEY)
-verifier = AutoResultVerifierM1(engine, TWELVEDATA_API_KEY)  # Initialisation du vérificateur
+verifier = AutoResultVerifier(engine, TWELVEDATA_API_KEY)  # Initialisation du vérificateur
 
 # Variables globales
 active_sessions = {}
