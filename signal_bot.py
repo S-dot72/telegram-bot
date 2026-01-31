@@ -890,23 +890,15 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ **Bienvenue au Bot Trading Saint Graal M1 !**\n\n"
             f"🎯 **Nouvelle version avec vérificateur externe**\n"
             f"📊 8 signaux garantis par session\n"
-            f"🤖 **Vérification 100% automatique fiable**\n"
-            f"⚠️ Analyse structure pour éviter les sommets\n"
             f"🌐 Mode actuel: {mode_text}\n"
             f"🔧 Sources: TwelveData + APIs Crypto\n"
-            f"🔍 Vérificateur: AutoResultVerifierM1\n\n"
             f"**🎯 Caractéristiques:**\n"
             f"• Mode STRICT → Haute qualité\n"
             f"• Mode GARANTIE → Signaux assurés\n"
             f"• Mode LAST RESORT → Complète session\n"
-            f"• **Vérification externe fiable**\n\n"
             f"**Commandes:**\n"
             f"• /startsession - Démarrer session\n"
-            f"• /verifsignal <id> - Vérifier signal\n"
-            f"• /verifyall - Vérifier tous en attente\n"
             f"• /stats - Statistiques\n"
-            f"• /otcstatus - Statut OTC\n"
-            f"• /checkapi - Vérifier APIs\n"
             f"• /menu - Menu complet\n\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"💡 8 signaux garantis avec vérificateur externe!"
@@ -1019,15 +1011,11 @@ async def cmd_start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📅 {now_haiti.strftime('%H:%M:%S')}\n"
         f"🌐 Mode: {mode_text}\n"
         f"🎯 Objectif: {SIGNALS_PER_SESSION} signaux M1\n"
-        f"🤖 **Vérification via vérificateur externe**\n"
         f"⚠️ Détection des swing highs/lows\n"
-        f"🔧 Vérificateur: AutoResultVerifierM1\n"
         f"🔧 Sources: {'APIs Crypto' if is_weekend else 'TwelveData'}\n\n"
-        f"**Stratégie Saint Graal améliorée:**\n"
         f"• Évite les achats près des sommets\n"
         f"• Détecte les patterns de retest\n"
         f"• Garantie de 8 signaux qualité\n"
-        f"• Vérification externe fiable\n\n"
         f"Cliquez pour générer signal #1 ⬇️",
         reply_markup=reply_markup
     )
@@ -1061,9 +1049,6 @@ async def cmd_session_status(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"🔔 Rappels en attente: {pending_reminders}\n\n"
         f"📊 Win Rate: {winrate:.1f}%\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        f"🔔 Rappel 1 min avant entrée\n"
-        f"⚠️ Analyse structure active\n"
-        f"🤖 Vérification via vérificateur externe\n"
         f"🎯 Garantie: {SIGNALS_PER_SESSION - session['signal_count']} signaux restants"
     )
     
@@ -1250,8 +1235,6 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
             f"━━━━━━━━━━━━━━━━━━━━\n\n"
             f"📊 Progression: {session['signal_count']}/{SIGNALS_PER_SESSION}\n\n"
             f"⏰ **Timing du signal:**\n"
-            f"• Vérification externe: 3 min après entrée\n"
-            f"• Vérificateur: AutoResultVerifierM1\n\n"
             f"💡 Préparez votre position!"
         )
         
@@ -1284,10 +1267,6 @@ async def end_session_summary(user_id, app, message=None):
         f"❌ Losses: {session['losses']}\n"
         f"📈 Win Rate: **{winrate:.1f}%**\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "⚡ Signal envoyé immédiatement\n"
-        "🔔 Rappel 1 min avant entrée\n"
-        "⚠️ Analyse structure active\n"
-        "🤖 Vérification via vérificateur externe\n"
         "🎯 Garantie: 8 signaux/session\n"
         "Utilisez /startsession pour nouvelle session"
     )
@@ -1380,9 +1359,6 @@ async def cmd_verif_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 msg += "\n"
         
         msg += "━━━━━━━━━━━━━━━━━━━━\n"
-        msg += "🤖 **Système Vérificateur Externe**\n"
-        msg += "💰 Prix récupérés depuis APIs\n"
-        msg += "🔧 Compatible AutoResultVerifierM1"
         
         await update.message.reply_text(msg)
         
@@ -1455,8 +1431,6 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"❌ Losses: {losses}\n"
             f"📈 Win rate: {winrate:.1f}%\n\n"
             f"🎯 8 signaux/session (GARANTIS)\n"
-            f"🤖 Vérification via vérificateur externe\n"
-            f"🔧 Vérificateur: AutoResultVerifierM1"
         )
         
         await update.message.reply_text(msg)
@@ -1510,9 +1484,6 @@ async def cmd_rapport(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• ❌ Losses: {losses}\n"
             f"• 📊 Win Rate: **{winrate:.1f}%**\n\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"🎯 Timeframe: M1\n"
-            f"🤖 Vérification: Vérificateur externe\n"
-            f"🔧 Stratégie: Saint Graal avec Structure"
         )
         
         await msg.edit_text(report)
@@ -1644,7 +1615,6 @@ async def cmd_otc_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         
         msg += "\n━━━━━━━━━━━━━━━━━━━━\n"
-        msg += "🔍 **Vérificateur:** AutoResultVerifierM1 actif"
         
         await update.message.reply_text(msg)
         
