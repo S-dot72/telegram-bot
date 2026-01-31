@@ -947,11 +947,8 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /checkcolumns - Vérifier structure DB\n"
         "• /fixdb - Corriger structure DB\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "🎯 **SAINT GRAAL M1 - VÉRIFICATEUR EXTERNE**\n"
         "🔍 8 signaux garantis/session\n"
         "⚠️ Évite les achats près des swing highs\n"
-        "🔔 Rappel 1 min avant entrée\n"
-        "🤖 Vérification via AutoResultVerifierM1\n"
         "🏖️ OTC actif le week-end"
     )
     await update.message.reply_text(menu_text)
@@ -2011,7 +2008,6 @@ async def health_check(request):
         'api_source': 'Multi-APIs' if otc_provider.is_weekend() else 'TwelveData',
         'strategy': 'Saint Graal M1 avec Structure',
         'signals_per_session': SIGNALS_PER_SESSION,
-        'verification': 'AutoResultVerifierM1 (Externe)',
         'verifier_status': 'Actif' if verifier else 'Inactif'
     })
 
