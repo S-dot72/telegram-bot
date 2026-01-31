@@ -578,7 +578,6 @@ async def send_verification_result(user_id, signal_id, pair, direction, entry_pr
             f"━━━━━━━━━━━━━━━━━━━━\n\n"
             f"{direction_emoji} {pair} - {direction}\n"
             f"💪 Confiance: {int(confidence*100) if confidence else 'N/A'}%\n"
-            f"📊 Méthode: Vérificateur AutoResultVerifierM1\n\n"
             f"🎲 **{status}**\n"
             f"━━━━━━━━━━━━━━━━━━━━"
         )
@@ -1695,7 +1694,6 @@ async def cmd_check_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📅 {now_haiti.strftime('%A %d/%m/%Y')}\n"
             f"🕐 {now_haiti.strftime('%H:%M:%S')}\n\n"
             f"🌐 **Mode actuel:** {results['current_mode']}\n"
-            f"🔍 **Vérificateur:** AutoResultVerifierM1\n"
         )
         
         if results['current_mode'] == 'OTC (Crypto)':
