@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import text
 import requests
 
-class AutoResultVerifierM1:
+class AutoResultVerifier:
     def __init__(self, engine, twelvedata_api_key, bot=None):
         self.engine = engine
         self.api_key = twelvedata_api_key
