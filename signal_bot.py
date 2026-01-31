@@ -30,7 +30,7 @@ from utils import (
 )
 from ml_predictor import MLSignalPredictor
 from otc_provider import OTCDataProvider
-from auto_verifier_m1 import AutoResultVerifier  # Import du vérificateur externe
+from auto_verifier import AutoResultVerifier  # Import du vérificateur externe
 
 # ================= CONFIGURATION =================
 HAITI_TZ = ZoneInfo("America/Port-au-Prince")
