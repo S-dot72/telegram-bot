@@ -1,12 +1,13 @@
 """
-AUTO VERIFIER M1 - VERSION CORRIGÉE
-Correction pour trading M1 (1 minute) au lieu de M5
+AUTO VERIFIER M1 - VERSION AVEC SUPPORT OTC
+Correction pour trading M1 avec support OTC/CRYPTO
 """
 
 import asyncio
 from datetime import datetime, timedelta, timezone
 from sqlalchemy import text
 import requests
+import json
 
 class AutoResultVerifier:
     def __init__(self, engine, twelvedata_api_key, bot=None):
@@ -22,6 +23,52 @@ class AutoResultVerifier:
         self.default_timeframe = 1  # ✅ 1 minute
         self.default_max_gales = 0
         
+        # Endpoints pour OTC (crypto)
+        self.crypto_endpoints = {
+            'binance': 'https://api.binance.com/api/v3/klines',
+            'bybit': 'https://api.bybit.com/v5/market/kline',
+            'kucoin': 'https://api.kucoin.com/api/v1/market/candles',
+            'pocket': 'https://api.pocketoption.com'  # API fictive - à remplacer si disponible
+        }
+        
+        # Mapping des paires OTC
+        self.otc_symbol_mapping = {
+            'binance': {
+                'BTC/USD': 'BTCUSDT',
+                'ETH/USD': 'ETHUSDT',
+                'TRX/USD': 'TRXUSDT',
+                'LTC/USD': 'LTCUSDT',
+                'EUR/USD': 'EURUSDT',  # crypto avec stablecoin
+                'GBP/USD': 'GBPUSDT',
+                'USD/JPY': 'JPYUSDT',
+                'AUD/USD': 'AUDUSDT',
+                'AUD/CAD': 'AUDCAD',
+                'EUR/GBP': 'EURGBP',
+                'XAU/USD': 'XAUUSDT',  # Or
+                'XAG/USD': 'XAGUSDT',  # Argent
+            },
+            'bybit': {
+                'BTC/USD': 'BTCUSDT',
+                'ETH/USD': 'ETHUSDT',
+                'TRX/USD': 'TRXUSDT',
+                'LTC/USD': 'LTCUSDT',
+                'AUD/CAD': 'AUDCAD',
+                'EUR/GBP': 'EURGBP',
+                'XAU/USD': 'XAUUSDT',
+                'XAG/USD': 'XAGUSDT',
+            },
+            'kucoin': {
+                'BTC/USD': 'BTC-USDT',
+                'ETH/USD': 'ETH-USDT',
+                'TRX/USD': 'TRX-USDT',
+                'LTC/USD': 'LTC-USDT',
+                'AUD/CAD': 'AUD-CAD',
+                'EUR/GBP': 'EUR-GBP',
+                'XAU/USD': 'XAU-USDT',
+                'XAG/USD': 'XAG-USDT',
+            }
+        }
+        
         # RATE LIMITING
         self.api_calls_count = 0
         self.api_calls_reset_time = datetime.now()
@@ -29,6 +76,7 @@ class AutoResultVerifier:
         
         print("[VERIF-M1] ✅ AutoResultVerifier M1 initialisé")
         print("[VERIF-M1] 🎯 Mode: Trading M1 (1 minute)")
+        print("[VERIF-M1] 🔥 Support OTC/CRYPTO activé")
 
     def set_bot(self, bot):
         """Configure le bot pour les notifications"""
@@ -101,6 +149,10 @@ class AutoResultVerifier:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt.replace(second=0, microsecond=0)
 
+    def _map_pair_to_symbol(self, pair: str, exchange: str = 'bybit') -> str:
+        """Convertit une paire format TradingView en symbole d'API OTC"""
+        return self.otc_symbol_mapping.get(exchange, {}).get(pair, pair.replace('/', ''))
+
     def _calculate_next_m1_candle(self, signal_time):
         """
         CORRECTION M1 : Calcule la PROCHAINE bougie M1
@@ -134,18 +186,18 @@ class AutoResultVerifier:
 
     async def verify_single_signal(self, signal_id):
         """
-        Vérifie UN signal M1 - VERSION CORRIGÉE
+        Vérifie UN signal M1 - VERSION AVEC SUPPORT OTC
         """
         try:
             print(f"\n{'='*70}")
             print(f"[VERIF-M1] 🔍 Vérification signal #{signal_id}")
             print(f"{'='*70}")
             
-            # Récupérer le signal
+            # Récupérer le signal avec payload_json
             with self.engine.connect() as conn:
                 signal = conn.execute(
                     text("""
-                        SELECT id, pair, direction, ts_enter, confidence, kill_zone
+                        SELECT id, pair, direction, ts_enter, confidence, kill_zone, payload_json
                         FROM signals
                         WHERE id = :sid AND result IS NULL
                     """),
@@ -156,11 +208,29 @@ class AutoResultVerifier:
                 print(f"[VERIF-M1] ⚠️ Signal #{signal_id} déjà vérifié ou inexistant")
                 return None
             
-            signal_id, pair, direction, ts_enter, confidence, kill_zone = signal
+            signal_id, pair, direction, ts_enter, confidence, kill_zone, payload_json = signal
+            
+            # Détecter le mode OTC/CRYPTO depuis payload_json
+            is_otc = False
+            exchange = 'bybit'  # exchange par défaut pour OTC
+            mode = 'Forex'  # mode par défaut
+            
+            if payload_json:
+                try:
+                    payload = json.loads(payload_json)
+                    mode = payload.get('mode', 'Forex')
+                    is_otc = (mode == 'OTC' or mode == 'CRYPTO')
+                    exchange = payload.get('exchange', 'bybit')
+                    
+                    print(f"[VERIF-M1] 🔥 Mode détecté: {mode}")
+                    print(f"[VERIF-M1] 💱 Exchange: {exchange}")
+                except Exception as e:
+                    print(f"[VERIF-M1] ⚠️ Erreur lecture payload: {e}")
             
             kz_text = f" [{kill_zone}]" if kill_zone else ""
             print(f"[VERIF-M1] 📊 {pair} {direction}{kz_text}")
             print(f"[VERIF-M1] 💪 Confiance: {confidence:.1%}")
+            print(f"[VERIF-M1] 🎮 Mode: {mode} ({'OTC' if is_otc else 'Forex'})")
             
             # Parser timestamp
             if isinstance(ts_enter, str):
@@ -175,8 +245,8 @@ class AutoResultVerifier:
             if signal_time.tzinfo is None:
                 signal_time = signal_time.replace(tzinfo=timezone.utc)
             
-            # Vérifier week-end
-            if self._is_weekend(signal_time):
+            # Vérifier week-end (sauf pour OTC)
+            if not is_otc and self._is_weekend(signal_time):
                 print(f"[VERIF-M1] 🏖️ Week-end - Marqué LOSE")
                 self._update_signal_result(signal_id, 'LOSE', {
                     'entry_price': 0,
@@ -201,7 +271,9 @@ class AutoResultVerifier:
                 return None
             
             # Récupérer les prix de CETTE bougie M1 spécifique
-            result, details = await self._verify_m1_candle(signal_id, pair, direction, trade_start)
+            result, details = await self._verify_m1_candle(
+                signal_id, pair, direction, trade_start, is_otc, exchange
+            )
             
             if result:
                 self._update_signal_result(signal_id, result, details)
@@ -222,15 +294,17 @@ class AutoResultVerifier:
             traceback.print_exc()
             return None
 
-    async def _verify_m1_candle(self, signal_id, pair, direction, candle_start):
+    async def _verify_m1_candle(self, signal_id, pair, direction, candle_start, is_otc=False, exchange='bybit'):
         """
-        Vérifie une bougie M1 spécifique
+        Vérifie une bougie M1 spécifique avec support OTC
         
         Args:
             signal_id: ID du signal
             pair: Paire tradée
             direction: CALL ou PUT
             candle_start: Début de la bougie M1 à vérifier
+            is_otc: True si mode OTC/CRYPTO
+            exchange: Exchange pour OTC (bybit, binance, kucoin)
         
         Returns:
             (result, details) ou (None, None)
@@ -239,7 +313,9 @@ class AutoResultVerifier:
             print(f"[VERIF-M1] 🔍 Récupération bougie M1 {candle_start.strftime('%H:%M')}...")
             
             # Récupérer le prix d'ouverture M1
-            entry_price = await self._get_exact_m1_candle_price(pair, candle_start, 'open')
+            entry_price = await self._get_exact_m1_candle_price(
+                pair, candle_start, 'open', is_otc, exchange
+            )
             if entry_price is None:
                 print(f"[VERIF-M1] ❌ Prix d'ouverture M1 non disponible")
                 return None, None
@@ -247,7 +323,9 @@ class AutoResultVerifier:
             await asyncio.sleep(2)  # Délai entre appels API
             
             # Récupérer le prix de fermeture M1
-            exit_price = await self._get_exact_m1_candle_price(pair, candle_start, 'close')
+            exit_price = await self._get_exact_m1_candle_price(
+                pair, candle_start, 'close', is_otc, exchange
+            )
             if exit_price is None:
                 print(f"[VERIF-M1] ❌ Prix de fermeture M1 non disponible")
                 return None, None
@@ -274,7 +352,9 @@ class AutoResultVerifier:
                 'entry_price': entry_price,
                 'exit_price': exit_price,
                 'pips': pips_diff,
-                'gale_level': 0
+                'gale_level': 0,
+                'mode': 'OTC' if is_otc else 'Forex',
+                'exchange': exchange if is_otc else 'twelvedata'
             }
             
             return result, details
@@ -285,19 +365,33 @@ class AutoResultVerifier:
             traceback.print_exc()
             return None, None
 
-    async def _get_exact_m1_candle_price(self, pair, candle_start, price_type='close'):
+    async def _get_exact_m1_candle_price(self, pair, candle_start, price_type='close', is_otc=False, exchange='bybit'):
         """
-        Récupère le prix d'UNE bougie M1 SPÉCIFIQUE
-        
-        CORRECTION M1 : Plage ÉTROITE et intervalle 1min
+        Récupère le prix d'UNE bougie M1 SPÉCIFIQUE avec support OTC
         
         Args:
             pair: Paire à récupérer
             candle_start: Début EXACT de la bougie M1
             price_type: 'open' ou 'close'
+            is_otc: True si mode OTC/CRYPTO
+            exchange: Exchange pour OTC
         
         Returns:
             float prix ou None
+        """
+        try:
+            if is_otc:
+                return await self._get_otc_candle_price(pair, candle_start, price_type, exchange)
+            else:
+                return await self._get_forex_candle_price(pair, candle_start, price_type)
+                
+        except Exception as e:
+            print(f"[VERIF-M1] ❌ Erreur _get_exact_m1_candle_price: {e}")
+            return None
+
+    async def _get_forex_candle_price(self, pair, candle_start, price_type='close'):
+        """
+        Récupère le prix depuis TwelveData (Forex)
         """
         try:
             await self._wait_if_rate_limited()
@@ -316,7 +410,7 @@ class AutoResultVerifier:
                 'end_date': end_dt.strftime('%Y-%m-%d %H:%M:%S')
             }
             
-            print(f"[VERIF-M1] 🔍 API M1: {pair} {price_type} à {candle_start.strftime('%H:%M')} UTC")
+            print(f"[VERIF-M1] 🔍 Forex API: {pair} {price_type} à {candle_start.strftime('%H:%M')} UTC")
             
             resp = self._session.get(self.base_url, params=params, timeout=12)
             self._increment_api_call()
@@ -333,7 +427,7 @@ class AutoResultVerifier:
                 return None
             
             if 'values' not in data or not data['values']:
-                print(f"[VERIF-M1] ❌ Aucune donnée M1 retournée")
+                print(f"[VERIF-M1] ❌ Aucune donnée Forex retournée")
                 return None
             
             # Chercher LA bougie M1 exacte
@@ -357,22 +451,136 @@ class AutoResultVerifier:
                 if time_diff < 30:  # ✅ Tolérance 30s pour M1
                     try:
                         price = float(candle[price_type])
-                        print(f"[VERIF-M1] ✅ Bougie M1 trouvée - {price_type}: {price:.5f}")
+                        print(f"[VERIF-M1] ✅ Bougie Forex trouvée - {price_type}: {price:.5f}")
                         return price
                     except:
                         # Fallback sur close
                         try:
                             price = float(candle['close'])
-                            print(f"[VERIF-M1] ⚠️ Fallback M1 close: {price:.5f}")
+                            print(f"[VERIF-M1] ⚠️ Fallback Forex close: {price:.5f}")
                             return price
                         except:
                             continue
             
-            print(f"[VERIF-M1] ❌ Bougie M1 {candle_start.strftime('%H:%M')} NON trouvée")
+            print(f"[VERIF-M1] ❌ Bougie Forex {candle_start.strftime('%H:%M')} NON trouvée")
             return None
             
         except Exception as e:
-            print(f"[VERIF-M1] ❌ Erreur API M1: {e}")
+            print(f"[VERIF-M1] ❌ Erreur API Forex: {e}")
+            return None
+
+    async def _get_otc_candle_price(self, pair, candle_start, price_type='close', exchange='bybit'):
+        """
+        Récupère le prix depuis un exchange OTC (crypto)
+        """
+        try:
+            await self._wait_if_rate_limited()
+            
+            # Convertir le symbole
+            symbol = self._map_pair_to_symbol(pair, exchange)
+            print(f"[VERIF-M1] 🔄 OTC: {pair} -> {symbol} sur {exchange}")
+            
+            # Timestamp en millisecondes
+            start_ms = int(candle_start.timestamp() * 1000)
+            
+            if exchange == 'binance':
+                url = self.crypto_endpoints['binance']
+                params = {
+                    'symbol': symbol,
+                    'interval': '1m',
+                    'startTime': start_ms,
+                    'limit': 2
+                }
+                
+                resp = self._session.get(url, params=params, timeout=10)
+                self._increment_api_call()
+                
+                resp.raise_for_status()
+                data = resp.json()
+                
+                if isinstance(data, list) and len(data) > 0:
+                    # Binance retourne: [timestamp, open, high, low, close, ...]
+                    for candle in data:
+                        candle_time = datetime.fromtimestamp(candle[0] / 1000, tz=timezone.utc)
+                        time_diff = abs((candle_time - candle_start).total_seconds())
+                        
+                        if time_diff < 30:  # Tolérance 30 secondes
+                            if price_type == 'open':
+                                price = float(candle[1])
+                            else:
+                                price = float(candle[4])
+                            
+                            print(f"[VERIF-M1] ✅ Binance: {price_type}={price:.6f}")
+                            return price
+            
+            elif exchange == 'bybit':
+                url = self.crypto_endpoints['bybit']
+                params = {
+                    'category': 'spot',
+                    'symbol': symbol,
+                    'interval': '1',
+                    'start': start_ms,
+                    'limit': 2
+                }
+                
+                resp = self._session.get(url, params=params, timeout=10)
+                self._increment_api_call()
+                
+                resp.raise_for_status()
+                data = resp.json()
+                
+                if data.get('retCode') == 0 and data.get('result', {}).get('list'):
+                    candles = data['result']['list']
+                    for candle in candles:
+                        # Bybit v5 retourne: [timestamp, open, high, low, close, volume, turnover]
+                        candle_time = datetime.fromtimestamp(int(candle[0]) / 1000, tz=timezone.utc)
+                        time_diff = abs((candle_time - candle_start).total_seconds())
+                        
+                        if time_diff < 30:
+                            if price_type == 'open':
+                                price = float(candle[1])
+                            else:
+                                price = float(candle[4])
+                            
+                            print(f"[VERIF-M1] ✅ Bybit: {price_type}={price:.6f}")
+                            return price
+            
+            elif exchange == 'kucoin':
+                url = self.crypto_endpoints['kucoin']
+                params = {
+                    'symbol': symbol,
+                    'type': '1min',
+                    'startAt': int(start_ms / 1000) - 60,
+                    'endAt': int(start_ms / 1000) + 120
+                }
+                
+                resp = self._session.get(url, params=params, timeout=10)
+                self._increment_api_call()
+                
+                resp.raise_for_status()
+                data = resp.json()
+                
+                if data.get('code') == '200000' and data.get('data'):
+                    candles = data['data']
+                    for candle in candles:
+                        # KuCoin retourne: [timestamp, open, close, high, low, volume, turnover]
+                        candle_time = datetime.fromtimestamp(int(candle[0]), tz=timezone.utc)
+                        time_diff = abs((candle_time - candle_start).total_seconds())
+                        
+                        if time_diff < 30:
+                            if price_type == 'open':
+                                price = float(candle[1])
+                            else:
+                                price = float(candle[2])
+                            
+                            print(f"[VERIF-M1] ✅ KuCoin: {price_type}={price:.6f}")
+                            return price
+            
+            print(f"[VERIF-M1] ❌ Bougie OTC {candle_start.strftime('%H:%M')} NON trouvée sur {exchange}")
+            return None
+            
+        except Exception as e:
+            print(f"[VERIF-M1] ❌ Erreur API OTC ({exchange}): {e}")
             return None
 
     def _update_signal_result(self, signal_id, result, details):
@@ -380,6 +588,10 @@ class AutoResultVerifier:
         try:
             gale_level = 0
             reason = details.get('reason', '') if details else ''
+            
+            # Ajouter le mode dans le reason
+            mode = details.get('mode', 'Forex') if details else 'Forex'
+            reason_with_mode = f"{reason} | Mode: {mode}"
             
             query = text("""
                 UPDATE signals
@@ -391,11 +603,11 @@ class AutoResultVerifier:
                 conn.execute(query, {
                     'result': result,
                     'gale_level': gale_level,
-                    'reason': reason,
+                    'reason': reason_with_mode,
                     'id': signal_id
                 })
             
-            print(f"[VERIF-M1] 💾 Résultat M1 sauvegardé: {result}")
+            print(f"[VERIF-M1] 💾 Résultat M1 sauvegardé: {result} ({mode})")
             
         except Exception as e:
             print(f"[VERIF-M1] ❌ Erreur sauvegarde: {e}")
@@ -408,7 +620,7 @@ class AutoResultVerifier:
                 print(f"[VERIF-M1] ❌ Échec total: {e2}")
 
     async def verify_pending_signals(self):
-        """Vérifie tous les signaux M1 en attente"""
+        """Vérifie tous les signaux M1 en attente avec support OTC"""
         try:
             now_utc = datetime.now(timezone.utc)
             print(f"\n{'='*70}")
@@ -416,7 +628,7 @@ class AutoResultVerifier:
             print(f"{'='*70}")
 
             query = text("""
-                SELECT id, pair, direction, ts_enter, confidence, kill_zone
+                SELECT id, pair, direction, ts_enter, confidence, kill_zone, payload_json
                 FROM signals
                 WHERE result IS NULL
                 ORDER BY ts_enter ASC
