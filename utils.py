@@ -143,11 +143,11 @@ def get_m1_candle_range(dt):
 
 def analyze_market_structure(df, lookback=15):
     """
-    Détection VRAIE de la structure : HH+HL pour uptrend, LH+LL pour downtrend
-    Version corrigée : ne confond plus range/chaos avec downtrend
+    COMPATIBILITÉ : Retourne seulement 2 valeurs (structure, trend_strength)
+    Pour usage dans signal_bot.py
     """
     if len(df) < lookback + 5:
-        return "INSUFFICIENT_DATA", 0.0, [], []
+        return "INSUFFICIENT_DATA", 0.0
     
     recent = df.tail(lookback).copy()
     highs = recent['high'].values
@@ -272,6 +272,87 @@ def analyze_market_structure(df, lookback=15):
                     structure += "_ACCELERATING"
                 elif recent_move < older_move * 0.5:
                     structure += "_DECELERATING"
+    
+    return structure, trend_strength
+
+def analyze_market_structure_detailed(df, lookback=15):
+    """
+    Version détaillée retournant 4 valeurs pour usage interne
+    """
+    if len(df) < lookback + 5:
+        return "INSUFFICIENT_DATA", 0.0, [], []
+    
+    recent = df.tail(lookback).copy()
+    highs = recent['high'].values
+    lows = recent['low'].values
+    
+    swing_highs = []
+    swing_lows = []
+    
+    # Détection swings robuste
+    for i in range(3, len(recent)-3):
+        # Swing High
+        if (highs[i] > highs[i-1] and highs[i] > highs[i-2] and 
+            highs[i] > highs[i-3] and
+            highs[i] > highs[i+1] and highs[i] > highs[i+2] and
+            highs[i] > highs[i+3]):
+            
+            min_height = recent['close'].mean() * 0.0002
+            if highs[i] - max(highs[i-3], highs[i-2], highs[i-1],
+                             highs[i+1], highs[i+2], highs[i+3]) > min_height:
+                swing_highs.append({'index': i, 'price': float(highs[i])})
+        
+        # Swing Low
+        if (lows[i] < lows[i-1] and lows[i] < lows[i-2] and 
+            lows[i] < lows[i-3] and
+            lows[i] < lows[i+1] and lows[i] < lows[i+2] and
+            lows[i] < lows[i+3]):
+            
+            min_depth = recent['close'].mean() * 0.0002
+            if min(lows[i-3], lows[i-2], lows[i-1],
+                  lows[i+1], lows[i+2], lows[i+3]) - lows[i] > min_depth:
+                swing_lows.append({'index': i, 'price': float(lows[i])})
+    
+    # Logique de détection
+    structure = "RANGE"
+    trend_strength = 0.0
+    
+    if len(swing_highs) >= 3 and len(swing_lows) >= 3:
+        recent_highs = sorted(swing_highs, key=lambda x: x['index'])[-3:]
+        recent_lows = sorted(swing_lows, key=lambda x: x['index'])[-3:]
+        
+        high_prices = [h['price'] for h in recent_highs]
+        low_prices = [l['price'] for l in recent_lows]
+        
+        is_hh = all(high_prices[i] > high_prices[i-1] for i in range(1, len(high_prices)))
+        is_hl = all(low_prices[i] > low_prices[i-1] for i in range(1, len(low_prices)))
+        is_lh = all(high_prices[i] < high_prices[i-1] for i in range(1, len(high_prices)))
+        is_ll = all(low_prices[i] < low_prices[i-1] for i in range(1, len(low_prices)))
+        
+        if is_hh and is_hl:
+            structure = "UPTREND"
+            trend_strength = float((high_prices[-1] - high_prices[0]) / high_prices[0] * 100)
+        elif is_lh and is_ll:
+            structure = "DOWNTREND"
+            trend_strength = float((low_prices[0] - low_prices[-1]) / low_prices[-1] * 100)
+        elif is_hh and not is_hl and not is_ll:
+            structure = "UPTREND_FAIBLE"
+            trend_strength = float((high_prices[-1] - high_prices[0]) / high_prices[0] * 100) / 2
+        elif is_lh and not is_hh and not is_hl:
+            structure = "DOWNTREND_FAIBLE"
+            trend_strength = float((low_prices[0] - low_prices[-1]) / low_prices[-1] * 100) / 2
+        elif is_hh and is_ll:
+            structure = "EXPANDING_WEDGE"
+        elif is_lh and is_hl:
+            structure = "CONTRACTING_WEDGE"
+        else:
+            price_range = max(high_prices) - min(low_prices)
+            avg_candle = recent['high'].mean() - recent['low'].mean()
+            structure = "TIGHT_RANGE" if price_range < avg_candle * 3 else "RANGE"
+    
+    elif len(swing_highs) < 3 or len(swing_lows) < 3:
+        volatility = recent['high'].std() / recent['close'].mean()
+        structure = "CHAOTIC" if volatility > 0.0005 else "NO_CLEAR_STRUCTURE"
     
     return structure, trend_strength, swing_highs, swing_lows
 
@@ -722,7 +803,7 @@ def validate_candle_pattern(df, direction):
     
     if direction == "SELL":
         # En range, exiger meilleure qualité
-        structure, _, _, _ = analyze_market_structure(df.tail(20))
+        structure, _ = analyze_market_structure(df.tail(20))
         in_range = "RANGE" in structure or "TIGHT" in structure
         min_wick_ratio = 2.5 if in_range else 2.0
         
@@ -749,7 +830,7 @@ def validate_candle_pattern(df, direction):
             patterns.append(("UPPER_REJECTION", 70))
     
     else:  # BUY
-        structure, _, _, _ = analyze_market_structure(df.tail(20))
+        structure, _ = analyze_market_structure(df.tail(20))
         in_range = "RANGE" in structure or "TIGHT" in structure
         min_wick_ratio = 2.5 if in_range else 2.0
         
@@ -1112,7 +1193,7 @@ def rule_signal_saint_graal_with_guarantee(df, signal_count=0, total_signals_nee
     print(f"   Zone requise: {'Oui' if level_config['require_zone'] else 'Non'}")
     
     # ===== 1. ANALYSE STRUCTURE =====
-    structure, trend_strength, swing_highs, swing_lows = analyze_market_structure(df)
+    structure, trend_strength, swing_highs, swing_lows = analyze_market_structure_detailed(df)
     print(f"\n[PRO HIÉRARCHIQUE] 🏗️  STRUCTURE: {structure} (force: {trend_strength:.1f}%)")
     
     # ===== 2. ZONES CLÉS =====
@@ -1462,13 +1543,11 @@ def get_signal_with_metadata(df, signal_count=0, total_signals=8):
     """Fonction principale pour le bot - CORRIGÉ POUR JSON"""
     try:
         if df is None or len(df) < 30:
-            level_name, _ = get_hierarchy_level(signal_count)
             return create_minimal_fallback("Données insuffisantes", signal_count, total_signals)
         
         df_with_indicators = compute_saint_graal_indicators(df)
         
         if df_with_indicators.empty:
-            level_name, _ = get_hierarchy_level(signal_count)
             return create_minimal_fallback("Erreur indicateurs", signal_count, total_signals)
         
         result = rule_signal_saint_graal_with_guarantee(df_with_indicators, signal_count, total_signals)
@@ -1491,7 +1570,7 @@ def get_signal_with_metadata(df, signal_count=0, total_signals=8):
                 'quality': result['quality'],
                 'score': float(result['score']),
                 'reason': reason,
-                'structure_info': result['structure_info'],
+                'structure_info': result.get('structure_info', {}),
                 'session_info': {
                     'current_signal': signal_count + 1,
                     'total_signals': total_signals,
@@ -1584,10 +1663,9 @@ if __name__ == "__main__":
     print("🚀 STRATÉGIE FOREX M1 PRO - APPROCHE HIÉRARCHIQUE")
     print("📊 Version: 4.0 avec zones S/R améliorées et hiérarchie")
     print("🎯 Objectif: 8 signaux avec qualité contrôlée")
-    print("\n📋 HIÉRARCHIE DES SIGNAUX:")
-    print("1. TOP (1-4): 85+ score, timing strict, pas de contre-tendance")
-    print("2. HIGH (5-6): 75+ score, timing modéré, contre-tendance pénalisé")
-    print("3. STANDARD (7): 65+ score, timing lenient, contre-tendance accepté")
-    print("4. FALLBACK (8): Règles minimales")
-    print("\n💡 Architecture: Structure → Zones → Momentum → Timing → Validation hiérarchique")
-    print("✅ Prêt pour le trading live")
+    print("\n📋 CORRECTIONS APPLIQUÉES:")
+    print("1. ✅ Compatibilité: analyze_market_structure retourne 2 valeurs")
+    print("2. ✅ Nouvelle fonction: analyze_market_structure_detailed (4 valeurs)")
+    print("3. ✅ Hiérarchie: TOP, HIGH, STANDARD, FALLBACK")
+    print("4. ✅ Timing: STRICT, MODERATE, LENIENT, NONE")
+    print("\n✅ Prêt pour le trading live")
