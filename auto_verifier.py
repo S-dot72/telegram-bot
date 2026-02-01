@@ -1,6 +1,7 @@
 """
 AUTO VERIFIER M1 - VERSION POCKET OPTION RÉELLE SANS DONNÉES FICTIVES
 Utilise OTCDataProvider pour la cohérence des données
+Version 3.1 - Corrections complètes des erreurs de données
 """
 
 import asyncio
@@ -49,7 +50,7 @@ class AutoResultVerifier:
         print("[VERIF-M1] 🔥 Support OTC/CRYPTO activé")
         print(f"[VERIF-M1] 🔧 OTC Provider: {'✅ Disponible' if otc_provider else '❌ Non disponible'}")
         print("[VERIF-M1] ⚠️ DONNÉES FICTIVES INTERDITES - Seules les données réelles sont acceptées")
-        print("[VERIF-M1] 📊 Version: 3.0 - Utilise OTCDataProvider pour cohérence")
+        print("[VERIF-M1] 📊 Version: 3.1 - Corrections complètes des erreurs de données")
 
     def set_bot(self, bot):
         """Configure le bot pour les notifications"""
@@ -231,15 +232,19 @@ class AutoResultVerifier:
             # Les données ne sont disponibles que 2-3 minutes APRÈS la fin de la bougie
             data_available_time = trade_end + timedelta(minutes=3)
             
+            # Pour OTC, augmenter le délai à 5 minutes
+            if is_otc:
+                data_available_time = trade_end + timedelta(minutes=5)
+            
             if now_utc < data_available_time:
                 wait_seconds = (data_available_time - now_utc).total_seconds()
                 if wait_seconds > 0:
                     print(f"[VERIF-M1] ⏳ Données historiques disponibles dans {wait_seconds:.0f}s")
                     
-                    # Si l'attente est courte (< 5 min), on attend
-                    if wait_seconds < 300:
+                    # Si l'attente est courte (< 10 min), on attend
+                    if wait_seconds < 600:
                         print(f"[VERIF-M1] ⏳ Attente de {wait_seconds:.0f}s pour données...")
-                        await asyncio.sleep(wait_seconds)
+                        await asyncio.sleep(wait_seconds + 2)  # +2 secondes de marge
                     else:
                         print(f"[VERIF-M1] ⏳ Trop long à attendre, on retente plus tard")
                         return None
@@ -392,9 +397,17 @@ class AutoResultVerifier:
                 print(f"[VERIF-M1]   ✅ API directe OTC réussi: {price:.5f}")
                 return price
         
-        # 3. Si Forex, utiliser TwelveData
+        # 3. Essayer APIs publiques gratuites
+        if is_otc:
+            print(f"[VERIF-M1]  3. Essai APIs publiques...")
+            price = await self._get_otc_price_public_api(pair, candle_start, price_type)
+            if price is not None and price != 0:
+                print(f"[VERIF-M1]   ✅ API publique réussi: {price:.5f}")
+                return price
+        
+        # 4. Si Forex, utiliser TwelveData
         if not is_otc:
-            print(f"[VERIF-M1]  3. Essai Forex via TwelveData...")
+            print(f"[VERIF-M1]  4. Essai Forex via TwelveData...")
             price = await self._get_forex_candle_price_real(pair, candle_start, price_type)
             if price is not None and price != 0:
                 print(f"[VERIF-M1]   ✅ Forex TwelveData réussi: {price:.5f}")
@@ -441,14 +454,14 @@ class AutoResultVerifier:
             import asyncio
             import functools
             
-            # CORRECTION : Appeler get_otc_data sans le paramètre 'limit'
+            # CORRECTION: Appeler get_otc_data avec les bons paramètres
             df = await asyncio.get_event_loop().run_in_executor(
                 None,
                 functools.partial(
                     self.otc_provider.get_otc_data,
                     pair=pair,
-                    interval='1min'
-                    # Supprimé: 'limit=10' - ce paramètre n'est pas accepté
+                    interval='1min',
+                    outputsize=10  # <-- CORRECTION: utiliser outputsize au lieu de limit
                 )
             )
             
@@ -457,10 +470,6 @@ class AutoResultVerifier:
                 return None
             
             print(f"[VERIF-M1] 📊 otc_provider retourné {len(df)} bougies pour {pair}")
-            
-            # Si nous avons trop de bougies, limiter aux 10 dernières pour la recherche
-            if len(df) > 10:
-                df = df.tail(10)
             
             # Chercher la bougie la plus proche de candle_start
             # Convertir les index en datetime timezone-aware
@@ -489,6 +498,8 @@ class AutoResultVerifier:
             
         except Exception as e:
             print(f"[VERIF-M1] ❌ Erreur otc_provider pour {pair}: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
     async def _get_otc_price_direct_api(self, pair, candle_start, price_type='close'):
@@ -498,7 +509,7 @@ class AutoResultVerifier:
         print(f"[VERIF-M1] 🔄 Fallback API directe pour {pair}")
         
         # Liste des exchanges à essayer
-        exchanges = ['bybit', 'binance', 'kucoin']
+        exchanges = ['bybit', 'binance', 'kucoin', 'okx']
         
         for exchange in exchanges:
             try:
@@ -521,95 +532,196 @@ class AutoResultVerifier:
         try:
             await self._wait_if_rate_limited()
             
-            # Mapping des paires
+            # Mapping étendu des paires
             symbol_mapping = {
                 'bybit': {
                     'BTC/USD': 'BTCUSDT',
                     'ETH/USD': 'ETHUSDT',
                     'TRX/USD': 'TRXUSDT',
                     'LTC/USD': 'LTCUSDT',
+                    'XRP/USD': 'XRPUSDT',
+                    'ADA/USD': 'ADAUSDT',
+                    'DOT/USD': 'DOTUSDT',
+                    'DOGE/USD': 'DOGEUSDT',
                 },
                 'binance': {
                     'BTC/USD': 'BTCUSDT',
                     'ETH/USD': 'ETHUSDT',
                     'TRX/USD': 'TRXUSDT',
                     'LTC/USD': 'LTCUSDT',
+                    'XRP/USD': 'XRPUSDT',
+                    'ADA/USD': 'ADAUSDT',
+                    'DOT/USD': 'DOTUSDT',
+                    'DOGE/USD': 'DOGEUSDT',
                 },
                 'kucoin': {
                     'BTC/USD': 'BTC-USDT',
                     'ETH/USD': 'ETH-USDT',
                     'TRX/USD': 'TRX-USDT',
                     'LTC/USD': 'LTC-USDT',
+                    'XRP/USD': 'XRP-USDT',
+                    'ADA/USD': 'ADA-USDT',
+                    'DOT/USD': 'DOT-USDT',
+                    'DOGE/USD': 'DOGE-USDT',
+                },
+                'okx': {
+                    'BTC/USD': 'BTC-USDT',
+                    'ETH/USD': 'ETH-USDT',
+                    'TRX/USD': 'TRX-USDT',
+                    'LTC/USD': 'LTC-USDT',
+                    'XRP/USD': 'XRP-USDT',
+                    'ADA/USD': 'ADA-USDT',
+                    'DOT/USD': 'DOT-USDT',
+                    'DOGE/USD': 'DOGE-USDT',
                 }
             }
             
-            symbol = symbol_mapping.get(exchange, {}).get(pair, pair.replace('/', ''))
+        symbol = symbol_mapping.get(exchange, {}).get(pair)
+        if not symbol:
+            print(f"[VERIF-M1] ⚠️ Paire {pair} non supportée sur {exchange}")
+            return None
+        
+        # Timestamp en millisecondes
+        start_ms = int(candle_start.timestamp() * 1000)
+        end_ms = start_ms + 60000  # 1 minute plus tard
+        
+        if exchange == 'binance':
+            url = 'https://api.binance.com/api/v3/klines'
+            params = {
+                'symbol': symbol,
+                'interval': '1m',
+                'startTime': start_ms - 180000,  # 3 minutes avant
+                'endTime': end_ms + 180000,      # 3 minutes après
+                'limit': 10
+            }
             
-            # Timestamp en millisecondes
-            start_ms = int(candle_start.timestamp() * 1000)
+            resp = self._session.get(url, params=params, timeout=15)
+            self._increment_api_call()
             
-            if exchange == 'binance':
-                url = 'https://api.binance.com/api/v3/klines'
-                params = {
-                    'symbol': symbol,
-                    'interval': '1m',
-                    'startTime': start_ms - 120000,
-                    'limit': 5
-                }
-                
-                resp = self._session.get(url, params=params, timeout=10)
-                self._increment_api_call()
-                
-                if resp.status_code != 200:
-                    return None
-                
+            if resp.status_code != 200:
+                print(f"[VERIF-M1] ⚠️ Binance API error: {resp.status_code}")
+                return None
+            
+            data = resp.json()
+            
+            if isinstance(data, list) and len(data) > 0:
+                for candle in data:
+                    candle_time = datetime.fromtimestamp(candle[0] / 1000, tz=timezone.utc)
+                    time_diff = abs((candle_time - candle_start).total_seconds())
+                    
+                    if time_diff < 90:  # Accepte 1.5 minutes de différence
+                        if price_type == 'open':
+                            return float(candle[1])
+                        else:
+                            return float(candle[4])
+        
+        elif exchange == 'bybit':
+            url = 'https://api.bybit.com/v5/market/kline'
+            params = {
+                'category': 'spot',
+                'symbol': symbol,
+                'interval': '1',
+                'start': start_ms - 180000,
+                'limit': 10
+            }
+            
+            resp = self._session.get(url, params=params, timeout=15)
+            self._increment_api_call()
+            
+            if resp.status_code != 200:
+                print(f"[VERIF-M1] ⚠️ Bybit API error: {resp.status_code}")
+                return None
+            
+            data = resp.json()
+            
+            if data.get('retCode') == 0 and data.get('result', {}).get('list'):
+                candles = data['result']['list']
+                for candle in candles:
+                    candle_time = datetime.fromtimestamp(int(candle[0]) / 1000, tz=timezone.utc)
+                    time_diff = abs((candle_time - candle_start).total_seconds())
+                    
+                    if time_diff < 90:
+                        if price_type == 'open':
+                            return float(candle[1])
+                        else:
+                            return float(candle[4])
+        
+        elif exchange == 'okx':
+            url = 'https://www.okx.com/api/v5/market/candles'
+            params = {
+                'instId': symbol,
+                'bar': '1m',
+                'after': start_ms - 180000,
+                'limit': 10
+            }
+            
+            resp = self._session.get(url, params=params, timeout=15)
+            self._increment_api_call()
+            
+            if resp.status_code != 200:
+                return None
+            
+            data = resp.json()
+            
+            if data.get('code') == '0' and data.get('data'):
+                candles = data['data']
+                for candle in candles:
+                    candle_time = datetime.fromtimestamp(int(candle[0]) / 1000, tz=timezone.utc)
+                    time_diff = abs((candle_time - candle_start).total_seconds())
+                    
+                    if time_diff < 90:
+                        if price_type == 'open':
+                            return float(candle[1])
+                        else:
+                            return float(candle[4])
+        
+        return None
+            
+        except Exception as e:
+            print(f"[VERIF-M1] ⚠️ Erreur API directe {exchange}: {e}")
+            return None
+
+    async def _get_otc_price_public_api(self, pair, candle_start, price_type='close'):
+        """
+        Méthode de secours avec des APIs publiques gratuites
+        """
+        try:
+            # Utiliser CoinGecko API pour les prix historiques
+            coin_mapping = {
+                'BTC/USD': 'bitcoin',
+                'ETH/USD': 'ethereum',
+                'TRX/USD': 'tron',
+                'LTC/USD': 'litecoin',
+                'XRP/USD': 'ripple',
+                'ADA/USD': 'cardano',
+                'DOT/USD': 'polkadot',
+                'DOGE/USD': 'dogecoin'
+            }
+            
+            coin_id = coin_mapping.get(pair)
+            if not coin_id:
+                return None
+            
+            # CoinGecko API pour prix historiques
+            timestamp = int(candle_start.timestamp())
+            url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/history"
+            params = {
+                'date': candle_start.strftime('%d-%m-%Y'),
+                'localization': 'false'
+            }
+            
+            resp = self._session.get(url, params=params, timeout=15)
+            
+            if resp.status_code == 200:
                 data = resp.json()
-                
-                if isinstance(data, list) and len(data) > 0:
-                    for candle in data:
-                        candle_time = datetime.fromtimestamp(candle[0] / 1000, tz=timezone.utc)
-                        time_diff = abs((candle_time - candle_start).total_seconds())
-                        
-                        if time_diff < 60:
-                            if price_type == 'open':
-                                return float(candle[1])
-                            else:
-                                return float(candle[4])
-            
-            elif exchange == 'bybit':
-                url = 'https://api.bybit.com/v5/market/kline'
-                params = {
-                    'category': 'spot',
-                    'symbol': symbol,
-                    'interval': '1',
-                    'start': start_ms - 120000,
-                    'limit': 5
-                }
-                
-                resp = self._session.get(url, params=params, timeout=10)
-                self._increment_api_call()
-                
-                if resp.status_code != 200:
-                    return None
-                
-                data = resp.json()
-                
-                if data.get('retCode') == 0 and data.get('result', {}).get('list'):
-                    candles = data['result']['list']
-                    for candle in candles:
-                        candle_time = datetime.fromtimestamp(int(candle[0]) / 1000, tz=timezone.utc)
-                        time_diff = abs((candle_time - candle_start).total_seconds())
-                        
-                        if time_diff < 60:
-                            if price_type == 'open':
-                                return float(candle[1])
-                            else:
-                                return float(candle[4])
+                if 'market_data' in data:
+                    price = data['market_data']['current_price']['usd']
+                    return float(price)
             
             return None
             
         except Exception as e:
-            print(f"[VERIF-M1] ❌ Erreur API directe {exchange}: {e}")
+            print(f"[VERIF-M1] ⚠️ Erreur API publique: {e}")
             return None
 
     async def _get_forex_candle_price_real(self, pair, candle_start, price_type='close'):
