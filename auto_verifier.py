@@ -1,6 +1,6 @@
 """
-AUTO VERIFIER M1 - VERSION COMPLÈTE AVEC SUPPORT OTC
-Correction pour trading M1 (1 minute) au lieu de M5 avec support OTC/CRYPTO
+AUTO VERIFIER M1 - VERSION POCKET OPTION RÉELLE
+Correction pour timing réel Pocket Option (trade la bougie en cours)
 """
 
 import asyncio
@@ -28,7 +28,6 @@ class AutoResultVerifier:
             'binance': 'https://api.binance.com/api/v3/klines',
             'bybit': 'https://api.bybit.com/v5/market/kline',
             'kucoin': 'https://api.kucoin.com/api/v1/market/candles',
-            'coinbase': 'https://api.exchange.coinbase.com/products'
         }
         
         # Mapping des paires OTC
@@ -46,8 +45,6 @@ class AutoResultVerifier:
                 'EUR/GBP': 'EURGBP',
                 'XAU/USD': 'XAUUSDT',
                 'XAG/USD': 'XAGUSDT',
-                'BTC/USDT': 'BTCUSDT',
-                'ETH/USDT': 'ETHUSDT',
             },
             'bybit': {
                 'BTC/USD': 'BTCUSDT',
@@ -58,8 +55,6 @@ class AutoResultVerifier:
                 'EUR/GBP': 'EURGBP',
                 'XAU/USD': 'XAUUSDT',
                 'XAG/USD': 'XAGUSDT',
-                'BTC/USDT': 'BTCUSDT',
-                'ETH/USDT': 'ETHUSDT',
             },
             'kucoin': {
                 'BTC/USD': 'BTC-USDT',
@@ -81,6 +76,7 @@ class AutoResultVerifier:
         print("[VERIF-M1] ✅ AutoResultVerifier M1 initialisé")
         print("[VERIF-M1] 🎯 Mode: Trading M1 (1 minute)")
         print("[VERIF-M1] 🔥 Support OTC/CRYPTO activé")
+        print("[VERIF-M1] ⏰ TIMING POCKET OPTION: Trade la bougie EN COURS")
 
     def set_bot(self, bot):
         """Configure le bot pour les notifications"""
@@ -157,40 +153,36 @@ class AutoResultVerifier:
         """Convertit une paire format TradingView en symbole d'API OTC"""
         return self.otc_symbol_mapping.get(exchange, {}).get(pair, pair.replace('/', ''))
 
-    def _calculate_next_m1_candle(self, signal_time):
+    def _calculate_correct_m1_candle(self, signal_time):
         """
-        CORRECTION M1 : Calcule la PROCHAINE bougie M1
+        CORRECTION CRITIQUE : Calcule la BONNE bougie M1 pour Pocket Option
         
-        Logique M1 :
-        - Signal à 14:23:47 → Prochaine bougie = 14:24:00
-        - Signal à 14:23:01 → Prochaine bougie = 14:24:00
-        - Signal à 14:23:00 → Prochaine bougie = 14:24:00
+        LOGIQUE POCKET OPTION RÉELLE :
+        - Signal à 19:49:00 → Trade la bougie 19:49:00-19:50:00
+        - Signal à 19:49:30 → Trade la bougie 19:49:00-19:50:00 (bougie en cours)
+        
+        Sur Pocket Option, quand tu cliques "CALL" ou "PUT", tu trade la bougie qui est EN COURS,
+        pas la suivante !
         
         Returns:
-            (candle_start, candle_end)
+            (candle_start, candle_end) - LA BOUGIE EN COURS au moment du signal
         """
         # S'assurer que c'est en UTC
         if signal_time.tzinfo is None:
             signal_time = signal_time.replace(tzinfo=timezone.utc)
         
-        current_second = signal_time.second
+        # Sur Pocket Option : tu trade la bougie qui DÉBUTE à l'heure arrondie à la minute
+        # Ex: 19:49:00 → bougie 19:49:00-19:50:00
+        # Ex: 19:49:30 → bougie 19:49:00-19:50:00 (même bougie en cours)
         
-        # Pour M1, la prochaine bougie est toujours la minute suivante
-        if current_second == 0:
-            # Signal pile au début d'une minute
-            # On prend la minute suivante pour être sûr que le trade a eu lieu
-            candle_start = signal_time + timedelta(minutes=1)
-        else:
-            # Signal pendant une minute → prendre la minute suivante
-            candle_start = signal_time.replace(second=0, microsecond=0) + timedelta(minutes=1)
-        
+        candle_start = self._round_to_m1(signal_time)
         candle_end = candle_start + timedelta(minutes=1)
         
         return candle_start, candle_end
 
     async def verify_single_signal(self, signal_id):
         """
-        Vérifie UN signal M1 - VERSION AVEC SUPPORT OTC
+        Vérifie UN signal M1 - TIMING POCKET OPTION CORRIGÉ
         """
         try:
             print(f"\n{'='*70}")
@@ -249,6 +241,8 @@ class AutoResultVerifier:
             if signal_time.tzinfo is None:
                 signal_time = signal_time.replace(tzinfo=timezone.utc)
             
+            print(f"[VERIF-M1] 🕐 Signal envoyé à: {signal_time.strftime('%H:%M:%S')} UTC")
+            
             # Vérifier week-end (sauf pour OTC)
             if not is_otc and self._is_weekend(signal_time):
                 print(f"[VERIF-M1] 🏖️ Week-end - Marqué LOSE")
@@ -262,18 +256,31 @@ class AutoResultVerifier:
                 })
                 return 'LOSE'
             
-            # CORRECTION M1 : Calculer la PROCHAINE bougie M1
-            trade_start, trade_end = self._calculate_next_m1_candle(signal_time)
+            # CORRECTION CRITIQUE : Calculer la BOUGIE EN COURS POCKET OPTION
+            trade_start, trade_end = self._calculate_correct_m1_candle(signal_time)
             
-            print(f"[VERIF-M1] 🕐 Signal envoyé  : {signal_time.strftime('%H:%M:%S')} UTC")
-            print(f"[VERIF-M1] 📊 Bougie M1 tradée : {trade_start.strftime('%H:%M')} - {trade_end.strftime('%H:%M')} UTC")
+            print(f"[VERIF-M1] ⚡ LOGIQUE POCKET OPTION:")
+            print(f"[VERIF-M1] 📊 Tu as tradé la bougie: {trade_start.strftime('%H:%M')} → {trade_end.strftime('%H:%M')} UTC")
+            print(f"[VERIF-M1] 💡 Sur Pocket Option, tu trade la bougie EN COURS quand tu cliques!")
             
-            # Vérifier que la bougie M1 est complète
+            # Calculer combien de temps il reste avant la fin de la bougie
             now_utc = datetime.now(timezone.utc)
+            
+            # Si la bougie n'est PAS ENCORE COMMENCÉE (futur)
+            if now_utc < trade_start:
+                time_until_start = (trade_start - now_utc).total_seconds()
+                print(f"[VERIF-M1] ⏳ Bougie M1 pas encore commencée - commence dans {time_until_start:.0f}s")
+                return None
+            
+            # Si la bougie est EN COURS
             if now_utc < trade_end:
                 remaining = (trade_end - now_utc).total_seconds()
-                print(f"[VERIF-M1] ⏳ Bougie M1 pas complète - reste {remaining:.0f}s")
+                print(f"[VERIF-M1] ⏳ Bougie M1 en cours - fin dans {remaining:.0f}s")
+                print(f"[VERIF-M1] ⚠️ Attendre la fin de la bougie pour vérifier...")
                 return None
+            
+            # Si la bougie est TERMINÉE
+            print(f"[VERIF-M1] ✅ Bougie M1 terminée - vérification en cours...")
             
             # Récupérer les prix de CETTE bougie M1 spécifique
             result, details = await self._verify_m1_candle(
@@ -281,7 +288,7 @@ class AutoResultVerifier:
             )
             
             if result:
-                details['verification_method'] = 'AUTO_M1_' + ('OTC' if is_otc else 'FOREX')
+                details['verification_method'] = 'AUTO_M1_POCKET_' + ('OTC' if is_otc else 'FOREX')
                 self._update_signal_result(signal_id, result, details)
                 emoji = "✅" if result == 'WIN' else "❌"
                 print(f"[VERIF-M1] {emoji} Résultat M1: {result}")
@@ -291,143 +298,13 @@ class AutoResultVerifier:
                 
                 return result
             else:
-                print(f"[VERIF-M1] ⚠️ Impossible de vérifier - Fallback interne")
-                # Fallback interne si impossible de vérifier
-                return await self._fallback_verification(signal_id, pair, direction, signal_time, is_otc, exchange)
+                print(f"[VERIF-M1] ⚠️ Impossible de vérifier - réessai plus tard")
+                return None
                 
         except Exception as e:
             print(f"[VERIF-M1] ❌ Erreur: {e}")
             import traceback
             traceback.print_exc()
-            return None
-
-    async def _fallback_verification(self, signal_id, pair, direction, signal_time, is_otc=False, exchange='bybit'):
-        """
-        Fallback interne en cas d'échec de vérification standard
-        """
-        try:
-            print(f"[VERIF-M1] 🚨 Fallback interne activé")
-            
-            # Essayer une autre méthode plus simple
-            result = await self._simple_verification(signal_id, pair, direction, signal_time, is_otc, exchange)
-            
-            if result:
-                print(f"[VERIF-M1] ✅ Fallback réussi: {result}")
-                return result
-            else:
-                print(f"[VERIF-M1] ❌ Fallback échoué")
-                # Marquer comme INVALID
-                self._update_signal_result(signal_id, 'INVALID', {
-                    'entry_price': 0,
-                    'exit_price': 0,
-                    'pips': 0,
-                    'gale_level': 0,
-                    'reason': 'Impossible de vérifier - Fallback échoué',
-                    'verification_method': 'FALLBACK_FAILED'
-                })
-                return 'INVALID'
-                
-        except Exception as e:
-            print(f"[VERIF-M1] ❌ Erreur fallback: {e}")
-            return None
-
-    async def _simple_verification(self, signal_id, pair, direction, signal_time, is_otc=False, exchange='bybit'):
-        """
-        Méthode de vérification simplifiée
-        """
-        try:
-            print(f"[VERIF-M1] 🔄 Simple vérification pour {pair}")
-            
-            # Récupérer le prix actuel comme exit_price
-            if is_otc:
-                # Pour OTC, utiliser l'API de l'exchange
-                current_price = await self._get_current_otc_price(pair, exchange)
-            else:
-                # Pour Forex, utiliser TwelveData
-                current_price = await self._get_current_forex_price(pair)
-            
-            if current_price is None:
-                return None
-            
-            # Pour l'entrée, on prend le prix 1 minute après le signal
-            entry_time = signal_time + timedelta(minutes=1)
-            if is_otc:
-                entry_price = await self._get_historical_otc_price(pair, entry_time, exchange)
-            else:
-                entry_price = await self._get_historical_forex_price(pair, entry_time)
-            
-            if entry_price is None:
-                # Si pas de prix historique, utiliser le prix actuel avec un offset
-                entry_price = current_price * (0.999 if direction == 'CALL' else 1.001)
-            
-            # Calculer le résultat
-            price_diff = current_price - entry_price
-            
-            if direction == 'CALL':
-                result = 'WIN' if price_diff > 0 else 'LOSE'
-            else:  # PUT
-                result = 'WIN' if price_diff < 0 else 'LOSE'
-            
-            pips_diff = abs(price_diff) * 10000
-            
-            self._update_signal_result(signal_id, result, {
-                'entry_price': entry_price,
-                'exit_price': current_price,
-                'pips': pips_diff,
-                'gale_level': 0,
-                'reason': 'Vérification simplifiée (fallback)',
-                'verification_method': 'SIMPLE_FALLBACK'
-            })
-            
-            return result
-            
-        except Exception as e:
-            print(f"[VERIF-M1] ❌ Erreur simple vérification: {e}")
-            return None
-
-    async def _get_current_forex_price(self, pair):
-        """Récupère le prix actuel Forex"""
-        try:
-            params = {
-                'symbol': pair,
-                'apikey': self.api_key,
-                'format': 'JSON'
-            }
-            
-            resp = self._session.get('https://api.twelvedata.com/price', params=params, timeout=10)
-            self._increment_api_call()
-            
-            if resp.status_code == 200:
-                data = resp.json()
-                if 'price' in data:
-                    return float(data['price'])
-            return None
-        except:
-            return None
-
-    async def _get_current_otc_price(self, pair, exchange='bybit'):
-        """Récupère le prix actuel OTC"""
-        try:
-            symbol = self._map_pair_to_symbol(pair, exchange)
-            
-            if exchange == 'binance':
-                url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
-                resp = self._session.get(url, timeout=5)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    return float(data['price'])
-            
-            elif exchange == 'bybit':
-                url = f"https://api.bybit.com/v5/market/tickers?category=spot&symbol={symbol}"
-                resp = self._session.get(url, timeout=5)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    if data.get('retCode') == 0 and data.get('result', {}).get('list'):
-                        ticker = data['result']['list'][0]
-                        return float(ticker['lastPrice'])
-            
-            return None
-        except:
             return None
 
     async def _verify_m1_candle(self, signal_id, pair, direction, candle_start, is_otc=False, exchange='bybit'):
@@ -445,7 +322,7 @@ class AutoResultVerifier:
                 print(f"[VERIF-M1] ❌ Prix d'ouverture M1 non disponible")
                 return None, None
             
-            await asyncio.sleep(2)  # Délai entre appels API
+            await asyncio.sleep(1)  # Délai court entre appels API
             
             # Récupérer le prix de fermeture M1
             exit_price = await self._get_exact_m1_candle_price(
@@ -480,7 +357,7 @@ class AutoResultVerifier:
                 'gale_level': 0,
                 'mode': 'OTC' if is_otc else 'Forex',
                 'exchange': exchange if is_otc else 'twelvedata',
-                'reason': f"Bougie M1 {candle_start.strftime('%H:%M')}"
+                'reason': f"Bougie M1 {candle_start.strftime('%H:%M')}-{(candle_start + timedelta(minutes=1)).strftime('%H:%M')}"
             }
             
             return result, details
@@ -512,14 +389,14 @@ class AutoResultVerifier:
         try:
             await self._wait_if_rate_limited()
             
-            # Plage ÉTROITE pour M1 : ±2 minutes
-            start_dt = candle_start - timedelta(minutes=2)
+            # Plage plus large pour être sûr de trouver la bougie
+            start_dt = candle_start - timedelta(minutes=3)
             end_dt = candle_start + timedelta(minutes=3)
             
             params = {
                 'symbol': pair,
-                'interval': '1min',  # ✅ M1 !
-                'outputsize': 5,
+                'interval': '1min',
+                'outputsize': 10,
                 'apikey': self.api_key,
                 'format': 'JSON',
                 'start_date': start_dt.strftime('%Y-%m-%d %H:%M:%S'),
@@ -528,7 +405,7 @@ class AutoResultVerifier:
             
             print(f"[VERIF-M1] 🔍 Forex API: {pair} {price_type} à {candle_start.strftime('%H:%M')} UTC")
             
-            resp = self._session.get(self.base_url, params=params, timeout=12)
+            resp = self._session.get(self.base_url, params=params, timeout=15)
             self._increment_api_call()
             
             resp.raise_for_status()
@@ -561,10 +438,10 @@ class AutoResultVerifier:
                 # Arrondir à M1 (minute pleine)
                 candle_time_m1 = self._round_to_m1(candle_time)
                 
-                # Comparaison EXACTE pour M1 (tolérance 30 secondes)
+                # Comparaison EXACTE pour M1
                 time_diff = abs((candle_time_m1 - candle_start).total_seconds())
                 
-                if time_diff < 30:  # ✅ Tolérance 30s pour M1
+                if time_diff < 10:  # ✅ Tolérance réduite à 10s pour précision
                     try:
                         price = float(candle[price_type])
                         print(f"[VERIF-M1] ✅ Bougie Forex trouvée - {price_type}: {price:.5f}")
@@ -605,13 +482,16 @@ class AutoResultVerifier:
                     'symbol': symbol,
                     'interval': '1m',
                     'startTime': start_ms,
-                    'limit': 2
+                    'limit': 3
                 }
                 
                 resp = self._session.get(url, params=params, timeout=10)
                 self._increment_api_call()
                 
-                resp.raise_for_status()
+                if resp.status_code != 200:
+                    print(f"[VERIF-M1] ❌ Binance API error: {resp.status_code}")
+                    return None
+                
                 data = resp.json()
                 
                 if isinstance(data, list) and len(data) > 0:
@@ -620,7 +500,7 @@ class AutoResultVerifier:
                         candle_time = datetime.fromtimestamp(candle[0] / 1000, tz=timezone.utc)
                         time_diff = abs((candle_time - candle_start).total_seconds())
                         
-                        if time_diff < 30:  # Tolérance 30 secondes
+                        if time_diff < 10:  # Tolérance 10 secondes
                             if price_type == 'open':
                                 price = float(candle[1])
                             else:
@@ -636,13 +516,16 @@ class AutoResultVerifier:
                     'symbol': symbol,
                     'interval': '1',
                     'start': start_ms,
-                    'limit': 2
+                    'limit': 3
                 }
                 
                 resp = self._session.get(url, params=params, timeout=10)
                 self._increment_api_call()
                 
-                resp.raise_for_status()
+                if resp.status_code != 200:
+                    print(f"[VERIF-M1] ❌ Bybit API error: {resp.status_code}")
+                    return None
+                
                 data = resp.json()
                 
                 if data.get('retCode') == 0 and data.get('result', {}).get('list'):
@@ -652,44 +535,13 @@ class AutoResultVerifier:
                         candle_time = datetime.fromtimestamp(int(candle[0]) / 1000, tz=timezone.utc)
                         time_diff = abs((candle_time - candle_start).total_seconds())
                         
-                        if time_diff < 30:
+                        if time_diff < 10:
                             if price_type == 'open':
                                 price = float(candle[1])
                             else:
                                 price = float(candle[4])
                             
                             print(f"[VERIF-M1] ✅ Bybit: {price_type}={price:.6f}")
-                            return price
-            
-            elif exchange == 'kucoin':
-                url = self.crypto_endpoints['kucoin']
-                params = {
-                    'symbol': symbol,
-                    'type': '1min',
-                    'startAt': int(start_ms / 1000) - 60,
-                    'endAt': int(start_ms / 1000) + 120
-                }
-                
-                resp = self._session.get(url, params=params, timeout=10)
-                self._increment_api_call()
-                
-                resp.raise_for_status()
-                data = resp.json()
-                
-                if data.get('code') == '200000' and data.get('data'):
-                    candles = data['data']
-                    for candle in candles:
-                        # KuCoin retourne: [timestamp, open, close, high, low, volume, turnover]
-                        candle_time = datetime.fromtimestamp(int(candle[0]), tz=timezone.utc)
-                        time_diff = abs((candle_time - candle_start).total_seconds())
-                        
-                        if time_diff < 30:
-                            if price_type == 'open':
-                                price = float(candle[1])
-                            else:
-                                price = float(candle[2])
-                            
-                            print(f"[VERIF-M1] ✅ KuCoin: {price_type}={price:.6f}")
                             return price
             
             print(f"[VERIF-M1] ❌ Bougie OTC {candle_start.strftime('%H:%M')} NON trouvée sur {exchange}")
@@ -788,25 +640,28 @@ class AutoResultVerifier:
             print(f"[VERIF-M1] 🔍 VÉRIFICATION AUTO M1 - {now_utc.strftime('%H:%M:%S')} UTC")
             print(f"{'='*70}")
 
-            query = text("""
-                SELECT id, pair, direction, ts_enter, confidence, kill_zone, payload_json
-                FROM signals
-                WHERE result IS NULL
-                ORDER BY ts_enter ASC
-                LIMIT 50
-            """)
-            
+            # Ne vérifier que les signaux dont la bougie est terminée (au moins 1 minute après le début)
             with self.engine.connect() as conn:
-                pending = conn.execute(query).fetchall()
+                # Requête optimisée pour ne prendre que les signaux vérifiables
+                pending = conn.execute(
+                    text("""
+                        SELECT id, pair, direction, ts_enter, confidence, kill_zone, payload_json
+                        FROM signals
+                        WHERE result IS NULL
+                          AND datetime(ts_enter, '+2 minutes') <= datetime('now')
+                        ORDER BY ts_enter ASC
+                        LIMIT 10
+                    """)
+                ).fetchall()
             
-            print(f"[VERIF-M1] 📊 Signaux M1 en attente: {len(pending)}")
+            print(f"[VERIF-M1] 📊 Signaux M1 vérifiables: {len(pending)}")
             
             if not pending:
-                print(f"[VERIF-M1] ✅ Aucun signal M1 à vérifier")
+                print(f"[VERIF-M1] ✅ Aucun signal M1 à vérifier pour le moment")
                 return
             
-            # Limite : 3 signaux max par cycle (API rate limiting)
-            MAX_PER_CYCLE = 3
+            # Limite : 2 signaux max par cycle (éviter rate limiting)
+            MAX_PER_CYCLE = 2
             
             if len(pending) > MAX_PER_CYCLE:
                 print(f"[VERIF-M1] ⚠️ {len(pending)} signaux - vérification de {MAX_PER_CYCLE}")
@@ -831,7 +686,7 @@ class AutoResultVerifier:
                     else:
                         error_count += 1
                     
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(1)
                     
                 except Exception as e:
                     error_count += 1
@@ -845,24 +700,3 @@ class AutoResultVerifier:
             print(f"[VERIF-M1] ❌ Erreur globale: {e}")
             import traceback
             traceback.print_exc()
-
-
-# Fonctions utilitaires M1 à ajouter dans utils.py
-def round_to_m1_candle(dt):
-    """Arrondit un datetime à la bougie M1 la plus proche"""
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.replace(second=0, microsecond=0)
-
-
-def get_next_m1_candle(dt):
-    """Retourne le début de la PROCHAINE bougie M1"""
-    current_candle = round_to_m1_candle(dt)
-    return current_candle + timedelta(minutes=1)
-
-
-def get_m1_candle_range(dt):
-    """Retourne le début et la fin de la bougie M1"""
-    start = round_to_m1_candle(dt)
-    end = start + timedelta(minutes=1)
-    return start, end
