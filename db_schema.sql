@@ -27,8 +27,6 @@ CREATE TABLE IF NOT EXISTS signals (
     winning_attempt TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
--- Add column 
-ALTER TABLE signals ADD COLUMN verification_method TEXT;
 
 CREATE TABLE IF NOT EXISTS metadata (
   k TEXT PRIMARY KEY,
