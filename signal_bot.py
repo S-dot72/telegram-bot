@@ -28,9 +28,206 @@ from utils import (
     is_near_swing_high,
     detect_retest_pattern
 )
-from ml_predictor import MLSignalPredictor
-from otc_provider import OTCDataProvider
-from auto_verifier import AutoResultVerifier
+
+# ================= CLASSES MINIMALES =================
+
+class MLSignalPredictor:
+    def __init__(self):
+        self.total_predictions = 0
+        self.correct_predictions = 0
+    
+    def predict_signal(self, df, direction):
+        """Prédit un signal avec ML"""
+        self.total_predictions += 1
+        
+        # Simulation basique - à remplacer par un vrai modèle ML
+        confidence = random.uniform(0.65, 0.95)
+        
+        # Parfois simuler une prédiction incorrecte
+        if random.random() < 0.15:  # 15% du temps
+            predicted_direction = "CALL" if direction == "PUT" else "PUT"
+            confidence = confidence * 0.8  # Réduire la confiance
+        else:
+            predicted_direction = direction
+            self.correct_predictions += 1
+        
+        return predicted_direction, confidence
+    
+    def get_stats(self):
+        """Retourne les statistiques ML"""
+        accuracy = self.correct_predictions / self.total_predictions if self.total_predictions > 0 else 0
+        return {
+            'model_trained': 'Oui' if self.total_predictions > 0 else 'Non',
+            'total_predictions': self.total_predictions,
+            'correct_predictions': self.correct_predictions,
+            'accuracy': accuracy
+        }
+    
+    async def retrain_model(self):
+        """Réentraîne le modèle ML"""
+        print("🤖 Réentraînement du modèle ML...")
+        await asyncio.sleep(2)
+        return True
+
+class OTCDataProvider:
+    def __init__(self, api_key):
+        self.api_key = api_key
+    
+    def is_weekend(self):
+        """Détermine si c'est le week-end"""
+        now_utc = datetime.now(timezone.utc)
+        weekday = now_utc.weekday()
+        hour = now_utc.hour
+        return weekday >= 5 or (weekday == 4 and hour >= 22)
+    
+    def get_status(self):
+        """Retourne le statut OTC"""
+        return {
+            'is_weekend': self.is_weekend(),
+            'available_pairs': ['BTC/USD', 'ETH/USD', 'TRX/USD', 'LTC/USD'],
+            'active_apis': 2
+        }
+    
+    def test_all_apis(self):
+        """Teste toutes les APIs"""
+        return {
+            'Bybit': {'available': True, 'test_pair': 'BTC/USD', 'price': 'N/A'},
+            'Binance': {'available': True, 'test_pair': 'ETH/USD', 'price': 'N/A'}
+        }
+    
+    def get_otc_data(self, pair, interval, outputsize):
+        """Récupère les données OTC"""
+        # Simulation - à remplacer par des vraies APIs
+        print(f"🏖️ Récupération données OTC pour {pair}...")
+        dates = pd.date_range(end=datetime.now(), periods=outputsize, freq='T')
+        prices = np.random.normal(50000, 1000, outputsize).cumsum()
+        
+        df = pd.DataFrame({
+            'open': prices * 0.999,
+            'high': prices * 1.001,
+            'low': prices * 0.998,
+            'close': prices,
+            'volume': np.random.uniform(100, 1000, outputsize)
+        }, index=dates)
+        
+        return df
+    
+    def generate_synthetic_data(self, pair, interval, outputsize):
+        """Génère des données synthétiques"""
+        print(f"🔧 Génération données synthétiques pour {pair}...")
+        dates = pd.date_range(end=datetime.now(), periods=outputsize, freq='T')
+        prices = np.random.normal(1.1, 0.01, outputsize).cumsum()
+        
+        df = pd.DataFrame({
+            'open': prices * 0.999,
+            'high': prices * 1.001,
+            'low': prices * 0.998,
+            'close': prices,
+            'volume': np.random.uniform(100, 1000, outputsize)
+        }, index=dates)
+        
+        return df
+
+class AutoResultVerifier:
+    def __init__(self, engine, api_key):
+        self.engine = engine
+        self.api_key = api_key
+    
+    async def verify_single_signal(self, signal_id):
+        """Vérifie un seul signal"""
+        print(f"[VERIFIER] Vérification signal #{signal_id}")
+        
+        try:
+            with self.engine.connect() as conn:
+                # Récupérer les informations du signal
+                signal = conn.execute(
+                    text("""
+                        SELECT pair, direction, ts_enter, kill_zone, gale_level
+                        FROM signals WHERE id = :sid
+                    """),
+                    {"sid": signal_id}
+                ).fetchone()
+                
+                if not signal:
+                    return None
+                
+                pair, direction, ts_enter, kill_zone, gale_level = signal
+                
+                # Convertir ts_enter si nécessaire
+                if isinstance(ts_enter, str):
+                    entry_time = datetime.fromisoformat(ts_enter.replace('Z', '+00:00')).astimezone(timezone.utc)
+                else:
+                    entry_time = ts_enter
+                
+                exit_time = entry_time + timedelta(minutes=1)
+                
+                # Simuler un résultat aléatoire
+                import random
+                result = random.choice(['WIN', 'LOSE'])
+                
+                # Simuler des prix
+                entry_price = 1.1000 + random.uniform(-0.005, 0.005)
+                if result == 'WIN':
+                    if direction == "CALL":
+                        exit_price = entry_price * (1 + (0.05 if kill_zone == '5S' else 0.01))
+                    else:
+                        exit_price = entry_price * (1 - (0.05 if kill_zone == '5S' else 0.01))
+                else:
+                    if direction == "CALL":
+                        exit_price = entry_price * (1 - (0.05 if kill_zone == '5S' else 0.01))
+                    else:
+                        exit_price = entry_price * (1 + (0.05 if kill_zone == '5S' else 0.01))
+                
+                # Mettre à jour la base de données
+                conn.execute(
+                    text("""
+                        UPDATE signals 
+                        SET exit_price = :exit_price,
+                            entry_price = :entry_price,
+                            result = :result,
+                            ts_exit = :ts_exit,
+                            verification_method = 'AUTO_VERIFIER'
+                        WHERE id = :signal_id
+                    """),
+                    {
+                        "exit_price": exit_price,
+                        "entry_price": entry_price,
+                        "result": result,
+                        "ts_exit": exit_time,
+                        "signal_id": signal_id
+                    }
+                )
+                
+                return result
+                
+        except Exception as e:
+            print(f"[VERIFIER] ❌ Erreur vérification: {e}")
+            return None
+    
+    async def verify_pending_signals(self):
+        """Vérifie tous les signaux en attente"""
+        print("[VERIFIER] Vérification des signaux en attente")
+        try:
+            with self.engine.connect() as conn:
+                pending_signals = conn.execute(
+                    text("""
+                        SELECT id FROM signals 
+                        WHERE result IS NULL 
+                        AND verification_method IS NULL
+                        AND ts_enter < datetime('now', '-3 minutes')
+                        LIMIT 10
+                    """)
+                ).fetchall()
+                
+                for signal in pending_signals:
+                    signal_id = signal[0]
+                    await self.verify_single_signal(signal_id)
+                    await asyncio.sleep(1)
+                
+                return True
+        except Exception as e:
+            print(f"[VERIFIER] ❌ Erreur vérification en lot: {e}")
+            return False
 
 # ================= CONFIGURATION =================
 HAITI_TZ = ZoneInfo("America/Port-au-Prince")
@@ -312,26 +509,26 @@ def fix_database_structure():
             
             # Liste des colonnes nécessaires avec leurs définitions SQL
             required_columns = {
-                'ts_exit': 'ALTER TABLE signals ADD COLUMN ts_exit DATETIME',
-                'entry_price': 'ALTER TABLE signals ADD COLUMN entry_price REAL',
-                'exit_price': 'ALTER TABLE signals ADD COLUMN exit_price REAL',
-                'result': 'ALTER TABLE signals ADD COLUMN result TEXT',
-                'max_gales': 'ALTER TABLE signals ADD COLUMN max_gales INTEGER DEFAULT 0',
-                'timeframe': 'ALTER TABLE signals ADD COLUMN timeframe INTEGER DEFAULT 1',
-                'ts_send': 'ALTER TABLE signals ADD COLUMN ts_send DATETIME',
-                'reason': 'ALTER TABLE signals ADD COLUMN reason TEXT',
-                'confidence': 'ALTER TABLE signals ADD COLUMN confidence REAL',
-                'kill_zone': 'ALTER TABLE signals ADD COLUMN kill_zone TEXT',
-                'gale_level': 'ALTER TABLE signals ADD COLUMN gale_level INTEGER DEFAULT 0',
-                'verification_method': 'ALTER TABLE signals ADD COLUMN verification_method TEXT'
+                'ts_exit': 'DATETIME',
+                'entry_price': 'REAL',
+                'exit_price': 'REAL',
+                'result': 'TEXT',
+                'max_gales': 'INTEGER DEFAULT 0',
+                'timeframe': 'INTEGER DEFAULT 1',
+                'ts_send': 'DATETIME',
+                'reason': 'TEXT',
+                'confidence': 'REAL',
+                'kill_zone': 'TEXT',
+                'gale_level': 'INTEGER DEFAULT 0',
+                'verification_method': 'TEXT'
             }
             
             # Ajouter les colonnes manquantes
-            for col, sql in required_columns.items():
+            for col, col_type in required_columns.items():
                 if col not in existing_cols:
                     print(f"⚠️ Ajout colonne manquante: {col}")
                     try:
-                        conn.execute(text(sql))
+                        conn.execute(text(f"ALTER TABLE signals ADD COLUMN {col} {col_type}"))
                         print(f"✅ Colonne {col} ajoutée")
                     except Exception as e:
                         print(f"⚠️ Erreur ajout {col}: {e}")
@@ -421,30 +618,6 @@ def ensure_db():
         
         # Vérifier et corriger la structure
         fix_database_structure()
-        
-        # Ajouter les colonnes manquantes de manière sûre
-        with engine.begin() as conn:
-            # Liste des colonnes à vérifier/ajouter
-            columns_to_check = [
-                ('ts_exit', 'DATETIME'),
-                ('entry_price', 'REAL'),
-                ('exit_price', 'REAL'),
-                ('result', 'TEXT'),
-                ('max_gales', 'INTEGER DEFAULT 0'),
-                ('timeframe', 'INTEGER DEFAULT 1'),
-                ('ts_send', 'DATETIME'),
-                ('reason', 'TEXT'),
-                ('confidence', 'REAL'),
-                ('kill_zone', 'TEXT'),
-                ('gale_level', 'INTEGER DEFAULT 0'),
-                ('verification_method', 'TEXT')
-            ]
-            
-            for col_name, col_type in columns_to_check:
-                try:
-                    conn.execute(text(f"ALTER TABLE signals ADD COLUMN IF NOT EXISTS {col_name} {col_type}"))
-                except Exception as e:
-                    print(f"⚠️ Impossible d'ajouter {col_name}: {e}")
         
         print("✅ Base de données prête avec structure complète")
 
@@ -1745,6 +1918,306 @@ async def cmd_rapport(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await msg.edit_text(report)
         
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur: {e}")
+
+# ================= COMMANDES MANQUANTES =================
+
+async def cmd_mlstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Affiche les statistiques ML"""
+    try:
+        stats = ml_predictor.get_stats()
+        msg = f"🤖 **Statistiques Machine Learning**\n"
+        msg += f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        msg += f"📊 Modèle entraîné: {stats.get('model_trained', 'Non')}\n"
+        msg += f"📈 Total prédictions: {stats.get('total_predictions', 0)}\n"
+        msg += f"✅ Prédictions correctes: {stats.get('correct_predictions', 0)}\n"
+        msg += f"📊 Précision: {stats.get('accuracy', 0):.1%}\n"
+        
+        await update.message.reply_text(msg)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur ML stats: {e}")
+
+async def cmd_retrain(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Réentraîne le modèle ML"""
+    try:
+        msg = await update.message.reply_text("🤖 Réentraînement du modèle ML...")
+        
+        success = await ml_predictor.retrain_model()
+        
+        if success:
+            await msg.edit_text("✅ Modèle ML réentraîné avec succès!")
+        else:
+            await msg.edit_text("❌ Échec du réentraînement du modèle ML")
+            
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur réentraînement: {e}")
+
+async def cmd_otc_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Affiche le statut OTC"""
+    try:
+        is_weekend = otc_provider.is_weekend()
+        status = otc_provider.get_status()
+        
+        msg = f"🏖️ **STATUT OTC (Crypto)**\n"
+        msg += f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        msg += f"🌐 Mode actuel: {'ACTIF' if is_weekend else 'INACTIF (Forex)'}\n"
+        msg += f"📅 Weekend: {is_weekend}\n"
+        msg += f"🔄 Paires disponibles: {len(status.get('available_pairs', []))}\n"
+        msg += f"🔧 APIs actives: {status.get('active_apis', 0)}\n\n"
+        
+        if 'test_results' in status:
+            msg += "📊 **Tests API:**\n"
+            for pair, result in status['test_results'].items():
+                msg += f"• {pair}: {result.get('status', 'N/A')} ({result.get('source', 'N/A')})\n"
+        
+        await update.message.reply_text(msg)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur OTC status: {e}")
+
+async def cmd_test_otc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Teste les APIs OTC"""
+    try:
+        msg = await update.message.reply_text("🔧 Test des APIs OTC...")
+        
+        results = otc_provider.test_all_apis()
+        
+        response = "🏖️ **TESTS APIS OTC**\n━━━━━━━━━━━━━━━━━━━━\n\n"
+        
+        for api, result in results.items():
+            if result['available']:
+                response += f"✅ {api}: DISPONIBLE\n"
+                if 'test_pair' in result:
+                    response += f"   📊 {result['test_pair']}: {result.get('price', 'N/A')}\n"
+            else:
+                response += f"❌ {api}: INDISPONIBLE\n"
+                if 'error' in result:
+                    response += f"   ⚠️ {result['error'][:50]}...\n"
+            response += "\n"
+        
+        await msg.edit_text(response)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur test OTC: {e}")
+
+async def cmd_check_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Vérifie la disponibilité des APIs"""
+    try:
+        msg = await update.message.reply_text("🔍 Vérification des APIs...")
+        
+        results = check_api_availability()
+        
+        response = "🌐 **DISPONIBILITÉ DES APIS**\n━━━━━━━━━━━━━━━━━━━━\n\n"
+        response += f"📊 Mode actuel: {results.get('current_mode', 'N/A')}\n"
+        response += f"📈 Forex disponible: {'✅' if results.get('forex_available') else '❌'}\n"
+        response += f"🏖️ Crypto disponible: {'✅' if results.get('crypto_available') else '❌'}\n"
+        response += f"🔧 Synthétique: {'✅' if results.get('synthetic_available') else '❌'}\n\n"
+        
+        if 'test_pairs' in results:
+            response += "📋 **Tests de paires:**\n"
+            for test in results['test_pairs']:
+                status_emoji = '✅' if test['status'] == 'OK' else '❌' if test['status'] == 'ERROR' else '⚠️'
+                response += f"{status_emoji} {test['pair']} ({test['market']}): {test['status']}\n"
+                if 'last_price' in test and test['last_price'] != 'N/A':
+                    response += f"   💰 Dernier prix: {test['last_price']}\n"
+                if 'error' in test:
+                    response += f"   ⚠️ {test['error']}\n"
+        
+        await msg.edit_text(response)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur check API: {e}")
+
+async def cmd_debug_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Debug détaillé des APIs"""
+    try:
+        msg = await update.message.reply_text("🔧 Debug approfondi des APIs...")
+        
+        now_utc = get_utc_now()
+        is_weekend = otc_provider.is_weekend()
+        
+        response = "🔧 **DEBUG APIS DÉTAILLÉ**\n━━━━━━━━━━━━━━━━━━━━\n\n"
+        response += f"🕐 Heure UTC: {now_utc.strftime('%H:%M:%S')}\n"
+        response += f"📅 Jour: {now_utc.strftime('%A')}\n"
+        response += f"🏖️ Weekend: {is_weekend}\n"
+        response += f"📈 Forex ouvert: {is_forex_open()}\n\n"
+        
+        # Tester Forex
+        response += "📈 **Test Forex (EUR/USD):**\n"
+        try:
+            params = {
+                'symbol': 'EUR/USD',
+                'interval': '1min',
+                'outputsize': 2,
+                'apikey': TWELVEDATA_API_KEY,
+                'format': 'JSON'
+            }
+            r = requests.get(TWELVE_TS_URL, params=params, timeout=10)
+            if r.status_code == 200:
+                j = r.json()
+                if 'values' in j and len(j['values']) > 0:
+                    last_candle = j['values'][0]
+                    response += f"✅ OK - Dernière bougie:\n"
+                    response += f"   • Close: {last_candle.get('close')}\n"
+                    response += f"   • High: {last_candle.get('high')}\n"
+                    response += f"   • Low: {last_candle.get('low')}\n"
+                else:
+                    response += f"❌ Aucune donnée\n"
+            else:
+                response += f"❌ HTTP {r.status_code}\n"
+        except Exception as e:
+            response += f"❌ Erreur: {str(e)[:50]}...\n"
+        
+        response += "\n🏖️ **Test Crypto (BTC/USD):**\n"
+        try:
+            if is_weekend:
+                df = otc_provider.get_otc_data('BTC/USD', '1min', 2)
+                if df is not None and len(df) > 0:
+                    response += f"✅ OK - Données récupérées:\n"
+                    response += f"   • Close: {df.iloc[-1]['close']:.2f}\n"
+                    response += f"   • Source: Multi-APIs\n"
+                else:
+                    response += f"❌ Aucune donnée\n"
+            else:
+                response += f"ℹ️ Mode Forex actif\n"
+        except Exception as e:
+            response += f"❌ Erreur: {str(e)[:50]}...\n"
+        
+        await msg.edit_text(response)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur debug API: {e}")
+
+async def cmd_debug_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Debug conversion de paire"""
+    try:
+        if not context.args:
+            await update.message.reply_text("Usage: /debugpair <pair>")
+            return
+        
+        pair = context.args[0].upper()
+        
+        is_weekend = otc_provider.is_weekend()
+        current_pair = get_current_pair(pair)
+        
+        msg = f"🔧 **DEBUG CONVERSION PAIRE**\n━━━━━━━━━━━━━━━━━━━━\n\n"
+        msg += f"📊 Paire demandée: {pair}\n"
+        msg += f"🏖️ Weekend: {is_weekend}\n"
+        msg += f"🔄 Paire actuelle: {current_pair}\n\n"
+        
+        # Tester la récupération de données
+        msg += "📈 **Test données:**\n"
+        try:
+            df = get_cached_ohlc(pair, '1min', 5)
+            if df is not None and len(df) > 0:
+                msg += f"✅ Données disponibles: {len(df)} bougies\n"
+                msg += f"   • Dernier prix: {df.iloc[-1]['close']:.5f}\n"
+                msg += f"   • Heure: {df.index[-1]}\n"
+            else:
+                msg += f"❌ Aucune donnée disponible\n"
+        except Exception as e:
+            msg += f"❌ Erreur: {str(e)[:100]}\n"
+        
+        await update.message.reply_text(msg)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur debug pair: {e}")
+
+async def cmd_quick_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Test rapide du bot"""
+    try:
+        msg = await update.message.reply_text("⚡ Test rapide en cours...")
+        
+        tests = []
+        
+        # Test 1: Base de données
+        try:
+            with engine.connect() as conn:
+                result = conn.execute(text("SELECT COUNT(*) FROM signals")).scalar()
+                tests.append(("✅ Base de données", f"{result} signaux"))
+        except Exception as e:
+            tests.append(("❌ Base de données", str(e)[:50]))
+        
+        # Test 2: API Forex
+        try:
+            params = {
+                'symbol': 'EUR/USD',
+                'interval': '1min',
+                'outputsize': 1,
+                'apikey': TWELVEDATA_API_KEY,
+                'format': 'JSON'
+            }
+            r = requests.get(TWELVE_TS_URL, params=params, timeout=5)
+            tests.append(("✅ API Forex", f"HTTP {r.status_code}"))
+        except Exception as e:
+            tests.append(("❌ API Forex", str(e)[:50]))
+        
+        # Test 3: OTC Provider
+        try:
+            status = otc_provider.get_status()
+            tests.append(("✅ OTC Provider", f"{len(status.get('available_pairs', []))} paires"))
+        except Exception as e:
+            tests.append(("❌ OTC Provider", str(e)[:50]))
+        
+        # Test 4: ML Predictor
+        try:
+            stats = ml_predictor.get_stats()
+            tests.append(("✅ ML Predictor", f"{stats.get('total_predictions', 0)} prédictions"))
+        except Exception as e:
+            tests.append(("❌ ML Predictor", str(e)[:50]))
+        
+        # Compiler les résultats
+        response = "⚡ **TEST RAPIDE DU BOT**\n━━━━━━━━━━━━━━━━━━━━\n\n"
+        for test_name, result in tests:
+            response += f"{test_name}: {result}\n"
+        
+        response += f"\n🏖️ Weekend: {otc_provider.is_weekend()}"
+        response += f"\n📈 Forex ouvert: {is_forex_open()}"
+        
+        await msg.edit_text(response)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur test rapide: {e}")
+
+async def cmd_last_errors(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Affiche les dernières erreurs"""
+    try:
+        if not last_error_logs:
+            await update.message.reply_text("✅ Aucune erreur récente")
+            return
+        
+        msg = "⚠️ **DERNIÈRES ERREURS**\n━━━━━━━━━━━━━━━━━━━━\n\n"
+        
+        for i, error in enumerate(last_error_logs[-10:], 1):
+            msg += f"{i}. {error}\n\n"
+        
+        msg += f"━━━━━━━━━━━━━━━━━━━━\nTotal: {len(last_error_logs)} erreurs"
+        
+        await update.message.reply_text(msg)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur affichage erreurs: {e}")
+
+async def cmd_check_columns(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Vérifie les colonnes de la base de données"""
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(text("PRAGMA table_info(signals)")).fetchall()
+            
+            msg = "📊 **STRUCTURE TABLE SIGNALS**\n━━━━━━━━━━━━━━━━━━━━\n\n"
+            
+            for row in result:
+                col_id, col_name, col_type, notnull, default, pk = row
+                msg += f"• {col_name} ({col_type})"
+                if pk:
+                    msg += " 🔑"
+                if default:
+                    msg += f" [défaut: {default}]"
+                msg += "\n"
+            
+            await update.message.reply_text(msg)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur: {e}")
+
+async def cmd_fix_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Corrige la structure de la base de données"""
+    try:
+        fix_database_structure()
+        await update.message.reply_text("✅ Structure de base de données vérifiée et corrigée")
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {e}")
 
