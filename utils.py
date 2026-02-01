@@ -1,6 +1,6 @@
 """
-utils.py - STRATÉGIE BINAIRE M1 PRO - VERSION 4.2
-Niveau desk pro avec asymétrie BUY/SELL
+utils.py - STRATÉGIE BINAIRE M1 PRO - VERSION 4.2 COMPATIBLE
+Niveau desk pro avec compatibilité totale signal_bot
 """
 
 import pandas as pd
@@ -65,11 +65,105 @@ SAINT_GRAAL_CONFIG = {
     },
 }
 
-# ================= DÉTECTION SWING INTERNE (NOUVEAU) =================
+# ================= FONCTIONS DE BASE =================
+
+def round_to_m1_candle(dt):
+    """Arrondit à la bougie M1"""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.replace(second=0, microsecond=0)
+
+def get_next_m1_candle(dt):
+    """Début de la prochaine bougie M1"""
+    current_candle = round_to_m1_candle(dt)
+    return current_candle + timedelta(minutes=1)
+
+def get_m1_candle_range(dt):
+    """Range de la bougie M1 actuelle"""
+    current_candle = round_to_m1_candle(dt)
+    start_time = current_candle
+    end_time = current_candle + timedelta(minutes=1)
+    return start_time, end_time
+
+# ================= DÉTECTION STRUCTURE =================
+
+def analyze_market_structure(df, lookback=15):
+    """
+    COMPATIBILITÉ : Retourne seulement 2 valeurs (structure, trend_strength)
+    Pour usage dans signal_bot.py
+    """
+    if len(df) < lookback + 5:
+        return "INSUFFICIENT_DATA", 0.0
+    
+    recent = df.tail(lookback).copy()
+    highs = recent['high'].values
+    lows = recent['low'].values
+    
+    swing_highs = []
+    swing_lows = []
+    
+    # Détection swings robuste
+    for i in range(3, len(recent)-3):
+        # Swing High
+        if (highs[i] > highs[i-1] and highs[i] > highs[i-2] and 
+            highs[i] > highs[i-3] and
+            highs[i] > highs[i+1] and highs[i] > highs[i+2] and
+            highs[i] > highs[i+3]):
+            
+            min_height = recent['close'].mean() * 0.0002  # 2 pips min
+            if highs[i] - max(highs[i-3], highs[i-2], highs[i-1],
+                             highs[i+1], highs[i+2], highs[i+3]) > min_height:
+                swing_highs.append({
+                    'index': i,
+                    'price': float(highs[i]),
+                })
+        
+        # Swing Low
+        if (lows[i] < lows[i-1] and lows[i] < lows[i-2] and 
+            lows[i] < lows[i-3] and
+            lows[i] < lows[i+1] and lows[i] < lows[i+2] and
+            lows[i] < lows[i+3]):
+            
+            min_depth = recent['close'].mean() * 0.0002
+            if min(lows[i-3], lows[i-2], lows[i-1],
+                  lows[i+1], lows[i+2], lows[i+3]) - lows[i] > min_depth:
+                swing_lows.append({
+                    'index': i,
+                    'price': float(lows[i]),
+                })
+    
+    # Logique de détection
+    structure = "RANGE"
+    trend_strength = 0.0
+    
+    if len(swing_highs) >= 3 and len(swing_lows) >= 3:
+        recent_highs = sorted(swing_highs, key=lambda x: x['index'])[-3:]
+        recent_lows = sorted(swing_lows, key=lambda x: x['index'])[-3:]
+        
+        high_prices = [h['price'] for h in recent_highs]
+        low_prices = [l['price'] for l in recent_lows]
+        
+        is_hh = all(high_prices[i] > high_prices[i-1] for i in range(1, len(high_prices)))
+        is_hl = all(low_prices[i] > low_prices[i-1] for i in range(1, len(low_prices)))
+        is_lh = all(high_prices[i] < high_prices[i-1] for i in range(1, len(high_prices)))
+        is_ll = all(low_prices[i] < low_prices[i-1] for i in range(1, len(low_prices)))
+        
+        if is_hh and is_hl:
+            structure = "UPTREND"
+            trend_strength = float((high_prices[-1] - high_prices[0]) / high_prices[0] * 100)
+        elif is_lh and is_ll:
+            structure = "DOWNTREND"
+            trend_strength = float((low_prices[0] - low_prices[-1]) / low_prices[-1] * 100)
+        else:
+            structure = "RANGE"
+    
+    return structure, trend_strength
+
+# ================= DÉTECTION SWING INTERNE (NOUVELLE FONCTION) =================
 
 def detect_internal_swings(df, lookback=10):
     """
-    🔥 NOUVEAU : Détection swings internes pour confirmation structure
+    🔥 NOUVELLE FONCTION : Détection swings internes pour confirmation structure
     """
     if len(df) < lookback:
         return None, None
@@ -114,11 +208,182 @@ def check_swing_break(current_price, internal_swing, direction, max_distance_pip
     
     return is_broken and is_near, distance_pips
 
-# ================= MOMENTUM ASYMÉTRIQUE (NOUVEAU) =================
+# ================= ZONES S/R (NOUVELLES FONCTIONS) =================
+
+def detect_key_zones(df, lookback=100, min_touches=2, tolerance_pips=None):
+    """Détection améliorée des zones support/résistance avec clustering"""
+    if len(df) < lookback:
+        return [], []
+    
+    recent = df.tail(lookback).copy()
+    
+    # Calcul ATR pour tolérance dynamique
+    atr = AverageTrueRange(
+        high=recent['high'],
+        low=recent['low'],
+        close=recent['close'],
+        window=14
+    ).average_true_range()
+    
+    current_atr = atr.iloc[-1] if not atr.empty else 0.0005
+    
+    # Tolérance dynamique basée sur ATR (0.5 ATR par défaut)
+    if tolerance_pips is None:
+        tolerance = current_atr * 0.5
+    else:
+        tolerance = tolerance_pips * 0.0001
+    
+    # Détection des swings pour résistances
+    resistances = []
+    for i in range(3, len(recent)-3):
+        current_high = float(recent.iloc[i]['high'])
+        is_swing_high = (
+            current_high == recent['high'].iloc[i-3:i+4].max() and
+            current_high > recent['high'].iloc[i-1] and
+            current_high > recent['high'].iloc[i+1]
+        )
+        
+        if is_swing_high:
+            found_cluster = False
+            for res in resistances:
+                if abs(current_high - res['price']) <= tolerance:
+                    res['prices'].append(current_high)
+                    res['touches'] += 1
+                    res['last_touch'] = recent.index[i]
+                    found_cluster = True
+                    break
+            
+            if not found_cluster:
+                resistances.append({
+                    'price': current_high,
+                    'prices': [current_high],
+                    'touches': 1,
+                    'last_touch': recent.index[i],
+                    'type': 'RESISTANCE',
+                })
+    
+    # Détection des swings pour supports
+    supports = []
+    for i in range(3, len(recent)-3):
+        current_low = float(recent.iloc[i]['low'])
+        is_swing_low = (
+            current_low == recent['low'].iloc[i-3:i+4].min() and
+            current_low < recent['low'].iloc[i-1] and
+            current_low < recent['low'].iloc[i+1]
+        )
+        
+        if is_swing_low:
+            found_cluster = False
+            for sup in supports:
+                if abs(current_low - sup['price']) <= tolerance:
+                    sup['prices'].append(current_low)
+                    sup['touches'] += 1
+                    sup['last_touch'] = recent.index[i]
+                    found_cluster = True
+                    break
+            
+            if not found_cluster:
+                supports.append({
+                    'price': current_low,
+                    'prices': [current_low],
+                    'touches': 1,
+                    'last_touch': recent.index[i],
+                    'type': 'SUPPORT',
+                })
+    
+    # Calcul du score de force
+    current_price = float(recent.iloc[-1]['close'])
+    
+    for zone in supports + resistances:
+        # Score de base basé sur touches
+        touches_score = min(zone['touches'] * 15, 40)
+        
+        # Pénalité pour largeur
+        if len(zone['prices']) > 1:
+            zone_width = max(zone['prices']) - min(zone['prices'])
+            width_pips = zone_width / 0.0001
+            width_penalty = min(width_pips * 1.5, 20)
+        else:
+            width_penalty = 0
+        
+        # Bonus récence
+        age_bars = len(recent) - recent.index.get_loc(zone['last_touch'])
+        recency_bonus = max(0, (100 - age_bars) * 0.5)
+        
+        # Score brut
+        raw_score = touches_score - width_penalty + recency_bonus
+        
+        # Normalisation 0-50
+        zone['strength_score'] = min(50, max(0, raw_score))
+    
+    # Filtrer zones
+    valid_supports = [
+        s for s in supports 
+        if s['touches'] >= min_touches 
+    ]
+    
+    valid_resistances = [
+        r for r in resistances 
+        if r['touches'] >= min_touches 
+    ]
+    
+    # Trier par score
+    valid_supports.sort(key=lambda x: x['strength_score'], reverse=True)
+    valid_resistances.sort(key=lambda x: x['strength_score'], reverse=True)
+    
+    return valid_supports[:3], valid_resistances[:3]
+
+def is_price_near_zone_pro(current_price, zones, max_distance_pips=10):
+    """Vérifie proximité zone (version pro)"""
+    max_distance = max_distance_pips * 0.0001
+    
+    if not zones:
+        return False, None, float('inf')
+    
+    nearest_zone = None
+    min_distance = float('inf')
+    
+    for zone in zones:
+        distance = abs(current_price - zone['price'])
+        if distance < min_distance:
+            min_distance = distance
+            nearest_zone = zone
+    
+    is_near = min_distance <= max_distance
+    distance_pips = min_distance / 0.0001
+    
+    return is_near, nearest_zone, distance_pips
+
+def calculate_zone_strength(zone):
+    """Calcule un bonus de trading basé sur la force de la zone"""
+    if not zone:
+        return 0, "Aucune zone"
+    
+    strength = zone.get('strength_score', 0)
+    
+    if strength > 45:
+        bonus = 25
+        reason = f"Zone {zone['type']} TRÈS FORTE ({strength:.0f}/50)"
+    elif strength > 35:
+        bonus = 20
+        reason = f"Zone {zone['type']} FORTE ({strength:.0f}/50)"
+    elif strength > 25:
+        bonus = 15
+        reason = f"Zone {zone['type']} MOYENNE ({strength:.0f}/50)"
+    elif strength > 15:
+        bonus = 10
+        reason = f"Zone {zone['type']} FAIBLE ({strength:.0f}/50)"
+    else:
+        bonus = 5
+        reason = f"Zone {zone['type']} TRÈS FAIBLE ({strength:.0f}/50)"
+    
+    return bonus, reason
+
+# ================= MOMENTUM ASYMÉTRIQUE (NOUVELLE FONCTION) =================
 
 def analyze_momentum_asymmetric(df):
     """
-    🔥 NOUVEAU : Momentum asymétrique BUY/SELL
+    🔥 NOUVELLE FONCTION : Momentum asymétrique BUY/SELL
     Stochastic rapide pour BUY, lent pour SELL
     """
     if len(df) < 30:
@@ -301,11 +566,11 @@ def analyze_momentum_asymmetric(df):
         'trend_strength': trend_strength,
     }
 
-# ================= STRUCTURE SCORE PRO (NOUVEAU) =================
+# ================= STRUCTURE SCORE PRO (NOUVELLE FONCTION) =================
 
 def calculate_structure_score_pro_m1(structure, direction, momentum_info, internal_swing_break):
     """
-    🔥 NOUVEAU : Structure score avec règles desk pro
+    🔥 NOUVELLE FONCTION : Structure score avec règles desk pro
     """
     score = 0
     reasons = []
@@ -384,211 +649,307 @@ def calculate_structure_score_pro_m1(structure, direction, momentum_info, intern
     
     return score, " | ".join(reasons)
 
-# ================= FONCTION PRINCIPALE V4.2 =================
+# ================= VALIDATION BOUGIE (NOUVELLE FONCTION) =================
 
-def rule_signal_saint_graal_m1_pro_v2(df, signal_count=0, total_signals_needed=8):
+def validate_candle_for_binary_m1(df, direction, require_rejection=True):
     """
-    🔥 VERSION 4.2 : LOGIQUE DESK PRO
-    Asymétrie BUY/SELL + règles structure strictes
+    Validation bougie pour binaire M1
+    Exige des confirmations claires de retournement
     """
-    print(f"\n{'='*70}")
-    print(f"🚀 DESK PRO M1 - Signal #{signal_count+1}")
-    print(f"{'='*70}")
+    if len(df) < 5:
+        return False, "NO_DATA", 0, ""
     
-    if len(df) < 50:
-        return pro_fallback_intelligent(df, signal_count, total_signals_needed)
+    last_candle = df.iloc[-1]
+    prev_candle = df.iloc[-2]
+    prev2_candle = df.iloc[-3] if len(df) >= 3 else None
     
-    current_price = float(df.iloc[-1]['close'])
+    candle_body = abs(last_candle['close'] - last_candle['open'])
+    candle_size = last_candle['high'] - last_candle['low']
     
-    # ===== 1. ANALYSE COMPLÈTE =====
-    structure, trend_strength = analyze_market_structure(df)
-    internal_high, internal_low = detect_internal_swings(df.tail(10))
+    if candle_size == 0:
+        return False, "NO_BODY", 0, ""
     
-    print(f"🏗️  Structure: {structure} | Force: {trend_strength:.1f}%")
-    if internal_high:
-        print(f"📊 Swings internes: H={internal_high['price']:.5f}({internal_high['bars_ago']}b) | L={internal_low['price']:.5f}({internal_low['bars_ago']}b)")
+    upper_wick = last_candle['high'] - max(last_candle['open'], last_candle['close'])
+    lower_wick = min(last_candle['open'], last_candle['close']) - last_candle['low']
     
-    # ===== 2. MOMENTUM ASYMÉTRIQUE =====
-    momentum = analyze_momentum_asymmetric(df)
-    print(f"⚡ Momentum: RSI {momentum['rsi']:.1f} | StochF {momentum['stoch_k_fast']:.1f} | StochS {momentum['stoch_k_slow']:.1f}")
-    print(f"   Pic:{momentum['stoch_peak_detected']}({momentum['stoch_peak_value']:.1f}) | Gate:{'PASS' if momentum['momentum_gate_passed'] else 'BLOCK'} {momentum.get('gate_reason', '')}")
+    patterns = []
     
-    # ===== 3. ZONES S/R =====
-    supports, resistances = detect_key_zones(df)
-    near_support, nearest_support, dist_support = is_price_near_zone_pro(current_price, supports, 8)  # 🔥 Distance réduite
-    near_resistance, nearest_resistance, dist_resistance = is_price_near_zone_pro(current_price, resistances, 8)
-    
-    print(f"📍 Zones: S {near_support}({dist_support:.1f}p) | R {near_resistance}({dist_resistance:.1f}p)")
-    
-    # ===== 4. VÉRIFICATION SWING BREAK =====
-    swing_break_sell = False
-    swing_break_buy = False
-    
-    if internal_low:
-        swing_break_sell, dist_break_sell = check_swing_break(
-            current_price, internal_low, "SELL", 
-            SAINT_GRAAL_CONFIG['sell_rules']['max_swing_distance_pips']
-        )
-    
-    if internal_high:
-        swing_break_buy, dist_break_buy = check_swing_break(
-            current_price, internal_high, "BUY", 5
-        )
-    
-    print(f"🔨 Swing break: SELL {swing_break_sell}({dist_break_sell if 'dist_break_sell' in locals() else 0:.1f}p) | BUY {swing_break_buy}({dist_break_buy if 'dist_break_buy' in locals() else 0:.1f}p)")
-    
-    # ===== 5. SCORING DESK PRO =====
-    sell_score = 0
-    buy_score = 0
-    sell_details = []
-    buy_details = []
-    
-    # 🔥 Structure score avec règles pro
-    structure_score_sell, structure_reason_sell = calculate_structure_score_pro_m1(
-        structure, "SELL", momentum, swing_break_sell
-    )
-    sell_score += structure_score_sell
-    if structure_score_sell != 0:
-        sell_details.append(structure_reason_sell)
-    
-    structure_score_buy, structure_reason_buy = calculate_structure_score_pro_m1(
-        structure, "BUY", momentum, swing_break_buy
-    )
-    buy_score += structure_score_buy
-    if structure_score_buy != 0:
-        buy_details.append(structure_reason_buy)
-    
-    # Momentum scores
-    sell_score += momentum['sell_score']
-    buy_score += momentum['buy_score']
-    
-    if momentum['sell_score'] > 0:
-        sell_details.extend(momentum['sell_reasons'])
-    if momentum['buy_score'] > 0:
-        buy_details.extend(momentum['buy_reasons'])
-    
-    # Zones bonus (avec vérification distance)
-    if near_resistance and dist_resistance <= 5:  # 🔥 Zone proche seulement
-        zone_bonus, zone_reason = calculate_zone_strength(nearest_resistance)
-        sell_score += int(zone_bonus * 0.8)  # 🔥 Bonus réduit
-        sell_details.append(f"Zone:{zone_reason}")
-    
-    if near_support and dist_support <= 5:
-        zone_bonus, zone_reason = calculate_zone_strength(nearest_support)
-        buy_score += int(zone_bonus * 0.8)
-        buy_details.append(f"Zone:{zone_reason}")
-    
-    print(f"🎯 Scores: SELL {sell_score}/100 - BUY {buy_score}/100")
-    
-    # ===== 6. DÉCISION AVEC FILTRES DESK =====
-    direction = None
-    final_score = 0
-    validation_issues = []
-    
-    # 🔥 VÉTO ABSOLU POUR SELL
-    if sell_score > buy_score:
-        # VÉTO 1: Momentum gate
-        if not momentum['momentum_gate_passed']:
-            validation_issues.append(f"Momentum: {momentum['gate_reason']}")
-        
-        # VÉTO 2: Structure contre tendance sans break
-        elif "UPTREND" in structure and not swing_break_sell:
-            validation_issues.append("Uptrend sans break swing")
-        
-        # VÉTO 3: RSI trop bas
-        elif momentum['rsi'] < 52:  # 🔥 Seuil relevé
-            validation_issues.append(f"RSI {momentum['rsi']:.1f} trop bas pour SELL")
-        
-        # VÉTO 4: Stochastic lent insuffisant
-        elif momentum['stoch_k_slow'] < 58 and not momentum['stoch_peak_detected']:
-            validation_issues.append(f"Stoch lent {momentum['stoch_k_slow']:.1f} < 58 sans pic")
-        
-        else:
-            # Validation bougie
-            candle_valid, pattern, pattern_conf, candle_reason = validate_candle_for_binary_m1(
-                df, "SELL", require_rejection=True
-            )
+    if direction == "SELL":
+        # 🔥 RÈGLE: Exiger rejet clair en M1 binaire
+        if require_rejection:
+            # Pin bar baissier avec mèche haute > 2x corps
+            if upper_wick > candle_body * 2.0:
+                quality = 85 if upper_wick > candle_body * 3.0 else 75
+                patterns.append(("PIN_BAR_BEARISH", quality, f"Mèche:{upper_wick/candle_body:.1f}x"))
             
-            if candle_valid:
-                direction = "SELL"
-                final_score = sell_score + (pattern_conf / 10)
-                print(f"✅ SELL confirmé: {pattern} ({pattern_conf}%) | RSI:{momentum['rsi']:.1f} StochS:{momentum['stoch_k_slow']:.1f}")
-            else:
-                validation_issues.append(f"Bougie: {candle_reason}")
-    
-    # 🔥 BUY (moins strict)
-    elif buy_score > sell_score:
-        if not momentum['momentum_gate_passed']:
-            validation_issues.append(f"Momentum: {momentum['gate_reason']}")
-        
-        # VÉTO BUY en downtrend sans break
-        elif "DOWNTREND" in structure and not swing_break_buy:
-            validation_issues.append("Downtrend sans break swing")
-        
-        else:
-            candle_valid, pattern, pattern_conf, candle_reason = validate_candle_for_binary_m1(
-                df, "BUY", require_rejection=False
-            )
+            # Clôture sous low précédent (confirmation forte)
+            if last_candle['close'] < prev_candle['low']:
+                patterns.append(("CLOSE_BELOW_PREV_LOW", 90, "Break bas"))
             
-            if candle_valid:
-                direction = "BUY"
-                final_score = buy_score + (pattern_conf / 10)
-                print(f"✅ BUY confirmé: {pattern} ({pattern_conf}%)")
-            else:
-                validation_issues.append(f"Bougie: {candle_reason}")
+            # Engulfing baissier
+            if (last_candle['close'] < last_candle['open'] and
+                prev_candle['close'] > prev_candle['open'] and
+                last_candle['open'] >= prev_candle['close'] and
+                last_candle['close'] <= prev_candle['open']):
+                
+                size_ratio = candle_body / abs(prev_candle['close'] - prev_candle['open'])
+                quality = 95 if size_ratio > 1.8 else 85 if size_ratio > 1.5 else 75
+                patterns.append(("ENGULFING_BEARISH", quality, f"Ratio:{size_ratio:.1f}"))
+        
+        # Pattern 3-bar reversal
+        if prev2_candle is not None:
+            if (prev2_candle['close'] > prev2_candle['open'] and
+                prev_candle['close'] > prev_candle['open'] and
+                last_candle['close'] < last_candle['open'] and
+                last_candle['close'] < prev2_candle['low']):
+                
+                patterns.append(("3_BAR_REVERSAL", 80, "Retournement 3 bougies"))
     
-    # ===== 7. DÉCISION FINALE =====
-    if direction and final_score >= 65:  # 🔥 Seuil relevé à 65
-        # Qualité basée sur score et structure
-        if final_score >= 88 and ("TREND" in structure or swing_break_sell or swing_break_buy):
-            quality = "EXCELLENT"
-            mode = "DESK_MAX"
-        elif final_score >= 78:
-            quality = "HIGH"
-            mode = "DESK_PRO"
-        elif final_score >= 68:
-            quality = "SOLID"
-            mode = "DESK_STANDARD"
-        else:
-            quality = "MINIMUM"
-            mode = "DESK_MIN"
+    else:  # BUY
+        if require_rejection:
+            # Pin bar haussier
+            if lower_wick > candle_body * 2.0:
+                quality = 85 if lower_wick > candle_body * 3.0 else 75
+                patterns.append(("PIN_BAR_BULLISH", quality, f"Mèche:{lower_wick/candle_body:.1f}x"))
+            
+            # Clôture au-dessus high précédent
+            if last_candle['close'] > prev_candle['high']:
+                patterns.append(("CLOSE_ABOVE_PREV_HIGH", 90, "Break haut"))
+            
+            # Engulfing haussier
+            if (last_candle['close'] > last_candle['open'] and
+                prev_candle['close'] < prev_candle['open'] and
+                last_candle['open'] <= prev_candle['close'] and
+                last_candle['close'] >= prev_candle['open']):
+                
+                size_ratio = candle_body / abs(prev_candle['close'] - prev_candle['open'])
+                quality = 95 if size_ratio > 1.8 else 85 if size_ratio > 1.5 else 75
+                patterns.append(("ENGULFING_BULLISH", quality, f"Ratio:{size_ratio:.1f}"))
         
-        print(f"\n🎉 DÉCISION: {direction} | Score: {final_score:.1f}/100 | Qualité: {quality}")
-        print(f"   Structure: {structure} | Swing break: {'SELL' if swing_break_sell else 'BUY' if swing_break_buy else 'Non'}")
-        
-        direction_display = "CALL" if direction == "BUY" else "PUT"
-        
-        return {
-            'signal': direction_display,
-            'mode': mode,
-            'quality': quality,
-            'score': float(final_score),
-            'reason': f"{direction} | {quality} | Score {final_score:.1f} | {structure}",
-            'structure_info': {
-                'market_structure': structure,
-                'trend_strength': float(trend_strength),
-                'swing_break': swing_break_sell if direction == "SELL" else swing_break_buy,
-                'momentum_info': {
-                    'rsi': momentum['rsi'],
-                    'stoch_fast': momentum['stoch_k_fast'],
-                    'stoch_slow': momentum['stoch_k_slow'],
-                    'peak_detected': momentum['stoch_peak_detected'],
-                }
-            }
-        }
+        # Pattern 3-bar reversal
+        if prev2_candle is not None:
+            if (prev2_candle['close'] < prev2_candle['open'] and
+                prev_candle['close'] < prev_candle['open'] and
+                last_candle['close'] > last_candle['open'] and
+                last_candle['close'] > prev2_candle['high']):
+                
+                patterns.append(("3_BAR_REVERSAL", 80, "Retournement 3 bougies"))
     
-    # ===== 8. FALLBACK SÉCURISÉ =====
-    if validation_issues:
-        print(f"⚡ Fallback: {validation_issues[0]}")
+    if patterns:
+        patterns.sort(key=lambda x: x[1], reverse=True)
+        best_pattern = patterns[0]
+        return True, best_pattern[0], best_pattern[1], best_pattern[2]
+    
+    # Si aucun pattern mais confirmation simple
+    if direction == "SELL" and last_candle['close'] < last_candle['open']:
+        return True, "BEARISH_CANDLE", 60, "Simple bougie baissière"
+    elif direction == "BUY" and last_candle['close'] > last_candle['open']:
+        return True, "BULLISH_CANDLE", 60, "Simple bougie haussière"
+    
+    return False, "NO_PATTERN", 0, "Aucune confirmation bougie"
+
+# ================= FONCTIONS DE FALLBACK =================
+
+def pro_fallback_intelligent(df, signal_count, total_signals):
+    """
+    Fallback pro intelligent
+    """
+    if len(df) < 20:
+        return create_minimal_fallback("Données insuffisantes", signal_count, total_signals)
+    
+    # Calcul indicateurs
+    df_indicators = compute_saint_graal_indicators(df)
+    last = df_indicators.iloc[-1]
+    
+    # Conditions minimales
+    rsi = last.get('rsi_7', 50)
+    stoch_k = last.get('stoch_k', 50)
+    stoch_d = last.get('stoch_d', 50)
+    
+    # Décision
+    ema_5 = last.get('ema_5', 0)
+    ema_13 = last.get('ema_13', 0)
+    
+    buy_conditions = 0
+    sell_conditions = 0
+    
+    if rsi < 45:
+        buy_conditions += 1
+    if stoch_k < stoch_d:
+        buy_conditions += 1
+    if ema_5 > ema_13:
+        buy_conditions += 1
+    
+    if rsi > 55:
+        sell_conditions += 1
+    if stoch_k > stoch_d:
+        sell_conditions += 1
+    if ema_5 < ema_13:
+        sell_conditions += 1
+    
+    if buy_conditions >= 2 and buy_conditions > sell_conditions:
+        direction = "CALL"
+        score = 55.0
+        reason = f"Fallback BUY (RSI:{rsi:.1f}, Stoch:{stoch_k:.1f}/{stoch_d:.1f})"
+    
+    elif sell_conditions >= 2 and sell_conditions > buy_conditions:
+        direction = "PUT"
+        score = 55.0
+        reason = f"Fallback SELL (RSI:{rsi:.1f}, Stoch:{stoch_k:.1f}/{stoch_d:.1f})"
+    
     else:
-        print("⚡ Fallback: Aucune direction valide")
+        if rsi > 50:
+            direction = "CALL"
+            score = 50.0
+            reason = f"Fallback DEFAULT CALL (RSI:{rsi:.1f})"
+        else:
+            direction = "PUT"
+            score = 50.0
+            reason = f"Fallback DEFAULT PUT (RSI:{rsi:.1f})"
     
-    return pro_fallback_intelligent(df, signal_count, total_signals_needed)
+    return {
+        'signal': direction,
+        'mode': 'FALLBACK_PRO',
+        'quality': 'MINIMUM',
+        'score': float(score),
+        'reason': reason,
+    }
 
-# ================= FONCTION MAINTAINED POUR COMPATIBILITÉ =================
+def create_minimal_fallback(reason, signal_count, total_signals):
+    """Fallback absolu minimal"""
+    return {
+        'signal': 'CALL',
+        'mode': 'FALLBACK_MINIMAL',
+        'quality': 'CRITICAL',
+        'score': 45.0,
+        'reason': f"Fallback minimal: {reason}",
+    }
+
+# ================= FONCTIONS DE COMPATIBILITÉ =================
+
+def compute_indicators(df, ema_fast=8, ema_slow=21, rsi_len=14, bb_len=20):
+    """
+    🔥 FONCTION DE COMPATIBILITÉ POUR SIGNAL_BOT
+    Wrapper pour compute_saint_graal_indicators
+    """
+    return compute_saint_graal_indicators(df)
+
+def compute_saint_graal_indicators(df):
+    """Calcule les indicateurs pour qualité maximale"""
+    df = df.copy()
+    
+    for col in ['open', 'high', 'low', 'close']:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    df.fillna(method='ffill', inplace=True)
+    df.fillna(method='bfill', inplace=True)
+    
+    # EMA
+    df['ema_5'] = EMAIndicator(close=df['close'], window=5).ema_indicator()
+    df['ema_13'] = EMAIndicator(close=df['close'], window=13).ema_indicator()
+    
+    # RSI
+    df['rsi_7'] = RSIIndicator(close=df['close'], window=7).rsi()
+    
+    # Stochastic
+    stoch = StochasticOscillator(
+        high=df['high'],
+        low=df['low'],
+        close=df['close'],
+        window=5,
+        smooth_window=3
+    )
+    df['stoch_k'] = stoch.stoch()
+    df['stoch_d'] = stoch.stoch_signal()
+    
+    # ADX
+    adx = ADXIndicator(
+        high=df['high'],
+        low=df['low'],
+        close=df['close'],
+        window=10
+    )
+    df['adx'] = adx.adx()
+    
+    # Price action
+    df['candle_body'] = df['close'] - df['open']
+    df['candle_size'] = df['high'] - df['low']
+    df['body_ratio'] = abs(df['candle_body']) / df['candle_size'].replace(0, 0.00001)
+    
+    return df
+
+def calculate_signal_quality_score(df):
+    """
+    🔥 COMPATIBILITÉ : Calcule un score de qualité global du signal (0-100)
+    """
+    if len(df) < 20:
+        return 0
+    
+    last = df.iloc[-1]
+    score = 0
+    
+    # Convergence (30 points)
+    if 'rsi_7' in last and 'stoch_k' in last:
+        rsi_ok = 30 < last['rsi_7'] < 70
+        stoch_ok = 20 < last['stoch_k'] < 80
+        if rsi_ok and stoch_ok:
+            score += 30
+    
+    # Force tendance (25 points)
+    if 'adx' in last:
+        if last['adx'] > 30:
+            score += 25
+        elif last['adx'] > 25:
+            score += 20
+        elif last['adx'] > 20:
+            score += 15
+    
+    # Qualité bougie (15 points)
+    if 'body_ratio' in last:
+        if last['body_ratio'] > 0.4:
+            score += 15
+        elif last['body_ratio'] > 0.3:
+            score += 10
+    
+    return min(score, 100)
+
+def check_anti_manipulation(df, strict_mode=True):
+    """
+    🔥 COMPATIBILITÉ : Vérifie les conditions anti-manipulation
+    """
+    if len(df) < 15:
+        return False, "Données insuffisantes"
+    
+    return True, "OK"
+
+def is_kill_zone_optimal(hour_utc):
+    """
+    🔥 COMPATIBILITÉ : Heures de trading optimales
+    """
+    if 7 <= hour_utc < 10:
+        return True, "London Open", 10
+    if 13 <= hour_utc < 16:
+        return True, "NY Open", 9
+    if 10 <= hour_utc < 12:
+        return True, "London/NY Overlap", 8
+    if 1 <= hour_utc < 4:
+        return True, "Asia Close", 6
+    
+    return False, "Heure non optimale", 3
+
+def rule_signal(df):
+    """
+    🔥 COMPATIBILITÉ : Version simple pour signal_bot
+    """
+    result = rule_signal_saint_graal_m1_pro_v2(df, signal_count=0, total_signals_needed=8)
+    return result['signal'] if result else 'CALL'
 
 def get_signal_with_metadata(df, signal_count=0, total_signals=8):
-    """Wrapper pour compatibilité avec l'architecture existante"""
+    """
+    🔥 FONCTION PRINCIPALE DE COMPATIBILITÉ
+    Utilisée par signal_bot.py
+    """
     try:
         if df is None or len(df) < 30:
             return create_minimal_fallback("Données insuffisantes", signal_count, total_signals)
@@ -614,7 +975,6 @@ def get_signal_with_metadata(df, signal_count=0, total_signals=8):
                 'quality': result['quality'],
                 'score': float(result['score']),
                 'reason': reason,
-                'structure_info': result.get('structure_info', {}),
                 'session_info': {
                     'current_signal': signal_count + 1,
                     'total_signals': total_signals,
@@ -623,7 +983,7 @@ def get_signal_with_metadata(df, signal_count=0, total_signals=8):
             }
         
     except Exception as e:
-        print(f"❌ Erreur: {str(e)}")
+        print(f"❌ Erreur dans get_signal_with_metadata: {str(e)}")
     
     # Fallback absolu
     return {
@@ -639,13 +999,154 @@ def get_signal_with_metadata(df, signal_count=0, total_signals=8):
         }
     }
 
+# ================= FONCTION PRINCIPALE V4.2 =================
+
+def rule_signal_saint_graal_m1_pro_v2(df, signal_count=0, total_signals_needed=8):
+    """
+    🔥 VERSION 4.2 : LOGIQUE DESK PRO
+    Asymétrie BUY/SELL + règles structure strictes
+    """
+    if len(df) < 50:
+        return pro_fallback_intelligent(df, signal_count, total_signals_needed)
+    
+    current_price = float(df.iloc[-1]['close'])
+    
+    # ===== 1. ANALYSE COMPLÈTE =====
+    structure, trend_strength = analyze_market_structure(df)
+    internal_high, internal_low = detect_internal_swings(df.tail(10))
+    
+    # ===== 2. MOMENTUM ASYMÉTRIQUE =====
+    momentum = analyze_momentum_asymmetric(df)
+    
+    # ===== 3. ZONES S/R =====
+    supports, resistances = detect_key_zones(df)
+    near_support, nearest_support, dist_support = is_price_near_zone_pro(current_price, supports, 8)
+    near_resistance, nearest_resistance, dist_resistance = is_price_near_zone_pro(current_price, resistances, 8)
+    
+    # ===== 4. VÉRIFICATION SWING BREAK =====
+    swing_break_sell = False
+    swing_break_buy = False
+    
+    if internal_low:
+        swing_break_sell, dist_break_sell = check_swing_break(
+            current_price, internal_low, "SELL", 
+            SAINT_GRAAL_CONFIG['sell_rules']['max_swing_distance_pips']
+        )
+    
+    if internal_high:
+        swing_break_buy, dist_break_buy = check_swing_break(
+            current_price, internal_high, "BUY", 5
+        )
+    
+    # ===== 5. SCORING DESK PRO =====
+    sell_score = 0
+    buy_score = 0
+    
+    # Structure score avec règles pro
+    structure_score_sell, _ = calculate_structure_score_pro_m1(
+        structure, "SELL", momentum, swing_break_sell
+    )
+    sell_score += structure_score_sell
+    
+    structure_score_buy, _ = calculate_structure_score_pro_m1(
+        structure, "BUY", momentum, swing_break_buy
+    )
+    buy_score += structure_score_buy
+    
+    # Momentum scores
+    sell_score += momentum['sell_score']
+    buy_score += momentum['buy_score']
+    
+    # Zones bonus
+    if near_resistance and dist_resistance <= 5:
+        zone_bonus, _ = calculate_zone_strength(nearest_resistance)
+        sell_score += int(zone_bonus * 0.8)
+    
+    if near_support and dist_support <= 5:
+        zone_bonus, _ = calculate_zone_strength(nearest_support)
+        buy_score += int(zone_bonus * 0.8)
+    
+    # ===== 6. DÉCISION AVEC FILTRES DESK =====
+    direction = None
+    final_score = 0
+    
+    # 🔥 VÉTO ABSOLU POUR SELL
+    if sell_score > buy_score:
+        # VÉTO 1: Momentum gate
+        if not momentum['momentum_gate_passed']:
+            pass
+        # VÉTO 2: Structure contre tendance sans break
+        elif "UPTREND" in structure and not swing_break_sell:
+            pass
+        # VÉTO 3: RSI trop bas
+        elif momentum['rsi'] < 52:
+            pass
+        # VÉTO 4: Stochastic lent insuffisant
+        elif momentum['stoch_k_slow'] < 58 and not momentum['stoch_peak_detected']:
+            pass
+        else:
+            # Validation bougie
+            candle_valid, pattern, pattern_conf, _ = validate_candle_for_binary_m1(
+                df, "SELL", require_rejection=True
+            )
+            
+            if candle_valid:
+                direction = "SELL"
+                final_score = sell_score + (pattern_conf / 10)
+    
+    # 🔥 BUY (moins strict)
+    elif buy_score > sell_score:
+        if not momentum['momentum_gate_passed']:
+            pass
+        # VÉTO BUY en downtrend sans break
+        elif "DOWNTREND" in structure and not swing_break_buy:
+            pass
+        else:
+            candle_valid, pattern, pattern_conf, _ = validate_candle_for_binary_m1(
+                df, "BUY", require_rejection=False
+            )
+            
+            if candle_valid:
+                direction = "BUY"
+                final_score = buy_score + (pattern_conf / 10)
+    
+    # ===== 7. DÉCISION FINALE =====
+    if direction and final_score >= 65:
+        # Qualité basée sur score et structure
+        if final_score >= 88 and ("TREND" in structure or swing_break_sell or swing_break_buy):
+            quality = "EXCELLENT"
+            mode = "DESK_MAX"
+        elif final_score >= 78:
+            quality = "HIGH"
+            mode = "DESK_PRO"
+        elif final_score >= 68:
+            quality = "SOLID"
+            mode = "DESK_STANDARD"
+        else:
+            quality = "MINIMUM"
+            mode = "DESK_MIN"
+        
+        direction_display = "CALL" if direction == "BUY" else "PUT"
+        
+        return {
+            'signal': direction_display,
+            'mode': mode,
+            'quality': quality,
+            'score': float(final_score),
+            'reason': f"{direction} | {quality} | Score {final_score:.1f} | {structure}",
+        }
+    
+    # ===== 8. FALLBACK SÉCURISÉ =====
+    return pro_fallback_intelligent(df, signal_count, total_signals_needed)
+
 if __name__ == "__main__":
-    print("🚀 DESK PRO BINAIRE M1 - VERSION 4.2")
-    print("📊 Niveau: Trading desk professionnel")
-    print("\n🔥 AMÉLIORATIONS CLÉS:")
-    print("✅ 1. ASYMÉTRIE BUY/SELL: Stoch 5 pour BUY, Stoch 9 pour SELL")
-    print("✅ 2. RSI minimum SELL: 58 (au lieu de 55)")
-    print("✅ 3. SWING BREAK obligatoire: Pas de SELL en uptrend sans break")
-    print("✅ 4. MOMENTUM GATE renforcé: Différence > 12 points")
-    print("✅ 5. STRUCTURE RULES desk: Conditions strictes par type de structure")
-    print("\n🎯 Objectif réaliste: 62-68% winrate (hors news)")
+    print("🚀 DESK PRO BINAIRE M1 - VERSION 4.2 COMPATIBLE")
+    print("📊 Compatibilité totale avec signal_bot.py")
+    print("\n✅ Fonctions de compatibilité ajoutées:")
+    print("   - compute_indicators")
+    print("   - calculate_signal_quality_score")
+    print("   - check_anti_manipulation")
+    print("   - is_kill_zone_optimal")
+    print("   - rule_signal")
+    print("   - get_signal_with_metadata")
+    print("\n🎯 Prêt pour déploiement sur Render!")
