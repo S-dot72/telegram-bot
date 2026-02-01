@@ -3,9 +3,11 @@ Bot de trading M1 - Version Saint Graal avec Vérification Automatique Externe
 8 signaux garantis par session - Vérification 100% automatisée avec prix réels
 Support OTC (crypto) le week-end via APIs multiples
 Signal envoyé immédiatement avec timing 2 minutes avant entrée
+CORRECTION: Bouton apparaît immédiatement après fin de bougie
 """
 
 import os, json, asyncio, random, traceback
+import logging
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 import requests
@@ -15,6 +17,10 @@ from sqlalchemy import create_engine, text
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
 from aiohttp import web
+
+# DÉSACTIVER LES LOGS HTTP VERBOSE
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 # Import du vérificateur externe
 try:
@@ -163,7 +169,6 @@ class OTCDataProvider:
 HAITI_TZ = ZoneInfo("America/Port-au-Prince")
 TIMEFRAME_M1 = "1min"
 SIGNALS_PER_SESSION = 8
-VERIFICATION_WAIT_MIN = 3
 CONFIDENCE_THRESHOLD = 0.65
 
 # Initialisation des composants
@@ -492,144 +497,84 @@ def ensure_db():
         print(f"⚠️ Erreur DB: {e}")
         traceback.print_exc()
 
-# ================= VÉRIFICATION AUTOMATIQUE AVEC VÉRIFICATEUR EXTERNE =================
+# ================= VÉRIFICATION AUTOMATIQUE AMÉLIORÉE =================
 
-async def auto_verify_signal(signal_id, user_id, app):
+async def schedule_verification_button(signal_id, user_id, app, entry_time):
     """
-    VÉRIFICATION AUTOMATIQUE avec vérificateur externe - Version améliorée
-    Le bouton apparaît automatiquement après la fin de la bougie
+    Programme l'envoi du bouton IMMÉDIATEMENT après la fin de la bougie
+    CORRECTION: Pas de délai supplémentaire
     """
     try:
-        print(f"\n[VERIF-AUTO] 🔄 Démarrage vérification signal #{signal_id}")
+        print(f"[VERIF-TIMING] ⏰ Programmation bouton pour signal #{signal_id}")
         
-        if not EXTERNAL_VERIFIER_AVAILABLE or verifier is None:
-            print(f"[VERIF-AUTO] ❌ Vérificateur externe non disponible")
-            # Envoyer quand même le bouton pour continuer
-            await send_verification_button(user_id, signal_id, app)
-            return
-        
-        # Récupérer l'heure d'entrée du signal
-        with engine.connect() as conn:
-            signal = conn.execute(
-                text("SELECT ts_enter FROM signals WHERE id = :sid"),
-                {"sid": signal_id}
-            ).fetchone()
-        
-        if not signal:
-            print(f"[VERIF-AUTO] ❌ Signal #{signal_id} non trouvé")
-            return
-        
-        ts_enter = signal[0]
-        entry_time = None
-        
-        # Parser le timestamp
-        if isinstance(ts_enter, str):
-            try:
-                entry_time = datetime.fromisoformat(ts_enter.replace('Z', '+00:00'))
-            except:
-                entry_time = datetime.now(timezone.utc)
-        else:
-            entry_time = ts_enter
-        
-        if entry_time.tzinfo is None:
-            entry_time = entry_time.replace(tzinfo=timezone.utc)
-        
-        # Calculer quand la bougie se termine (1 minute après l'entrée)
+        # Calculer la fin de la bougie M1 (1 minute après l'entrée)
         candle_end_time = entry_time + timedelta(minutes=1)
+        now_utc = get_utc_now()
         
-        # Attendre que la bougie M1 soit terminée + 2 minutes pour la disponibilité des données
-        now_utc = datetime.now(timezone.utc)
-        wait_seconds = max(0, (candle_end_time - now_utc).total_seconds()) + 120  # 2 minutes après
+        # Attendre EXACTEMENT la fin de la bougie, pas de délai supplémentaire
+        wait_seconds = max(0, (candle_end_time - now_utc).total_seconds())
         
         if wait_seconds > 0:
-            print(f"[VERIF-AUTO] ⏳ Attente de {wait_seconds:.0f}s avant vérification...")
+            print(f"[VERIF-TIMING] ⏳ Attente de {wait_seconds:.0f}s pour fin de bougie signal #{signal_id}")
             await asyncio.sleep(wait_seconds)
         
-        print(f"[VERIF-AUTO] 🔍 Tentative vérification signal #{signal_id}")
+        # ENVOYER LE BOUTON IMMÉDIATEMENT APRÈS FIN BOUGIE
+        print(f"[VERIF-TIMING] ✅ Bougie terminée, envoi bouton IMMÉDIAT pour signal #{signal_id}")
+        await send_verification_button(user_id, signal_id, app)
         
-        try:
-            # Utiliser le vérificateur externe AVEC otc_provider
-            result = await verifier.verify_single_signal_with_retry(signal_id, max_retries=2)
-            
-            if result is not None:
-                print(f"[VERIF-AUTO] ✅ Signal #{signal_id} vérifié: {result}")
-                
-                # Récupérer les détails du signal
-                with engine.connect() as conn:
-                    signal_details = conn.execute(
-                        text("""
-                            SELECT pair, direction, entry_price, exit_price, result, confidence, pips
-                            FROM signals WHERE id = :sid
-                        """),
-                        {"sid": signal_id}
-                    ).fetchone()
-                
-                if signal_details:
-                    pair, direction, entry_price, exit_price, result, confidence, pips = signal_details
-                    
-                    # Mettre à jour la session utilisateur
-                    if user_id in active_sessions:
-                        session = active_sessions[user_id]
-                        session['pending'] = max(0, session['pending'] - 1)
-                        
-                        if result == "WIN":
-                            session['wins'] += 1
-                            print(f"[VERIF-AUTO] ✅ Signal #{signal_id} WIN")
-                        else:
-                            session['losses'] += 1
-                            print(f"[VERIF-AUTO] ❌ Signal #{signal_id} LOSE")
-                    
-                    # Envoyer le résultat à l'utilisateur
-                    await send_verification_result(user_id, signal_id, pair, direction, 
-                                                  entry_price, exit_price, result, confidence, pips, app)
-                else:
-                    # Si pas de détails, envoyer quand même le bouton
-                    await send_verification_button(user_id, signal_id, app)
-                
-                print(f"[VERIF-AUTO] ✅ Vérification #{signal_id} terminée avec succès")
-                return
-            else:
-                print(f"[VERIF-AUTO] ⏳ Aucune donnée disponible pour signal #{signal_id}")
-                
-                # Marquer comme en attente
-                with engine.begin() as conn:
-                    conn.execute(
-                        text("""
-                            UPDATE signals 
-                            SET verification_method = 'PENDING_DATA'
-                            WHERE id = :signal_id
-                        """),
-                        {"signal_id": signal_id}
-                    )
-                
-                if user_id in active_sessions:
-                    active_sessions[user_id]['pending'] = max(0, active_sessions[user_id]['pending'] - 1)
-                
-                # Envoyer le bouton même si le résultat n'est pas disponible
-                await send_verification_button(user_id, signal_id, app)
-                print(f"[VERIF-AUTO] ✅ Bouton envoyé (données en attente) pour signal #{signal_id}")
-                
-        except Exception as e:
-            print(f"[VERIF-AUTO] ❌ Erreur vérification: {e}")
-            traceback.print_exc()
-            
-            # Envoyer le bouton même en cas d'erreur
-            await send_verification_button(user_id, signal_id, app)
-            print(f"[VERIF-AUTO] ✅ Bouton envoyé (après erreur) pour signal #{signal_id}")
+        # Lancer la vérification en arrière-plan (sans bloquer)
+        if EXTERNAL_VERIFIER_AVAILABLE and verifier is not None:
+            print(f"[VERIF-TIMING] 🔄 Lancement vérification arrière-plan pour signal #{signal_id}")
+            asyncio.create_task(background_verification(signal_id, user_id, app))
         
     except Exception as e:
-        print(f"[VERIF-AUTO] ❌ ERREUR CRITIQUE: {e}")
-        traceback.print_exc()
-        # Essayer d'envoyer le bouton malgré l'erreur
-        try:
-            await send_verification_button(user_id, signal_id, app)
-        except:
-            pass
+        print(f"[VERIF-TIMING] ❌ Erreur programmation bouton: {e}")
+
+async def background_verification(signal_id, user_id, app):
+    """
+    Vérification en arrière-plan après l'envoi du bouton
+    """
+    try:
+        print(f"[VERIF-BG] 🔄 Vérification arrière-plan signal #{signal_id}")
+        
+        # Attendre 2 minutes pour la disponibilité des données
+        await asyncio.sleep(120)
+        
+        if not EXTERNAL_VERIFIER_AVAILABLE or verifier is None:
+            return
+        
+        # Exécuter la vérification
+        result = await verifier.verify_single_signal_with_retry(signal_id, max_retries=2)
+        
+        if result is not None:
+            print(f"[VERIF-BG] ✅ Signal #{signal_id} vérifié: {result}")
+            
+            # Récupérer les détails du signal
+            with engine.connect() as conn:
+                signal_details = conn.execute(
+                    text("""
+                        SELECT pair, direction, entry_price, exit_price, result, confidence, pips
+                        FROM signals WHERE id = :sid
+                    """),
+                    {"sid": signal_id}
+                ).fetchone()
+            
+            if signal_details:
+                pair, direction, entry_price, exit_price, result, confidence, pips = signal_details
+                
+                # Envoyer le résultat à l'utilisateur
+                await send_verification_result(user_id, signal_id, pair, direction, 
+                                              entry_price, exit_price, result, confidence, pips, app)
+        else:
+            print(f"[VERIF-BG] ⏳ Aucune donnée disponible pour signal #{signal_id}")
+            
+    except Exception as e:
+        print(f"[VERIF-BG] ❌ Erreur vérification arrière-plan: {e}")
 
 async def send_verification_button(user_id, signal_id, app):
     """
     Envoie le bouton pour générer le prochain signal
-    Appelé automatiquement après la fin de la bougie
+    Appelé IMMÉDIATEMENT après la fin de la bougie
     """
     try:
         if user_id not in active_sessions:
@@ -637,6 +582,9 @@ async def send_verification_button(user_id, signal_id, app):
             return
         
         session = active_sessions[user_id]
+        
+        # Mettre à jour le compteur pending
+        session['pending'] = max(0, session['pending'] - 1)
         
         if session['signal_count'] < SIGNALS_PER_SESSION:
             next_num = session['signal_count'] + 1
@@ -663,7 +611,7 @@ async def send_verification_button(user_id, signal_id, app):
                     entry_str = ts_enter.strftime('%H:%M') if hasattr(ts_enter, 'strftime') else "N/A"
                 
                 msg = (
-                    f"🔄 **Signal #{session['signal_count']} terminé**\n"
+                    f"🔄 **Bougie terminée**\n"
                     f"━━━━━━━━━━━━━━━━━━━━\n\n"
                     f"{direction_emoji} {pair} {direction}\n"
                     f"⏰ Bougie: {entry_str}\n"
@@ -694,12 +642,13 @@ async def send_verification_button(user_id, signal_id, app):
                     text=msg, 
                     reply_markup=reply_markup
                 )
-                print(f"[VERIF-BUTTON] ✅ Bouton envoyé pour signal #{signal_id}")
+                print(f"[VERIF-BUTTON] ✅ Bouton envoyé IMMÉDIATEMENT pour signal #{signal_id}")
             except Exception as e:
                 print(f"[VERIF-BUTTON] ❌ Erreur envoi bouton: {e}")
         else:
             # Session terminée
             print(f"[VERIF-BUTTON] ✅ Session terminée pour user {user_id}")
+            await end_session_summary(user_id, app)
             
     except Exception as e:
         print(f"[VERIF-BUTTON] ❌ Erreur send_verification_button: {e}")
@@ -740,6 +689,11 @@ async def send_verification_result(user_id, signal_id, pair, direction, entry_pr
         # Vérifier si la session est toujours active
         if user_id in active_sessions:
             session = active_sessions[user_id]
+            
+            if result == "WIN":
+                session['wins'] += 1
+            else:
+                session['losses'] += 1
             
             if session['signal_count'] >= SIGNALS_PER_SESSION:
                 # Session terminée
@@ -1055,7 +1009,7 @@ async def cmd_debug_recent(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     FROM signals 
                     WHERE timeframe = 1
                     ORDER BY id DESC
-                    LIMIT :limit
+                    LIMit :limit
                 """),
                 {"limit": limit}
             ).fetchall()
@@ -1324,6 +1278,12 @@ async def generate_m1_signal(user_id, app):
         
         print(f"[SIGNAL] ✅ Signal #{signal_id} persisté avec entrée dans 2 min")
         
+        # PROGRAMMER L'ENVOI DU BOUTON APRÈS FIN DE BOUGIE
+        button_task = asyncio.create_task(
+            schedule_verification_button(signal_id, user_id, app, entry_time_utc)
+        )
+        session['verification_tasks'].append(button_task)
+        
         return signal_id
         
     except Exception as e:
@@ -1356,20 +1316,15 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await update.message.reply_text(
             f"✅ **Bienvenue au Bot Trading Saint Graal M1 !**\n\n"
-            f"🎯 **Version avec vérification externe**\n"
             f"📊 8 signaux garantis par session\n"
             f"🌐 Mode actuel: {mode_text}\n"
             f"🔧 {verif_status}\n"
-            f"**🎯 Caractéristiques:**\n"
-            f"• Mode STRICT → Haute qualité\n"
-            f"• Mode GARANTIE → Signaux assurés\n"
-            f"• Mode LAST RESORT → Complète session\n"
             f"**Commandes:**\n"
             f"• /startsession - Démarrer session\n"
             f"• /stats - Statistiques\n"
             f"• /menu - Menu complet\n\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"💡 8 signaux garantis avec vérification automatique!"
+            f"💡 8 signaux garantis avec bouton IMMÉDIAT!"
         )
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {e}")
@@ -1415,8 +1370,7 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /fixdb - Corriger structure DB\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "🔍 8 signaux garantis/session\n"
-        "⚠️ Vérification externe uniquement\n"
-        "🏖️ OTC actif le week-end"
+        "🏖️ OTC actif le week-end\n"
     )
     await update.message.reply_text(menu_text)
 
@@ -1478,9 +1432,6 @@ async def cmd_start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🎯 Objectif: {SIGNALS_PER_SESSION} signaux M1\n"
         f"⚠️ Vérification: {verif_status}\n"
         f"🔧 Sources: {'APIs Crypto' if is_weekend else 'TwelveData'}\n\n"
-        f"• Évite les achats près des sommets\n"
-        f"• Détecte les patterns de retest\n"
-        f"• Garantie de 8 signaux qualité\n"
         f"Cliquez pour générer signal #1 ⬇️",
         reply_markup=reply_markup
     )
@@ -1510,11 +1461,11 @@ async def cmd_session_status(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"📈 Progression: {session['signal_count']}/{SIGNALS_PER_SESSION}\n\n"
         f"✅ Wins: {session['wins']}\n"
         f"❌ Losses: {session['losses']}\n"
-        f"⏳ Vérif en attente: {session['pending']}\n"
+        f"⏳ Signaux en cours: {session['pending']}\n"
         f"🔔 Rappels en attente: {pending_reminders}\n\n"
         f"📊 Win Rate: {winrate:.1f}%\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        f"🎯 Garantie: {SIGNALS_PER_SESSION - session['signal_count']} signaux restants"
+        f"🎯 Garantie: {SIGNALS_PER_SESSION - session['signal_count']} signaux restants\n"
     )
     
     await update.message.reply_text(msg)
@@ -1539,8 +1490,8 @@ async def cmd_end_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if session['pending'] > 0:
         await update.message.reply_text(
-            f"⚠️ {session['pending']} signal(s) en attente de vérification\n\n"
-            f"Attendez la fin des vérifications automatiques ou confirmez la fin avec /forceend"
+            f"⚠️ {session['pending']} signal(s) en cours\n\n"
+            f"Attendez la fin des bougies ou confirmez la fin avec /forceend"
         )
         return
     
@@ -1671,24 +1622,12 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
                 if wait_seconds > 0:
                     print(f"[SIGNAL_REMINDER] ⏰ Rappel programmé pour signal #{signal_id} dans {wait_seconds:.0f} secondes")
         
-        # Lancer la vérification automatique (avec otc_provider intégré)
-        if EXTERNAL_VERIFIER_AVAILABLE:
-            verification_task = asyncio.create_task(auto_verify_signal(signal_id, user_id, context.application))
-            session['verification_tasks'].append(verification_task)
-            print(f"[SIGNAL] ⏳ Vérification externe programmée avec otc_provider...")
-        else:
-            print(f"[SIGNAL] ⚠️ Pas de vérification automatique (vérificateur externe non disponible)")
-        
         confirmation_msg = (
             f"✅ **Signal #{session['signal_count']} généré et envoyé!**\n"
             f"━━━━━━━━━━━━━━━━━━━━\n\n"
             f"📊 Progression: {session['signal_count']}/{SIGNALS_PER_SESSION}\n\n"
-            f"⏰ **Timing du signal:**\n"
-            f"• Signal envoyé: {now_haiti.strftime('%H:%M:%S')}\n"
-            f"• Entrée prévue: {entry_time_formatted}\n"
             f"• Rappel à: {(entry_time - timedelta(minutes=1)).strftime('%H:%M')}\n\n"
             f"💡 Préparez votre position!\n"
-            f"Le bouton pour le prochain signal apparaîtra automatiquement après la fin de la bougie."
         )
         
         await query.edit_message_text(confirmation_msg)
@@ -1786,10 +1725,6 @@ async def cmd_verif_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"❌ Losses: {losses or 0}\n"
                 f"⏳ En attente: {pending or 0}\n\n"
                 f"🎯 **Taux de réussite:** {win_rate:.1f}%\n"
-                f"💰 **Prix récupérés:** {with_prices or 0} ({price_success_rate:.1f}%)\n"
-                f"🎯 **Pips calculés:** {with_pips or 0} ({pips_rate:.1f}%)\n"
-                f"🤖 **Vérifiés réel:** {real_verified or 0} ({real_rate:.1f}%)\n"
-                f"🎰 **Avec Gale:** {with_gales or 0}\n\n"
             )
             
             if EXTERNAL_VERIFIER_AVAILABLE:
@@ -1825,7 +1760,6 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ Wins: {wins}\n"
             f"❌ Losses: {losses}\n"
             f"📈 Win rate: {winrate:.1f}%\n"
-            f"💰 Signaux avec prix: {with_prices} ({price_rate:.1f}%)\n\n"
             f"🎯 8 signaux/session (GARANTIS)\n"
         )
         
@@ -1881,7 +1815,6 @@ async def cmd_rapport(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• ✅ Wins: {wins}\n"
             f"• ❌ Losses: {losses}\n"
             f"• 📊 Win Rate: **{winrate:.1f}%**\n"
-            f"• 💰 Signaux avec prix: {with_prices} ({price_rate:.1f}%)\n\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
         )
         
@@ -2095,7 +2028,6 @@ async def health_check(request):
         'mode': 'OTC' if otc_provider.is_weekend() else 'Forex',
         'strategy': 'Saint Graal M1 avec Structure',
         'signals_per_session': SIGNALS_PER_SESSION,
-        'verification': 'Externe avec otc_provider intégré'
     })
 
 async def start_http_server():
@@ -2120,18 +2052,18 @@ async def main():
     print("\n" + "="*60)
     print("🤖 BOT SAINT GRAAL M1 - VÉRIFICATION EXTERNE")
     print("🎯 8 SIGNAUX GARANTIS - ÉVITE LES ACHATS AUX SOMMETS")
-    print("🤖 VÉRIFICATION EXTERNE AVEC OTC_PROVIDER INTÉGRÉ")
+    print("🔄 BOUTON IMMÉDIAT APRÈS BOUGIE (CORRIGÉ)")
     print("="*60)
     print(f"🎯 Stratégie: Saint Graal Forex M1 avec Structure")
     print(f"⚡ Signal envoyé: Immédiatement")
     print(f"🔔 Rappel: 1 min avant entrée")
+    print(f"🔄 Bouton prochain signal: IMMÉDIAT après fin de bougie")
     print(f"🤖 Vérification: {'Externe avec otc_provider' if EXTERNAL_VERIFIER_AVAILABLE else 'Non disponible'}")
     print(f"⚠️ Analyse: Détection swing highs/lows")
     print(f"🔧 Sources: TwelveData + APIs Crypto")
     print(f"🎯 Garantie: 8 signaux/session")
     print(f"💰 PRIX: Base de données corrigée pour stocker les prix")
     print(f"📊 Commandes prix: /showprices, /checkprices, /repairprices")
-    print(f"🔄 Bouton prochain signal: Apparaît automatiquement après fin de bougie")
     print("="*60 + "\n")
 
     # Initialiser la base de données
@@ -2193,12 +2125,12 @@ async def main():
     print(f"🤖 Vérificateur: {'Externe actif avec otc_provider' if EXTERNAL_VERIFIER_AVAILABLE else 'Non disponible'}")
     print(f"⚡ Signal envoyé: Immédiatement")
     print(f"🔔 Rappel: 1 minute avant l'entrée")
+    print(f"🔄 Bouton prochain signal: IMMÉDIAT après fin de bougie (CORRIGÉ)")
     print(f"🎯 Stratégie: Saint Graal M1 avec Structure")
     print(f"⚠️ Analyse: Détection des swing highs actif")
     print(f"🔧 Modes: STRICT → GARANTIE → LAST RESORT → FORCED")
     print(f"✅ Garantie: 8 signaux/session")
     print(f"💰 PRIX: Base de données prête pour stockage")
-    print(f"🔄 Bouton prochain signal: Apparaît automatiquement après fin de bougie")
     print(f"📊 Résultat: Envoyé dès qu'il est disponible")
     print(f"🔧 Commandes nouvelles:")
     print(f"   • /showprices <id> - Afficher les prix d'un signal")
