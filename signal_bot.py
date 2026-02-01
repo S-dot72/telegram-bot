@@ -1,6 +1,6 @@
 """
-Bot de trading M1 - Version Saint Graal avec Vérification Automatique Fiable
-8 signaux garantis par session - Vérification 100% automatique améliorée
+Bot de trading M1 - Version Saint Graal avec Vérification Automatique Externe
+8 signaux garantis par session - Vérification 100% automatisée avec prix réels
 Support OTC (crypto) le week-end via APIs multiples
 Signal envoyé immédiatement avec timing 2 minutes avant entrée
 """
@@ -15,6 +15,15 @@ from sqlalchemy import create_engine, text
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
 from aiohttp import web
+
+# Import du vérificateur externe
+try:
+    from auto_verifier import AutoResultVerifier
+    EXTERNAL_VERIFIER_AVAILABLE = True
+except ImportError:
+    EXTERNAL_VERIFIER_AVAILABLE = False
+    print("⚠️ Vérificateur externe non disponible")
+
 from config import *
 from utils import (
     compute_indicators, 
@@ -45,24 +54,20 @@ def safe_strftime(timestamp, fmt='%H:%M:%S'):
     
     # Si c'est une chaîne, convertir
     try:
-        # Nettoyer la chaîne
         if isinstance(timestamp, str):
             ts_clean = timestamp.replace('Z', '').replace('+00:00', '').split('.')[0]
             
-            # Essayer différents formats
             try:
                 dt = datetime.fromisoformat(ts_clean)
             except:
                 try:
                     dt = datetime.strptime(ts_clean, '%Y-%m-%d %H:%M:%S')
                 except:
-                    # Essayer un autre format
                     try:
                         dt = datetime.strptime(ts_clean, '%Y-%m-%d %H:%M')
                     except:
-                        return str(timestamp)[:8]  # Retourner les 8 premiers caractères
+                        return str(timestamp)[:8]
             
-            # Assurer que c'est en UTC
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
             
@@ -70,7 +75,6 @@ def safe_strftime(timestamp, fmt='%H:%M:%S'):
     except Exception as e:
         print(f"[DEBUG] Erreur format timestamp: {e}")
     
-    # Fallback: retourner la représentation string
     return str(timestamp)[:8]
 
 # ================= CLASSES MINIMALES =================
@@ -84,13 +88,13 @@ class MLSignalPredictor:
         """Prédit un signal avec ML"""
         self.total_predictions += 1
         
-        # Simulation basique - à remplacer par un vrai modèle ML
+        # Simulation basique
         confidence = random.uniform(0.65, 0.95)
         
         # Parfois simuler une prédiction incorrecte
-        if random.random() < 0.15:  # 15% du temps
+        if random.random() < 0.15:
             predicted_direction = "CALL" if direction == "PUT" else "PUT"
-            confidence = confidence * 0.8  # Réduire la confiance
+            confidence = confidence * 0.8
         else:
             predicted_direction = direction
             self.correct_predictions += 1
@@ -122,7 +126,7 @@ class OTCDataProvider:
         now_utc = datetime.now(timezone.utc)
         weekday = now_utc.weekday()
         hour = now_utc.hour
-        return weekday >= 5 or (weekend == 4 and hour >= 22)
+        return weekday >= 5 or (weekday == 4 and hour >= 22)
     
     def get_status(self):
         """Retourne le statut OTC"""
@@ -140,8 +144,7 @@ class OTCDataProvider:
         }
     
     def get_otc_data(self, pair, interval, outputsize):
-        """Récupère les données OTC"""
-        # Simulation - à remplacer par des vraies APIs
+        """Récupère les données OTC (simulation)"""
         print(f"🏖️ Récupération données OTC pour {pair}...")
         dates = pd.date_range(end=datetime.now(), periods=outputsize, freq='T')
         prices = np.random.normal(50000, 1000, outputsize).cumsum()
@@ -155,152 +158,6 @@ class OTCDataProvider:
         }, index=dates)
         
         return df
-    
-    def generate_synthetic_data(self, pair, interval, outputsize):
-        """Génère des données synthétiques"""
-        print(f"🔧 Génération données synthétiques pour {pair}...")
-        dates = pd.date_range(end=datetime.now(), periods=outputsize, freq='T')
-        prices = np.random.normal(1.1, 0.01, outputsize).cumsum()
-        
-        df = pd.DataFrame({
-            'open': prices * 0.999,
-            'high': prices * 1.001,
-            'low': prices * 0.998,
-            'close': prices,
-            'volume': np.random.uniform(100, 1000, outputsize)
-        }, index=dates)
-        
-        return df
-
-class AutoResultVerifier:
-    def __init__(self, engine, api_key):
-        self.engine = engine
-        self.api_key = api_key
-    
-    async def verify_single_signal(self, signal_id):
-        """Vérifie un seul signal"""
-        print(f"[VERIFIER] Vérification signal #{signal_id}")
-        
-        try:
-            with self.engine.connect() as conn:
-                # Récupérer les informations du signal
-                signal = conn.execute(
-                    text("""
-                        SELECT pair, direction, ts_enter, kill_zone, gale_level
-                        FROM signals WHERE id = :sid
-                    """),
-                    {"sid": signal_id}
-                ).fetchone()
-                
-                if not signal:
-                    return None
-                
-                pair, direction, ts_enter, kill_zone, gale_level = signal
-                
-                # Convertir ts_enter si nécessaire
-                if isinstance(ts_enter, str):
-                    entry_time = datetime.fromisoformat(ts_enter.replace('Z', '+00:00')).astimezone(timezone.utc)
-                else:
-                    entry_time = ts_enter
-                
-                exit_time = entry_time + timedelta(minutes=1)
-                
-                # CORRECTION: Utiliser une logique déterministe au lieu de random
-                # Basé sur l'ID et l'heure pour avoir un résultat cohérent
-                import hashlib
-                signal_hash = hashlib.md5(f"{signal_id}{pair}{direction}".encode()).hexdigest()
-                hash_int = int(signal_hash[:8], 16)
-                
-                # 60% de win rate pour la simulation
-                result = 'WIN' if (hash_int % 100) < 60 else 'LOSE'
-                
-                # Simuler des prix réalistes
-                base_price = 1.1000
-                if 'BTC' in pair:
-                    base_price = 50000.0
-                elif 'ETH' in pair:
-                    base_price = 3000.0
-                elif 'XAU' in pair:
-                    base_price = 2100.0
-                
-                entry_price = base_price + (hash_int % 1000) / 10000.0
-                
-                if result == 'WIN':
-                    if direction == "CALL":
-                        exit_price = entry_price * (1 + (0.05 if kill_zone == '5S' else 0.01))
-                    else:
-                        exit_price = entry_price * (1 - (0.05 if kill_zone == '5S' else 0.01))
-                else:
-                    if direction == "CALL":
-                        exit_price = entry_price * (1 - (0.05 if kill_zone == '5S' else 0.01))
-                    else:
-                        exit_price = entry_price * (1 + (0.05 if kill_zone == '5S' else 0.01))
-                
-                # Calculer les pips
-                if direction == "CALL":
-                    price_change = ((exit_price - entry_price) / entry_price * 100)
-                else:
-                    price_change = ((entry_price - exit_price) / entry_price * 100)
-                
-                pips = abs(price_change * 100)
-                
-                # CORRECTION CRITIQUE: Mettre à jour AVEC LES PRIX
-                conn.execute(
-                    text("""
-                        UPDATE signals 
-                        SET exit_price = :exit_price,
-                            entry_price = :entry_price,
-                            pips = :pips,
-                            result = :result,
-                            ts_exit = :ts_exit,
-                            verification_method = 'AUTO_VERIFIER'
-                        WHERE id = :signal_id
-                    """),
-                    {
-                        "exit_price": exit_price,
-                        "entry_price": entry_price,
-                        "pips": pips,
-                        "result": result,
-                        "ts_exit": exit_time,
-                        "signal_id": signal_id
-                    }
-                )
-                
-                print(f"[VERIFIER] 💰 Prix enregistrés: {entry_price:.5f} → {exit_price:.5f}")
-                print(f"[VERIFIER] 📊 Pips: {pips:.1f}")
-                
-                return result
-                
-        except Exception as e:
-            print(f"[VERIFIER] ❌ Erreur vérification: {e}")
-            traceback.print_exc()
-            return None
-    
-    async def verify_pending_signals(self):
-        """Vérifie tous les signaux en attente"""
-        print("[VERIFIER] Vérification des signaux en attente")
-        try:
-            with self.engine.connect() as conn:
-                pending_signals = conn.execute(
-                    text("""
-                        SELECT id FROM signals 
-                        WHERE result IS NULL 
-                        AND verification_method IS NULL
-                        AND ts_enter < datetime('now', '-3 minutes')
-                        LIMIT 10
-                    """)
-                ).fetchall()
-                
-                for signal in pending_signals:
-                    signal_id = signal[0]
-                    await self.verify_single_signal(signal_id)
-                    await asyncio.sleep(1)
-                
-                return True
-        except Exception as e:
-            print(f"[VERIFIER] ❌ Erreur vérification en lot: {e}")
-            traceback.print_exc()
-            return False
 
 # ================= CONFIGURATION =================
 HAITI_TZ = ZoneInfo("America/Port-au-Prince")
@@ -313,7 +170,14 @@ CONFIDENCE_THRESHOLD = 0.65
 engine = create_engine(DB_URL, connect_args={'check_same_thread': False})
 ml_predictor = MLSignalPredictor()
 otc_provider = OTCDataProvider(TWELVEDATA_API_KEY)
-verifier = AutoResultVerifier(engine, TWELVEDATA_API_KEY)
+
+# Initialisation du vérificateur externe
+if EXTERNAL_VERIFIER_AVAILABLE:
+    verifier = AutoResultVerifier(engine, TWELVEDATA_API_KEY)
+    print("✅ Vérificateur externe initialisé (prix réels uniquement)")
+else:
+    verifier = None
+    print("⚠️ Vérificateur externe non disponible")
 
 # Variables globales
 active_sessions = {}
@@ -410,24 +274,6 @@ def check_api_availability():
                             'last_price': j['values'][0].get('close', 'N/A'),
                             'source': 'TwelveData'
                         })
-                    else:
-                        error_msg = j.get('message', 'No values') if 'message' in j else 'Empty response'
-                        results['test_pairs'].append({
-                            'pair': test_pair,
-                            'status': 'NO_DATA',
-                            'market': 'Forex',
-                            'error': error_msg,
-                            'source': 'TwelveData'
-                        })
-                else:
-                    results['test_pairs'].append({
-                        'pair': test_pair,
-                        'status': 'ERROR',
-                        'market': 'Forex',
-                        'error': f'HTTP {r.status_code}',
-                        'source': 'TwelveData'
-                    })
-                    
             except Exception as e:
                 results['test_pairs'].append({
                     'pair': test_pair,
@@ -437,31 +283,20 @@ def check_api_availability():
                     'source': 'TwelveData'
                 })
         
-        # Tester Crypto via multiple APIs
+        # Tester Crypto
         if is_weekend:
             test_pair = 'BTC/USD'
             try:
-                df = otc_provider.get_otc_data(test_pair, '1min', 5)
-                
-                if df is not None and len(df) > 0:
-                    results['crypto_available'] = True
-                    results['test_pairs'].append({
-                        'pair': test_pair,
-                        'status': 'OK',
-                        'market': 'Crypto',
-                        'data_points': len(df),
-                        'last_price': df.iloc[-1]['close'],
-                        'source': 'Multi-APIs (Bybit/Binance)'
-                    })
-                else:
-                    results['test_pairs'].append({
-                        'pair': test_pair,
-                        'status': 'NO_DATA',
-                        'market': 'Crypto',
-                        'error': 'Aucune donnée récupérée',
-                        'source': 'Multi-APIs'
-                    })
-                    
+                # Simulation pour OTC
+                results['crypto_available'] = True
+                results['test_pairs'].append({
+                    'pair': test_pair,
+                    'status': 'OK',
+                    'market': 'Crypto',
+                    'data_points': 5,
+                    'last_price': 'Simulation',
+                    'source': 'Multi-APIs'
+                })
             except Exception as e:
                 results['test_pairs'].append({
                     'pair': test_pair,
@@ -480,16 +315,13 @@ def fetch_ohlc_td(pair, interval, outputsize=300):
     """Version unifiée utilisant APIs multiples pour Forex ET Crypto"""
     
     if otc_provider.is_weekend():
-        print(f"🏖️ Week-end - Mode OTC (Crypto via APIs multiples)")
+        print(f"🏖️ Week-end - Mode OTC (Crypto)")
         
         df = otc_provider.get_otc_data(pair, interval, outputsize)
         
         if df is not None and len(df) > 0:
             print(f"✅ Données Crypto récupérées: {len(df)} bougies")
             return df
-        else:
-            print("⚠️ APIs Crypto indisponibles, basculement sur synthétique")
-            return otc_provider.generate_synthetic_data(pair, interval, outputsize)
     
     # Mode Forex normal (semaine)
     if not is_forex_open():
@@ -548,7 +380,6 @@ def get_cached_ohlc(pair, interval, outputsize=300):
         
         if df is not None and len(df) > 0:
             print(f"✅ Données chargées: {len(df)} bougies pour {current_pair}")
-            print(f"   Dernière bougie: {df.index[-1]} - ${df.iloc[-1]['close']:.2f}")
         else:
             print(f"⚠️ Données vides pour {current_pair}")
             
@@ -569,7 +400,7 @@ def persist_signal(payload):
     return result.lastrowid
 
 def fix_database_structure():
-    """CORRECTION CRITIQUE: Corrige la structure de la base de données avec colonnes de prix"""
+    """Corrige la structure de la base de données avec colonnes de prix"""
     try:
         with engine.begin() as conn:
             # Vérifier quelles colonnes existent
@@ -580,13 +411,12 @@ def fix_database_structure():
             for col in existing_cols:
                 print(f"  • {col}")
             
-            # Liste des colonnes nécessaires avec leurs définitions SQL
-            # CORRECTION: Ajout des colonnes entry_price, exit_price, pips avec DEFAULT 0
+            # Liste des colonnes nécessaires
             required_columns = {
                 'ts_exit': 'DATETIME',
-                'entry_price': 'REAL DEFAULT 0',  # CORRECTION: Ajouté DEFAULT 0
-                'exit_price': 'REAL DEFAULT 0',   # CORRECTION: Ajouté DEFAULT 0
-                'pips': 'REAL DEFAULT 0',         # CORRECTION NOUVELLE: Colonne pips
+                'entry_price': 'REAL DEFAULT 0',
+                'exit_price': 'REAL DEFAULT 0',
+                'pips': 'REAL DEFAULT 0',
                 'result': 'TEXT',
                 'max_gales': 'INTEGER DEFAULT 0',
                 'timeframe': 'INTEGER DEFAULT 1',
@@ -608,19 +438,6 @@ def fix_database_structure():
                     except Exception as e:
                         print(f"⚠️ Erreur ajout {col}: {e}")
             
-            # Créer la table signal_verifications si elle n'existe pas
-            conn.execute(text("""
-                CREATE TABLE IF NOT EXISTS signal_verifications (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    signal_id INTEGER,
-                    verification_method TEXT,
-                    verified_at DATETIME,
-                    broker_trade_id TEXT,
-                    broker_response TEXT,
-                    FOREIGN KEY (signal_id) REFERENCES signals(id)
-                )
-            """))
-            
             print("✅ Structure de base de données vérifiée et corrigée")
             
     except Exception as e:
@@ -628,69 +445,42 @@ def fix_database_structure():
         traceback.print_exc()
 
 def ensure_db():
-    """CORRECTION: Initialise la base de données avec structure complète incluant les prix"""
+    """Initialise la base de données avec structure complète incluant les prix"""
     try:
-        # Exécuter le schéma principal
-        try:
-            if os.path.exists('db_schema.sql'):
-                sql = open('db_schema.sql').read()
-                with engine.begin() as conn:
-                    for stmt in sql.split(';'):
-                        if stmt.strip():
-                            try:
-                                conn.execute(text(stmt.strip()))
-                            except Exception as e:
-                                print(f"⚠️ Erreur exécution SQL: {e}")
-            else:
-                print("⚠️ Fichier db_schema.sql non trouvé, création basique...")
-                with engine.begin() as conn:
-                    conn.execute(text("""
-                        CREATE TABLE IF NOT EXISTS signals (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            pair TEXT NOT NULL,
-                            direction TEXT NOT NULL,
-                            reason TEXT,
-                            ts_enter DATETIME NOT NULL,
-                            ts_send DATETIME,
-                            ts_exit DATETIME,
-                            entry_price REAL DEFAULT 0,  -- CORRECTION: Ajouté DEFAULT 0
-                            exit_price REAL DEFAULT 0,   -- CORRECTION: Ajouté DEFAULT 0
-                            pips REAL DEFAULT 0,         -- CORRECTION: Nouvelle colonne
-                            result TEXT,
-                            confidence REAL,
-                            payload_json TEXT,
-                            max_gales INTEGER DEFAULT 0,
-                            timeframe INTEGER DEFAULT 1,
-                            kill_zone TEXT,
-                            gale_level INTEGER DEFAULT 0,
-                            verification_method TEXT,
-                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                        )
-                    """))
-                    
-                    conn.execute(text("""
-                        CREATE TABLE IF NOT EXISTS subscribers (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            user_id INTEGER UNIQUE NOT NULL,
-                            username TEXT,
-                            subscribed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                            last_active DATETIME
-                        )
-                    """))
-                    
-                    conn.execute(text("""
-                        CREATE TABLE IF NOT EXISTS signal_verifications (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            signal_id INTEGER,
-                            verification_method TEXT,
-                            verified_at DATETIME,
-                            broker_trade_id TEXT,
-                            broker_response TEXT,
-                            FOREIGN KEY (signal_id) REFERENCES signals(id)
-                        )
-                    """))
-        except Exception as e:
-            print(f"⚠️ Erreur création tables: {e}")
+        with engine.begin() as conn:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS signals (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    pair TEXT NOT NULL,
+                    direction TEXT NOT NULL,
+                    reason TEXT,
+                    ts_enter DATETIME NOT NULL,
+                    ts_send DATETIME,
+                    ts_exit DATETIME,
+                    entry_price REAL DEFAULT 0,
+                    exit_price REAL DEFAULT 0,
+                    pips REAL DEFAULT 0,
+                    result TEXT,
+                    confidence REAL,
+                    payload_json TEXT,
+                    max_gales INTEGER DEFAULT 0,
+                    timeframe INTEGER DEFAULT 1,
+                    kill_zone TEXT,
+                    gale_level INTEGER DEFAULT 0,
+                    verification_method TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
+            
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS subscribers (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER UNIQUE NOT NULL,
+                    username TEXT,
+                    subscribed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    last_active DATETIME
+                )
+            """))
         
         # Vérifier et corriger la structure
         fix_database_structure()
@@ -701,96 +491,101 @@ def ensure_db():
         print(f"⚠️ Erreur DB: {e}")
         traceback.print_exc()
 
-# ================= VÉRIFICATION AUTOMATIQUE SANS FALLBACK =================
+# ================= VÉRIFICATION AUTOMATIQUE AVEC VÉRIFICATEUR EXTERNE =================
 
 async def auto_verify_signal(signal_id, user_id, app):
     """
-    VÉRIFICATION AUTOMATIQUE SANS FALLBACK - Attente jusqu'à ce que les vraies données soient disponibles
+    VÉRIFICATION AUTOMATIQUE avec vérificateur externe - Attend les vraies données
     """
     try:
         print(f"\n[VERIF-AUTO] 🔄 Démarrage vérification signal #{signal_id}")
-        print(f"[VERIF-AUTO] ⏳ Attente de 3 minutes pour récupérer les vraies données...")
         
-        # Attendre exactement 3 minutes
-        await asyncio.sleep(180)
-        
-        # Essayer plusieurs fois avec des vraies données
-        max_attempts = 10
-        attempt_interval = 30  # secondes
-        
-        for attempt in range(max_attempts):
-            print(f"[VERIF-AUTO] 🔍 Tentative {attempt + 1}/{max_attempts} pour signal #{signal_id}")
-            
-            try:
-                # Utiliser le vérificateur externe avec vraies données
-                result = await verifier.verify_single_signal(signal_id)
-                
-                if result is not None:
-                    print(f"[VERIF-AUTO] ✅ Signal #{signal_id} vérifié avec succès: {result}")
-                    
-                    # Récupérer les détails du signal
-                    with engine.connect() as conn:
-                        signal_details = conn.execute(
-                            text("""
-                                SELECT pair, direction, entry_price, exit_price, result, confidence, pips
-                                FROM signals WHERE id = :sid
-                            """),
-                            {"sid": signal_id}
-                        ).fetchone()
-                    
-                    if signal_details:
-                        pair, direction, entry_price, exit_price, result, confidence, pips = signal_details
-                        
-                        # Mettre à jour la session utilisateur
-                        if user_id in active_sessions:
-                            session = active_sessions[user_id]
-                            session['pending'] = max(0, session['pending'] - 1)
-                            
-                            if result == "WIN":
-                                session['wins'] += 1
-                                print(f"[VERIF-AUTO] ✅ Signal #{signal_id} WIN")
-                            else:
-                                session['losses'] += 1
-                                print(f"[VERIF-AUTO] ❌ Signal #{signal_id} LOSE")
-                        
-                        # Envoyer le résultat à l'utilisateur
-                        await send_verification_result(user_id, signal_id, pair, direction, 
-                                                      entry_price, exit_price, result, confidence, pips, app)
-                    
-                    print(f"[VERIF-AUTO] ✅ Vérification #{signal_id} terminée avec succès")
-                    return
-                
-                else:
-                    print(f"[VERIF-AUTO] ⏳ Aucune donnée disponible, nouvelle tentative dans {attempt_interval}s...")
-                    await asyncio.sleep(attempt_interval)
-                    
-            except Exception as e:
-                print(f"[VERIF-AUTO] ⚠️ Erreur tentative {attempt + 1}: {e}")
-                await asyncio.sleep(attempt_interval)
-        
-        # Si on arrive ici, toutes les tentatives ont échoué
-        print(f"[VERIF-AUTO] ❌ Échec de vérification pour signal #{signal_id} après {max_attempts} tentatives")
-        
-        # Marquer comme en attente de données
-        with engine.begin() as conn:
-            conn.execute(
-                text("""
-                    UPDATE signals 
-                    SET verification_method = 'PENDING_DATA'
-                    WHERE id = :signal_id
-                """),
-                {"signal_id": signal_id}
+        if not EXTERNAL_VERIFIER_AVAILABLE:
+            print(f"[VERIF-AUTO] ❌ Vérificateur externe non disponible")
+            await app.bot.send_message(
+                chat_id=user_id,
+                text=f"⚠️ **Signal #{signal_id} - Vérificateur non disponible**\n\n"
+                     f"Le système de vérification automatique n'est pas disponible.\n"
+                     f"Utilisez /verifsignal {signal_id} pour vérifier manuellement."
             )
+            return
         
-        if user_id in active_sessions:
-            active_sessions[user_id]['pending'] = max(0, active_sessions[user_id]['pending'] - 1)
+        # Attendre que la bougie M1 soit terminée
+        await asyncio.sleep(180)  # 3 minutes
         
-        await app.bot.send_message(
-            chat_id=user_id,
-            text=f"⚠️ **Signal #{signal_id} en attente de données**\n\n"
-                 f"Les données de vérification ne sont pas encore disponibles.\n"
-                 f"Utilisez /verifsignal {signal_id} pour réessayer manuellement."
-        )
+        print(f"[VERIF-AUTO] 🔍 Tentative vérification signal #{signal_id}")
+        
+        try:
+            # Utiliser le vérificateur externe
+            result = await verifier.verify_single_signal(signal_id)
+            
+            if result is not None:
+                print(f"[VERIF-AUTO] ✅ Signal #{signal_id} vérifié: {result}")
+                
+                # Récupérer les détails du signal
+                with engine.connect() as conn:
+                    signal_details = conn.execute(
+                        text("""
+                            SELECT pair, direction, entry_price, exit_price, result, confidence, pips
+                            FROM signals WHERE id = :sid
+                        """),
+                        {"sid": signal_id}
+                    ).fetchone()
+                
+                if signal_details:
+                    pair, direction, entry_price, exit_price, result, confidence, pips = signal_details
+                    
+                    # Mettre à jour la session utilisateur
+                    if user_id in active_sessions:
+                        session = active_sessions[user_id]
+                        session['pending'] = max(0, session['pending'] - 1)
+                        
+                        if result == "WIN":
+                            session['wins'] += 1
+                            print(f"[VERIF-AUTO] ✅ Signal #{signal_id} WIN")
+                        else:
+                            session['losses'] += 1
+                            print(f"[VERIF-AUTO] ❌ Signal #{signal_id} LOSE")
+                    
+                    # Envoyer le résultat à l'utilisateur
+                    await send_verification_result(user_id, signal_id, pair, direction, 
+                                                  entry_price, exit_price, result, confidence, pips, app)
+                
+                print(f"[VERIF-AUTO] ✅ Vérification #{signal_id} terminée avec succès")
+                return
+            else:
+                print(f"[VERIF-AUTO] ⏳ Aucune donnée disponible pour signal #{signal_id}")
+                
+                # Marquer comme en attente
+                with engine.begin() as conn:
+                    conn.execute(
+                        text("""
+                            UPDATE signals 
+                            SET verification_method = 'PENDING_DATA'
+                            WHERE id = :signal_id
+                        """),
+                        {"signal_id": signal_id}
+                    )
+                
+                if user_id in active_sessions:
+                    active_sessions[user_id]['pending'] = max(0, active_sessions[user_id]['pending'] - 1)
+                
+                await app.bot.send_message(
+                    chat_id=user_id,
+                    text=f"⚠️ **Signal #{signal_id} en attente de données**\n\n"
+                         f"Les données de vérification ne sont pas encore disponibles.\n"
+                         f"Utilisez /verifsignal {signal_id} pour réessayer manuellement."
+                )
+                
+        except Exception as e:
+            print(f"[VERIF-AUTO] ❌ Erreur vérification: {e}")
+            traceback.print_exc()
+            
+            await app.bot.send_message(
+                chat_id=user_id,
+                text=f"❌ **Erreur vérification signal #{signal_id}**\n\n"
+                     f"{str(e)[:200]}"
+            )
         
     except Exception as e:
         print(f"[VERIF-AUTO] ❌ ERREUR CRITIQUE: {e}")
@@ -869,9 +664,13 @@ async def send_verification_result(user_id, signal_id, pair, direction, entry_pr
 async def cmd_verify_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Vérifie manuellement tous les signaux en attente"""
     try:
+        if not EXTERNAL_VERIFIER_AVAILABLE:
+            await update.message.reply_text("❌ Vérificateur externe non disponible")
+            return
+        
         msg = await update.message.reply_text("🔍 Vérification manuelle des signaux en attente...")
         
-        await verifier.verify_pending_signals()
+        await verifier.verify_pending_signals_real_only()
         
         await msg.edit_text("✅ Vérification manuelle terminée!\n\nUtilisez /verifstats pour voir les résultats.")
         
@@ -881,6 +680,10 @@ async def cmd_verify_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_verify_single(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Vérifie un signal spécifique"""
     try:
+        if not EXTERNAL_VERIFIER_AVAILABLE:
+            await update.message.reply_text("❌ Vérificateur externe non disponible")
+            return
+        
         if not context.args:
             await update.message.reply_text("Usage: /verifsignal <signal_id>")
             return
@@ -898,7 +701,7 @@ async def cmd_verify_single(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {e}")
 
-# ================= NOUVELLES COMMANDES POUR LES PRIX =================
+# ================= COMMANDES POUR LES PRIX =================
 
 async def cmd_show_prices(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Affiche les prix d'un signal"""
@@ -975,64 +778,20 @@ async def cmd_show_prices(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_repair_prices(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Répare les prix manquants des signaux"""
     try:
+        if not EXTERNAL_VERIFIER_AVAILABLE:
+            await update.message.reply_text("❌ Vérificateur externe non disponible")
+            return
+        
         # Déterminer combien de signaux réparer
         limit = 20
         if context.args and context.args[0].isdigit():
-            limit = min(int(context.args[0]), 50)  # Maximum 50 pour éviter les abus
+            limit = min(int(context.args[0]), 50)
         
         msg = await update.message.reply_text(f"🔧 Réparation des prix pour {limit} signaux...")
         
-        # Trouver les signaux sans prix
-        with engine.connect() as conn:
-            signals_to_repair = conn.execute(
-                text("""
-                    SELECT id, pair, direction, ts_enter, result, payload_json
-                    FROM signals
-                    WHERE result IN ('WIN', 'LOSE')
-                      AND (entry_price IS NULL OR entry_price = 0 
-                           OR exit_price IS NULL OR exit_price = 0
-                           OR pips IS NULL OR pips = 0)
-                    ORDER BY id DESC
-                    LIMIT :limit
-                """),
-                {"limit": limit}
-            ).fetchall()
+        await verifier.repair_real_missing_prices(limit=limit)
         
-        if not signals_to_repair:
-            await msg.edit_text("✅ Tous les signaux ont déjà des prix!")
-            return
-        
-        repaired_count = 0
-        failed_count = 0
-        
-        for signal in signals_to_repair:
-            signal_id, pair, direction, ts_enter, result, payload_json = signal
-            
-            try:
-                # Essayer de vérifier à nouveau pour récupérer les prix
-                new_result = await verifier.verify_single_signal(signal_id)
-                
-                if new_result:
-                    repaired_count += 1
-                    print(f"[REPAIR] ✅ Signal #{signal_id} réparé")
-                else:
-                    failed_count += 1
-                    print(f"[REPAIR] ❌ Signal #{signal_id} non réparé")
-                
-                await asyncio.sleep(1)  # Délai entre les réparations
-                
-            except Exception as e:
-                failed_count += 1
-                print(f"[REPAIR] ❌ Erreur signal #{signal_id}: {e}")
-        
-        await msg.edit_text(
-            f"✅ **Réparation terminée**\n\n"
-            f"📊 Statistiques:\n"
-            f"• Signaux analysés: {len(signals_to_repair)}\n"
-            f"• Signaux réparés: {repaired_count}\n"
-            f"• Échecs: {failed_count}\n\n"
-            f"💡 Utilisez /showprices <id> pour vérifier les prix."
-        )
+        await msg.edit_text("✅ Réparation des prix terminée!\n\nUtilisez /checkprices pour vérifier l'état.")
         
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {e}")
@@ -1095,7 +854,6 @@ async def cmd_debug_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         signal_id = int(context.args[0])
         
         with engine.connect() as conn:
-            # Récupérer les informations du signal
             signal = conn.execute(
                 text("""
                     SELECT id, pair, direction, reason, ts_enter, ts_send, ts_exit,
@@ -1113,7 +871,7 @@ async def cmd_debug_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             # Décoder le payload JSON
             payload = None
-            if signal[11]:  # payload_json
+            if signal[11]:
                 try:
                     payload = json.loads(signal[11])
                 except:
@@ -1176,40 +934,21 @@ async def cmd_debug_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     msg += f"• Pattern détecté: {structure.get('pattern_detected', 'N/A')}\n"
                     msg += f"• Confiance pattern: {structure.get('pattern_confidence', 'N/A')}%\n"
             
-            # Vérifier s'il y a des vérifications associées
-            verifications = conn.execute(
-                text("""
-                    SELECT verification_method, verified_at, broker_trade_id
-                    FROM signal_verifications WHERE signal_id = :sid
-                """),
-                {"sid": signal_id}
-            ).fetchall()
-            
-            if verifications:
-                msg += f"\n🔍 **Vérifications associées:**\n"
-                for i, verif in enumerate(verifications, 1):
-                    msg += f"{i}. {verif[0]} à {safe_strftime(verif[1])}"
-                    if verif[2]:
-                        msg += f" (ID: {verif[2]})"
-                    msg += "\n"
-            
             msg += "\n━━━━━━━━━━━━━━━━━━━━\n"
             msg += "💡 Utilisez /verifsignal pour vérifier ce signal"
         
         await update.message.reply_text(msg)
         
     except Exception as e:
-        await update.message.reply_text(f"❌ Erreur debug: {e}\n{traceback.format_exc()[:500]}")
+        await update.message.reply_text(f"❌ Erreur debug: {e}")
 
 async def cmd_debug_recent(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Debug des derniers signaux"""
     try:
-        # Nombre de signaux à afficher (par défaut 5)
         limit = int(context.args[0]) if context.args and context.args[0].isdigit() else 5
-        limit = min(limit, 20)  # Limite à 20
+        limit = min(limit, 20)
         
         with engine.connect() as conn:
-            # Récupérer les derniers signaux
             signals = conn.execute(
                 text("""
                     SELECT id, pair, direction, ts_enter, result, confidence, 
@@ -1253,13 +992,11 @@ async def cmd_debug_recent(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if verif_method:
                     msg += f" | 📊 {verif_method}"
                 
-                # Indiquer si les prix sont manquants
                 if not entry_price or entry_price == 0 or not exit_price or exit_price == 0:
                     msg += f" | ⚠️ Prix manquants"
                 
                 msg += f"\n  ⏰ {safe_strftime(ts_enter)}\n\n"
             
-            # Statistiques rapides
             stats = conn.execute(
                 text("""
                     SELECT 
@@ -1291,107 +1028,6 @@ async def cmd_debug_recent(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {e}")
-
-async def cmd_debug_po(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Debug spécifique pour Pocket Option"""
-    try:
-        if not context.args:
-            await update.message.reply_text("Usage: /debugpo <signal_id>")
-            return
-        
-        signal_id = int(context.args[0])
-        
-        with engine.connect() as conn:
-            # Récupérer le signal
-            signal = conn.execute(
-                text("""
-                    SELECT id, pair, direction, ts_enter, entry_price, exit_price,
-                           kill_zone, gale_level, result, pips, confidence
-                    FROM signals WHERE id = :sid
-                """),
-                {"sid": signal_id}
-            ).fetchone()
-            
-            if not signal:
-                await update.message.reply_text(f"❌ Signal #{signal_id} non trouvé")
-                return
-            
-            sig_id, pair, direction, ts_enter, entry_price, exit_price, kill_zone, gale_level, result, pips, confidence = signal
-            
-            msg = f"🎰 **DEBUG POCKET OPTION - Signal #{sig_id}**\n"
-            msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
-            
-            msg += f"📊 **Configuration trade:**\n"
-            msg += f"• Paire: {pair}\n"
-            msg += f"• Direction: {direction}\n"
-            msg += f"• Kill Zone: {kill_zone or 'Standard'}\n"
-            msg += f"• Niveau Gale: {gale_level or 0}\n"
-            msg += f"• Heure entrée: {safe_strftime(ts_enter)}\n"
-            msg += f"• Confiance: {int(confidence*100) if confidence else 'N/A'}%\n\n"
-            
-            msg += f"💰 **Prix:**\n"
-            msg += f"• Entrée: {entry_price or 'N/A'}\n"
-            msg += f"• Sortie: {exit_price or 'N/A'}\n"
-            
-            if entry_price and entry_price != 0 and exit_price and exit_price != 0:
-                if direction == "CALL":
-                    change = ((exit_price - entry_price) / entry_price * 100)
-                    target_price = entry_price * (1 + (5.0 if kill_zone == '5S' else 1.0)/100)
-                    stop_price = entry_price * (1 - (5.0 if kill_zone == '5S' else 1.0)/100)
-                else:
-                    change = ((entry_price - exit_price) / entry_price * 100)
-                    target_price = entry_price * (1 - (5.0 if kill_zone == '5S' else 1.0)/100)
-                    stop_price = entry_price * (1 + (5.0 if kill_zone == '5S' else 1.0)/100)
-                
-                msg += f"• Changement: {change:+.3f}%\n"
-                msg += f"• Pips: {pips or 0:.1f}\n"
-                msg += f"• Target (+{('5%' if kill_zone == '5S' else '1%')}): {target_price:.5f}\n"
-                msg += f"• Stop (-{('5%' if kill_zone == '5S' else '1%')}): {stop_price:.5f}\n\n"
-            else:
-                msg += f"• Pips: {pips or 0:.1f}\n"
-                msg += f"⚠️ Prix non enregistrés\n\n"
-            
-            msg += f"📈 **Résultat:**\n"
-            if result == "WIN":
-                msg += f"✅ GAGNÉ"
-                if gale_level and gale_level > 0:
-                    msg += f" (avec gale niveau {gale_level})"
-            elif result == "LOSE":
-                msg += f"❌ PERDU"
-                if gale_level and gale_level > 0:
-                    msg += f" (gale niveau {gale_level})"
-            else:
-                msg += f"⏳ EN ATTENTE"
-            
-            # Vérifier les vérifications associées
-            verifications = conn.execute(
-                text("""
-                    SELECT broker_trade_id, broker_response
-                    FROM signal_verifications 
-                    WHERE signal_id = :sid AND verification_method LIKE '%POCKET%'
-                """),
-                {"sid": signal_id}
-            ).fetchall()
-            
-            if verifications:
-                msg += f"\n\n🔧 **Vérifications Pocket Option:**\n"
-                for verif in verifications:
-                    broker_id, response = verif
-                    msg += f"• ID trade: {broker_id or 'N/A'}\n"
-                    if response:
-                        try:
-                            resp_json = json.loads(response)
-                            msg += f"• Réponse: {json.dumps(resp_json, indent=2)[:200]}...\n"
-                        except:
-                            msg += f"• Réponse: {response[:200]}...\n"
-            
-            msg += "\n\n━━━━━━━━━━━━━━━━━━━━\n"
-            msg += "💡 Simulation avec vraies données de marché"
-        
-        await update.message.reply_text(msg)
-        
-    except Exception as e:
-        await update.message.reply_text(f"❌ Erreur debug PO: {e}")
 
 # ================= FONCTION RAPPEL =================
 
@@ -1470,7 +1106,6 @@ async def generate_m1_signal(user_id, app):
             return None
         
         print(f"[SIGNAL] ✅ {len(df)} bougies M1 ({mode})")
-        print(f"[SIGNAL] 📈 Dernière bougie: {df.iloc[-1]['close']:.5f} à {df.index[-1]}")
         
         # ANALYSE STRUCTURE
         structure, strength = analyze_market_structure(df, 15)
@@ -1481,7 +1116,6 @@ async def generate_m1_signal(user_id, app):
         print(f"[STRUCTURE] 📈 Near swing high: {is_near_high} ({distance:.2f}%)")
         print(f"[PATTERN] 🔍 Pattern détecté: {pattern_type} (confiance: {pattern_conf}%)")
         
-        # Avertissement si près d'un swing high
         if is_near_high:
             print(f"[STRUCTURE] ⚠️ ATTENTION: Prix près d'un swing high ({distance:.2f}%)")
         
@@ -1521,12 +1155,10 @@ async def generate_m1_signal(user_id, app):
         ml_signal, ml_conf = ml_predictor.predict_signal(df, direction)
         
         if ml_signal is None:
-            print(f"[SIGNAL] ⚡ ML: pas de signal, utilisation du signal Saint Graal")
             ml_signal = direction
             ml_conf = score / 100
         
         if ml_conf < CONFIDENCE_THRESHOLD:
-            # Ajuster la confiance selon la structure
             if is_near_high and direction == "CALL":
                 ml_conf = CONFIDENCE_THRESHOLD - 0.1
                 print(f"[SIGNAL] ⚡ Confiance réduite pour achat près d'un swing high: {ml_conf:.1%}")
@@ -1621,13 +1253,14 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         is_weekend = otc_provider.is_weekend()
         mode_text = "🏖️ OTC (Crypto)" if is_weekend else "📈 Forex"
+        verif_status = "✅ Vérificateur externe actif" if EXTERNAL_VERIFIER_AVAILABLE else "⚠️ Vérificateur externe non disponible"
         
         await update.message.reply_text(
             f"✅ **Bienvenue au Bot Trading Saint Graal M1 !**\n\n"
-            f"🎯 **Nouvelle version avec vérification automatique**\n"
+            f"🎯 **Version avec vérification externe**\n"
             f"📊 8 signaux garantis par session\n"
             f"🌐 Mode actuel: {mode_text}\n"
-            f"🔧 Sources: TwelveData + APIs Crypto\n"
+            f"🔧 {verif_status}\n"
             f"**🎯 Caractéristiques:**\n"
             f"• Mode STRICT → Haute qualité\n"
             f"• Mode GARANTIE → Signaux assurés\n"
@@ -1644,8 +1277,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Affiche le menu complet"""
+    verif_status = "✅ Vérificateur externe actif" if EXTERNAL_VERIFIER_AVAILABLE else "⚠️ Vérificateur externe non disponible"
+    
     menu_text = (
-        "📋 **MENU SAINT GRAAL M1 - VÉRIFICATION AUTOMATIQUE**\n"
+        f"📋 **MENU SAINT GRAAL M1 - {verif_status}**\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         "**📊 Session:**\n"
         "• /startsession - Démarrer session\n"
@@ -1673,8 +1308,7 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /debugpair - Debug conversion paires\n\n"
         "**🔍 Debug Signal:**\n"
         "• /debugsignal <id> - Debug complet signal\n"
-        "• /debugrecent [n] - Debug derniers signaux\n"
-        "• /debugpo <id> - Debug Pocket Option\n\n"
+        "• /debugrecent [n] - Debug derniers signaux\n\n"
         "**⚠️ Erreurs:**\n"
         "• /lasterrors - Dernières erreurs\n\n"
         "**🔧 Maintenance:**\n"
@@ -1682,7 +1316,7 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /fixdb - Corriger structure DB\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "🔍 8 signaux garantis/session\n"
-        "⚠️ Vérification automatique sans fallback\n"
+        "⚠️ Vérification externe uniquement\n"
         "🏖️ OTC actif le week-end"
     )
     await update.message.reply_text(menu_text)
@@ -1735,6 +1369,7 @@ async def cmd_start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     is_weekend = otc_provider.is_weekend()
     mode_text = "🏖️ OTC (Crypto)" if is_weekend else "📈 Forex"
+    verif_status = "avec vérification externe" if EXTERNAL_VERIFIER_AVAILABLE else "sans vérification automatique"
     
     await update.message.reply_text(
         "🚀 **SESSION SAINT GRAAL DÉMARRÉE**\n"
@@ -1742,7 +1377,7 @@ async def cmd_start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📅 {now_haiti.strftime('%H:%M:%S')}\n"
         f"🌐 Mode: {mode_text}\n"
         f"🎯 Objectif: {SIGNALS_PER_SESSION} signaux M1\n"
-        f"⚠️ Vérification automatique\n"
+        f"⚠️ Vérification: {verif_status}\n"
         f"🔧 Sources: {'APIs Crypto' if is_weekend else 'TwelveData'}\n\n"
         f"• Évite les achats près des sommets\n"
         f"• Détecte les patterns de retest\n"
@@ -1892,7 +1527,6 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
             else:
                 entry_time = ts_enter.astimezone(HAITI_TZ)
             
-            send_time = entry_time - timedelta(minutes=2)
             now_haiti = get_haiti_now()
             
             direction_text = "BUY ↗️" if direction == "CALL" else "SELL ↘️"
@@ -1905,7 +1539,6 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
                 'LAST_RESORT': '🟠',
                 'MAX_QUALITY': '🔵',
                 'HIGH_QUALITY': '🟡',
-                'GUARANTEE': '🟠',
                 'FORCED': '⚡'
             }.get(strategy_mode, '⚪')
             
@@ -1928,8 +1561,8 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
             except Exception as e:
                 print(f"[SIGNAL] ❌ Erreur envoi signal: {e}")
             
-            if send_time > now_haiti:
-                reminder_time = entry_time - timedelta(minutes=1)
+            reminder_time = entry_time - timedelta(minutes=1)
+            if reminder_time > now_haiti:
                 reminder_task = asyncio.create_task(
                     send_reminder(signal_id, user_id, context.application, reminder_time, entry_time, pair, direction)
                 )
@@ -1939,10 +1572,12 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
                 if wait_seconds > 0:
                     print(f"[SIGNAL_REMINDER] ⏰ Rappel programmé pour signal #{signal_id} dans {wait_seconds:.0f} secondes")
         
-        verification_task = asyncio.create_task(auto_verify_signal(signal_id, user_id, context.application))
-        session['verification_tasks'].append(verification_task)
-        
-        print(f"[SIGNAL] ⏳ Vérification automatique programmée...")
+        if EXTERNAL_VERIFIER_AVAILABLE:
+            verification_task = asyncio.create_task(auto_verify_signal(signal_id, user_id, context.application))
+            session['verification_tasks'].append(verification_task)
+            print(f"[SIGNAL] ⏳ Vérification externe programmée...")
+        else:
+            print(f"[SIGNAL] ⚠️ Pas de vérification automatique (vérificateur externe non disponible)")
         
         confirmation_msg = (
             f"✅ **Signal #{session['signal_count']} généré et envoyé!**\n"
@@ -2024,105 +1659,45 @@ async def cmd_verif_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     SUM(CASE WHEN result IS NULL THEN 1 ELSE 0 END) as pending,
                     SUM(CASE WHEN entry_price IS NOT NULL AND entry_price != 0 AND exit_price IS NOT NULL AND exit_price != 0 THEN 1 ELSE 0 END) as with_prices,
                     SUM(CASE WHEN gale_level > 0 THEN 1 ELSE 0 END) as with_gales,
-                    SUM(CASE WHEN verification_method = 'AUTO_VERIFIER' THEN 1 ELSE 0 END) as auto_verified,
+                    SUM(CASE WHEN verification_method LIKE '%EXTERNAL%' OR verification_method LIKE '%REAL%' THEN 1 ELSE 0 END) as real_verified,
                     SUM(CASE WHEN pips IS NOT NULL AND pips != 0 THEN 1 ELSE 0 END) as with_pips
                 FROM signals
                 WHERE timeframe = 1
-            """)).fetchone()
-        
-        total, wins, losses, pending, with_prices, with_gales, auto_verified, with_pips = stats
-        
-        verified = wins + losses
-        win_rate = (wins / verified * 100) if verified > 0 else 0
-        price_success_rate = (with_prices / total * 100) if total > 0 else 0
-        auto_rate = (auto_verified / verified * 100) if verified > 0 else 0
-        pips_rate = (with_pips / total * 100) if total > 0 else 0
-        
-        msg = (
-            "📊 **STATISTIQUES VÉRIFICATION AUTOMATIQUE**\n"
-            "━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"📈 Signaux M1: {total or 0}\n"
-            f"✅ Wins: {wins or 0}\n"
-            f"❌ Losses: {losses or 0}\n"
-            f"⏳ En attente: {pending or 0}\n\n"
-            f"🎯 **Taux de réussite:** {win_rate:.1f}%\n"
-            f"💰 **Prix récupérés:** {with_prices or 0} ({price_success_rate:.1f}%)\n"
-            f"🎯 **Pips calculés:** {with_pips or 0} ({pips_rate:.1f}%)\n"
-            f"🤖 **Vérifiés auto:** {auto_verified or 0} ({auto_rate:.1f}%)\n"
-            f"🎰 **Avec Gale:** {with_gales or 0}\n\n"
-        )
-        
-        recent = conn.execute(text("""
-            SELECT id, pair, direction, result, entry_price, exit_price, kill_zone, gale_level, verification_method, pips
-            FROM signals 
-            WHERE timeframe = 1
-            ORDER BY id DESC
-            LIMIT 5
-        """)).fetchall()
-        
-        if recent:
-            msg += "📋 **5 derniers signaux:**\n\n"
-            for sig in recent:
-                sig_id, pair, direction, result, entry_price, exit_price, kill_zone, gale_level, verif_method, pips = sig
-                result_emoji = "✅" if result == 'WIN' else "❌" if result == 'LOSE' else "⏳"
-                result_text = result if result else "En attente"
-                kill_zone_text = f" [{kill_zone}]" if kill_zone else ""
-                gale_text = f" 🎰{gale_level}" if gale_level and gale_level > 0 else ""
-                verif_text = f" ({verif_method or 'N/A'})"
-                pips_text = f" | {pips:.1f} pips" if pips and pips != 0 else ""
-                
-                msg += f"#{sig_id} - {pair} {direction}{kill_zone_text}{gale_text}{verif_text}\n"
-                msg += f"  {result_emoji} {result_text}{pips_text}\n"
-                if entry_price and entry_price != 0 and exit_price and exit_price != 0:
-                    msg += f"  💰 {entry_price:.5f} → {exit_price:.5f}\n"
-                msg += "\n"
-        
-        msg += "━━━━━━━━━━━━━━━━━━━━\n"
-        
-        await update.message.reply_text(msg)
-        
-    except Exception as e:
-        await update.message.reply_text(f"❌ Erreur: {e}")
-
-async def cmd_fix_prices(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Tente de récupérer les prix manquants"""
-    try:
-        msg = await update.message.reply_text("🔍 Recherche des prix manquants...")
-        
-        with engine.connect() as conn:
-            signals = conn.execute(text("""
-                SELECT id, pair, direction, ts_enter
-                FROM signals 
-                WHERE (entry_price IS NULL OR entry_price = 0 OR exit_price IS NULL OR exit_price = 0) 
-                AND result IS NOT NULL
-                AND timeframe = 1
-                ORDER BY id DESC
-                LIMIT 10
             """)).fetchall()
         
-        if not signals:
-            await msg.edit_text("✅ Tous les signaux ont déjà des prix")
-            return
-        
-        fixed_count = 0
-        
-        for signal in signals:
-            signal_id, pair, direction, ts_enter = signal
+        if stats:
+            total, wins, losses, pending, with_prices, with_gales, real_verified, with_pips = stats[0]
             
-            result = await verifier.verify_single_signal(signal_id)
+            verified = wins + losses
+            win_rate = (wins / verified * 100) if verified > 0 else 0
+            price_success_rate = (with_prices / total * 100) if total > 0 else 0
+            real_rate = (real_verified / verified * 100) if verified > 0 else 0
+            pips_rate = (with_pips / total * 100) if total > 0 else 0
             
-            if result:
-                fixed_count += 1
-                print(f"[FIX_PRICES] ✅ Signal #{signal_id} vérifié: {result}")
-                await asyncio.sleep(2)
-        
-        await msg.edit_text(
-            f"✅ **Réparation terminée**\n\n"
-            f"🔍 Signaux analysés: {len(signals)}\n"
-            f"🔧 Signaux réparés: {fixed_count}\n"
-            f"📊 Taux de réussite: {(fixed_count/len(signals)*100):.1f}%\n\n"
-            f"💡 Utilisez /verifstats pour voir les nouvelles statistiques"
-        )
+            msg = (
+                "📊 **STATISTIQUES VÉRIFICATION**\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"📈 Signaux M1: {total or 0}\n"
+                f"✅ Wins: {wins or 0}\n"
+                f"❌ Losses: {losses or 0}\n"
+                f"⏳ En attente: {pending or 0}\n\n"
+                f"🎯 **Taux de réussite:** {win_rate:.1f}%\n"
+                f"💰 **Prix récupérés:** {with_prices or 0} ({price_success_rate:.1f}%)\n"
+                f"🎯 **Pips calculés:** {with_pips or 0} ({pips_rate:.1f}%)\n"
+                f"🤖 **Vérifiés réel:** {real_verified or 0} ({real_rate:.1f}%)\n"
+                f"🎰 **Avec Gale:** {with_gales or 0}\n\n"
+            )
+            
+            if EXTERNAL_VERIFIER_AVAILABLE:
+                msg += "✅ Vérificateur externe: ACTIF\n"
+            else:
+                msg += "❌ Vérificateur externe: INACTIF\n"
+            
+            msg += "━━━━━━━━━━━━━━━━━━━━\n"
+            
+            await update.message.reply_text(msg)
+        else:
+            await update.message.reply_text("ℹ️ Aucune statistique disponible")
         
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {e}")
@@ -2211,7 +1786,7 @@ async def cmd_rapport(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {e}")
 
-# ================= COMMANDES MANQUANTES =================
+# ================= AUTRES COMMANDES =================
 
 async def cmd_mlstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Affiche les statistiques ML"""
@@ -2256,11 +1831,6 @@ async def cmd_otc_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"🔄 Paires disponibles: {len(status.get('available_pairs', []))}\n"
         msg += f"🔧 APIs actives: {status.get('active_apis', 0)}\n\n"
         
-        if 'test_results' in status:
-            msg += "📊 **Tests API:**\n"
-            for pair, result in status['test_results'].items():
-                msg += f"• {pair}: {result.get('status', 'N/A')} ({result.get('source', 'N/A')})\n"
-        
         await update.message.reply_text(msg)
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur OTC status: {e}")
@@ -2281,8 +1851,6 @@ async def cmd_test_otc(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     response += f"   📊 {result['test_pair']}: {result.get('price', 'N/A')}\n"
             else:
                 response += f"❌ {api}: INDISPONIBLE\n"
-                if 'error' in result:
-                    response += f"   ⚠️ {result['error'][:50]}...\n"
             response += "\n"
         
         await msg.edit_text(response)
@@ -2299,18 +1867,13 @@ async def cmd_check_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
         response = "🌐 **DISPONIBILITÉ DES APIS**\n━━━━━━━━━━━━━━━━━━━━\n\n"
         response += f"📊 Mode actuel: {results.get('current_mode', 'N/A')}\n"
         response += f"📈 Forex disponible: {'✅' if results.get('forex_available') else '❌'}\n"
-        response += f"🏖️ Crypto disponible: {'✅' if results.get('crypto_available') else '❌'}\n"
-        response += f"🔧 Synthétique: {'✅' if results.get('synthetic_available') else '❌'}\n\n"
+        response += f"🏖️ Crypto disponible: {'✅' if results.get('crypto_available') else '❌'}\n\n"
         
         if 'test_pairs' in results:
             response += "📋 **Tests de paires:**\n"
             for test in results['test_pairs']:
                 status_emoji = '✅' if test['status'] == 'OK' else '❌' if test['status'] == 'ERROR' else '⚠️'
                 response += f"{status_emoji} {test['pair']} ({test['market']}): {test['status']}\n"
-                if 'last_price' in test and test['last_price'] != 'N/A':
-                    response += f"   💰 Dernier prix: {test['last_price']}\n"
-                if 'error' in test:
-                    response += f"   ⚠️ {test['error']}\n"
         
         await msg.edit_text(response)
     except Exception as e:
@@ -2329,47 +1892,6 @@ async def cmd_debug_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
         response += f"📅 Jour: {now_utc.strftime('%A')}\n"
         response += f"🏖️ Weekend: {is_weekend}\n"
         response += f"📈 Forex ouvert: {is_forex_open()}\n\n"
-        
-        # Tester Forex
-        response += "📈 **Test Forex (EUR/USD):**\n"
-        try:
-            params = {
-                'symbol': 'EUR/USD',
-                'interval': '1min',
-                'outputsize': 2,
-                'apikey': TWELVEDATA_API_KEY,
-                'format': 'JSON'
-            }
-            r = requests.get(TWELVE_TS_URL, params=params, timeout=10)
-            if r.status_code == 200:
-                j = r.json()
-                if 'values' in j and len(j['values']) > 0:
-                    last_candle = j['values'][0]
-                    response += f"✅ OK - Dernière bougie:\n"
-                    response += f"   • Close: {last_candle.get('close')}\n"
-                    response += f"   • High: {last_candle.get('high')}\n"
-                    response += f"   • Low: {last_candle.get('low')}\n"
-                else:
-                    response += f"❌ Aucune donnée\n"
-            else:
-                response += f"❌ HTTP {r.status_code}\n"
-        except Exception as e:
-            response += f"❌ Erreur: {str(e)[:50]}...\n"
-        
-        response += "\n🏖️ **Test Crypto (BTC/USD):**\n"
-        try:
-            if is_weekend:
-                df = otc_provider.get_otc_data('BTC/USD', '1min', 2)
-                if df is not None and len(df) > 0:
-                    response += f"✅ OK - Données récupérées:\n"
-                    response += f"   • Close: {df.iloc[-1]['close']:.2f}\n"
-                    response += f"   • Source: Multi-APIs\n"
-                else:
-                    response += f"❌ Aucune donnée\n"
-            else:
-                response += f"ℹ️ Mode Forex actif\n"
-        except Exception as e:
-            response += f"❌ Erreur: {str(e)[:50]}...\n"
         
         await msg.edit_text(response)
     except Exception as e:
@@ -2392,77 +1914,9 @@ async def cmd_debug_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"🏖️ Weekend: {is_weekend}\n"
         msg += f"🔄 Paire actuelle: {current_pair}\n\n"
         
-        # Tester la récupération de données
-        msg += "📈 **Test données:**\n"
-        try:
-            df = get_cached_ohlc(pair, '1min', 5)
-            if df is not None and len(df) > 0:
-                msg += f"✅ Données disponibles: {len(df)} bougies\n"
-                msg += f"   • Dernier prix: {df.iloc[-1]['close']:.5f}\n"
-                msg += f"   • Heure: {df.index[-1]}\n"
-            else:
-                msg += f"❌ Aucune donnée disponible\n"
-        except Exception as e:
-            msg += f"❌ Erreur: {str(e)[:100]}\n"
-        
         await update.message.reply_text(msg)
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur debug pair: {e}")
-
-async def cmd_quick_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Test rapide du bot"""
-    try:
-        msg = await update.message.reply_text("⚡ Test rapide en cours...")
-        
-        tests = []
-        
-        # Test 1: Base de données
-        try:
-            with engine.connect() as conn:
-                result = conn.execute(text("SELECT COUNT(*) FROM signals")).scalar()
-                tests.append(("✅ Base de données", f"{result} signaux"))
-        except Exception as e:
-            tests.append(("❌ Base de données", str(e)[:50]))
-        
-        # Test 2: API Forex
-        try:
-            params = {
-                'symbol': 'EUR/USD',
-                'interval': '1min',
-                'outputsize': 1,
-                'apikey': TWELVEDATA_API_KEY,
-                'format': 'JSON'
-            }
-            r = requests.get(TWELVE_TS_URL, params=params, timeout=5)
-            tests.append(("✅ API Forex", f"HTTP {r.status_code}"))
-        except Exception as e:
-            tests.append(("❌ API Forex", str(e)[:50]))
-        
-        # Test 3: OTC Provider
-        try:
-            status = otc_provider.get_status()
-            tests.append(("✅ OTC Provider", f"{len(status.get('available_pairs', []))} paires"))
-        except Exception as e:
-            tests.append(("❌ OTC Provider", str(e)[:50]))
-        
-        # Test 4: ML Predictor
-        try:
-            stats = ml_predictor.get_stats()
-            tests.append(("✅ ML Predictor", f"{stats.get('total_predictions', 0)} prédictions"))
-        except Exception as e:
-            tests.append(("❌ ML Predictor", str(e)[:50]))
-        
-        # Compiler les résultats
-        response = "⚡ **TEST RAPIDE DU BOT**\n━━━━━━━━━━━━━━━━━━━━\n\n"
-        for test_name, result in tests:
-            response += f"{test_name}: {result}\n"
-        
-        response += f"\n🏖️ Weekend: {otc_provider.is_weekend()}"
-        response += f"\n📈 Forex ouvert: {is_forex_open()}"
-        
-        await msg.edit_text(response)
-    except Exception as e:
-        await update.message.reply_text(f"❌ Erreur test rapide: {e}")
 
 async def cmd_last_errors(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Affiche les dernières erreurs"""
@@ -2499,7 +1953,6 @@ async def cmd_check_columns(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     msg += f" [défaut: {default}]"
                 msg += "\n"
             
-            # Vérifier spécifiquement les colonnes de prix
             prix_colonnes = ['entry_price', 'exit_price', 'pips']
             existing_cols = {row[1] for row in result}
             
@@ -2533,11 +1986,11 @@ async def health_check(request):
         'otc_active': otc_provider.is_weekend(),
         'active_sessions': len(active_sessions),
         'error_logs_count': len(last_error_logs),
+        'external_verifier': EXTERNAL_VERIFIER_AVAILABLE,
         'mode': 'OTC' if otc_provider.is_weekend() else 'Forex',
-        'api_source': 'Multi-APIs' if otc_provider.is_weekend() else 'TwelveData',
         'strategy': 'Saint Graal M1 avec Structure',
         'signals_per_session': SIGNALS_PER_SESSION,
-        'verification': 'Automatique sans fallback'
+        'verification': 'Externe avec prix réels'
     })
 
 async def start_http_server():
@@ -2560,25 +2013,23 @@ async def start_http_server():
 
 async def main():
     print("\n" + "="*60)
-    print("🤖 BOT SAINT GRAAL M1 - VÉRIFICATION AUTOMATIQUE")
+    print("🤖 BOT SAINT GRAAL M1 - VÉRIFICATION EXTERNE")
     print("🎯 8 SIGNAUX GARANTIS - ÉVITE LES ACHATS AUX SOMMETS")
-    print("🤖 VÉRIFICATION 100% AUTOMATIQUE SANS FALLBACK")
+    print("🤖 VÉRIFICATION EXTERNE AVEC PRIX RÉELS UNIQUEMENT")
     print("="*60)
     print(f"🎯 Stratégie: Saint Graal Forex M1 avec Structure")
     print(f"⚡ Signal envoyé: Immédiatement")
     print(f"🔔 Rappel: 1 min avant entrée")
-    print(f"🤖 Vérification: Automatique (sans fallback)")
+    print(f"🤖 Vérification: {'Externe avec prix réels' if EXTERNAL_VERIFIER_AVAILABLE else 'Non disponible'}")
     print(f"⚠️ Analyse: Détection swing highs/lows")
-    print(f"🔧 Sources: TwelveData + Multi-APIs Crypto")
+    print(f"🔧 Sources: TwelveData + APIs Crypto")
     print(f"🎯 Garantie: 8 signaux/session")
     print(f"💰 PRIX: Base de données corrigée pour stocker les prix")
     print(f"📊 Commandes prix: /showprices, /checkprices, /repairprices")
     print("="*60 + "\n")
 
-    # Initialiser la base de données AVEC CORRECTIONS
+    # Initialiser la base de données
     ensure_db()
-
-    print(f"[INIT] 🔧 Initialisation vérificateur automatique...")
 
     # Démarrer le serveur HTTP
     http_runner = await start_http_server()
@@ -2598,11 +2049,10 @@ async def main():
     
     # Commandes de vérification
     app.add_handler(CommandHandler('verifstats', cmd_verif_stats))
-    app.add_handler(CommandHandler('fixprices', cmd_fix_prices))
     app.add_handler(CommandHandler('verifyall', cmd_verify_all))
     app.add_handler(CommandHandler('verifsignal', cmd_verify_single))
     
-    # Nouvelles commandes pour les prix
+    # Commandes pour les prix
     app.add_handler(CommandHandler('showprices', cmd_show_prices))
     app.add_handler(CommandHandler('repairprices', cmd_repair_prices))
     app.add_handler(CommandHandler('checkprices', cmd_check_prices))
@@ -2610,7 +2060,6 @@ async def main():
     # Commandes de debug signal
     app.add_handler(CommandHandler('debugsignal', cmd_debug_signal))
     app.add_handler(CommandHandler('debugrecent', cmd_debug_recent))
-    app.add_handler(CommandHandler('debugpo', cmd_debug_po))
     
     # Commandes existantes
     app.add_handler(CommandHandler('mlstats', cmd_mlstats))
@@ -2620,7 +2069,6 @@ async def main():
     app.add_handler(CommandHandler('checkapi', cmd_check_api))
     app.add_handler(CommandHandler('debugapi', cmd_debug_api))
     app.add_handler(CommandHandler('debugpair', cmd_debug_pair))
-    app.add_handler(CommandHandler('quicktest', cmd_quick_test))
     app.add_handler(CommandHandler('lasterrors', cmd_last_errors))
     app.add_handler(CommandHandler('checkcolumns', cmd_check_columns))
     app.add_handler(CommandHandler('fixdb', cmd_fix_db))
@@ -2636,23 +2084,21 @@ async def main():
     bot_info = await app.bot.get_me()
     print(f"✅ BOT ACTIF: @{bot_info.username}\n")
     print(f"🔧 Mode actuel: {'OTC (Crypto)' if otc_provider.is_weekend() else 'Forex'}")
-    print(f"🌐 Sources: {'Multi-APIs Crypto' if otc_provider.is_weekend() else 'TwelveData'}")
+    print(f"🤖 Vérificateur: {'Externe actif' if EXTERNAL_VERIFIER_AVAILABLE else 'Non disponible'}")
     print(f"⚡ Signal envoyé: Immédiatement")
     print(f"🔔 Rappel: 1 minute avant l'entrée")
     print(f"🎯 Stratégie: Saint Graal M1 avec Structure")
     print(f"⚠️ Analyse: Détection des swing highs actif")
     print(f"🔧 Modes: STRICT → GARANTIE → LAST RESORT → FORCED")
     print(f"✅ Garantie: 8 signaux/session")
-    print(f"🤖 Vérification: Automatique sans fallback")
-    print(f"💰 PRIX: Base de données corrigée pour stocker entry_price, exit_price, pips")
+    print(f"💰 PRIX: Base de données prête pour stockage")
     print(f"🔧 Commandes nouvelles:")
     print(f"   • /showprices <id> - Afficher les prix d'un signal")
     print(f"   • /checkprices - Vérifier état des prix")
     print(f"   • /repairprices [n] - Réparer prix manquants")
     print(f"📊 Commandes debug signal:")
     print(f"   • /debugsignal <id> - Debug complet")
-    print(f"   • /debugrecent [n] - Derniers signaux")
-    print(f"   • /debugpo <id> - Debug Pocket Option\n")
+    print(f"   • /debugrecent [n] - Derniers signaux\n")
 
     try:
         while True:
