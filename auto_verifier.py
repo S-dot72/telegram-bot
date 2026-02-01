@@ -8,6 +8,11 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import text
 import requests
 import json
+import logging
+
+# Configuration du logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 class AutoResultVerifier:
     def __init__(self, engine, twelvedata_api_key, bot=None):
@@ -64,7 +69,7 @@ class AutoResultVerifier:
                 'AUD/CAD': 'AUD-CAD',
                 'EUR/GBP': 'EUR-GBP',
                 'XAU/USD': 'XAU-USDT',
-                'XAG/USD': 'XAG-USDT',
+                'XAG/USD': 'XAGUSDT',
             }
         }
         
@@ -552,16 +557,23 @@ class AutoResultVerifier:
             return None
 
     def _update_signal_result(self, signal_id, result, details):
-        """Met à jour le résultat dans la DB"""
+        """CORRECTION CRITIQUE : Met à jour le résultat dans la DB AVEC LES PRIX"""
         try:
             gale_level = details.get('gale_level', 0) if details else 0
             reason = details.get('reason', '') if details else ''
             verification_method = details.get('verification_method', 'AUTO_M1') if details else 'AUTO_M1'
+            
+            # ✅ CORRECTION CRITIQUE: Extraire les prix des details
             entry_price = details.get('entry_price', 0) if details else 0
             exit_price = details.get('exit_price', 0) if details else 0
             pips = details.get('pips', 0) if details else 0
             
-            # Vérifier d'abord si la colonne verification_method existe
+            print(f"[VERIF-M1] 💾 Sauvegarde avec prix:")
+            print(f"[VERIF-M1]   • entry_price: {entry_price}")
+            print(f"[VERIF-M1]   • exit_price: {exit_price}")
+            print(f"[VERIF-M1]   • pips: {pips}")
+            
+            # Vérifier d'abord si les colonnes existent
             with self.engine.connect() as conn:
                 # Vérifier la structure de la table
                 table_info = conn.execute(
@@ -581,6 +593,36 @@ class AutoResultVerifier:
                 set_clauses.append("ts_exit = :ts_exit")
                 values['ts_exit'] = datetime.now(timezone.utc).isoformat()
                 
+                # ✅ CORRECTION: AJOUTER LES PRIX OBLIGATOIRES
+                # Même si les colonnes n'existent pas, on va les créer si nécessaire
+                
+                # Vérifier et créer la colonne entry_price si elle n'existe pas
+                if 'entry_price' not in columns:
+                    print(f"[VERIF-M1] ⚠️ Création colonne entry_price...")
+                    conn.execute(text("ALTER TABLE signals ADD COLUMN entry_price REAL DEFAULT 0"))
+                    set_clauses.append("entry_price = :entry_price")
+                else:
+                    set_clauses.append("entry_price = :entry_price")
+                values['entry_price'] = entry_price
+                
+                # Vérifier et créer la colonne exit_price si elle n'existe pas
+                if 'exit_price' not in columns:
+                    print(f"[VERIF-M1] ⚠️ Création colonne exit_price...")
+                    conn.execute(text("ALTER TABLE signals ADD COLUMN exit_price REAL DEFAULT 0"))
+                    set_clauses.append("exit_price = :exit_price")
+                else:
+                    set_clauses.append("exit_price = :exit_price")
+                values['exit_price'] = exit_price
+                
+                # Vérifier et créer la colonne pips si elle n'existe pas
+                if 'pips' not in columns:
+                    print(f"[VERIF-M1] ⚠️ Création colonne pips...")
+                    conn.execute(text("ALTER TABLE signals ADD COLUMN pips REAL DEFAULT 0"))
+                    set_clauses.append("pips = :pips")
+                else:
+                    set_clauses.append("pips = :pips")
+                values['pips'] = pips
+                
                 # Ajouter les colonnes optionnelles si elles existent
                 if 'gale_level' in columns:
                     set_clauses.append("gale_level = :gale_level")
@@ -594,18 +636,6 @@ class AutoResultVerifier:
                     set_clauses.append("verification_method = :verification_method")
                     values['verification_method'] = verification_method
                 
-                if 'entry_price' in columns:
-                    set_clauses.append("entry_price = :entry_price")
-                    values['entry_price'] = entry_price
-                
-                if 'exit_price' in columns:
-                    set_clauses.append("exit_price = :exit_price")
-                    values['exit_price'] = exit_price
-                
-                if 'pips' in columns:
-                    set_clauses.append("pips = :pips")
-                    values['pips'] = pips
-                
                 # Exécuter la mise à jour
                 query = text(f"""
                     UPDATE signals
@@ -616,19 +646,32 @@ class AutoResultVerifier:
                 conn.execute(query, values)
                 conn.commit()
             
-            print(f"[VERIF-M1] 💾 Résultat M1 sauvegardé: {result}")
+            print(f"[VERIF-M1] 💾 Résultat M1 sauvegardé: {result} avec prix")
             
         except Exception as e:
             print(f"[VERIF-M1] ❌ Erreur sauvegarde: {e}")
             import traceback
             traceback.print_exc()
             
-            # Fallback simple sans les colonnes optionnelles
+            # Fallback simple avec les prix
             try:
-                query = text("UPDATE signals SET result = :result WHERE id = :id")
+                query = text("""
+                    UPDATE signals 
+                    SET result = :result, 
+                        entry_price = :entry_price,
+                        exit_price = :exit_price,
+                        pips = :pips
+                    WHERE id = :id
+                """)
                 with self.engine.begin() as conn:
-                    conn.execute(query, {'result': result, 'id': signal_id})
-                print(f"[VERIF-M1] 💾 Sauvegardé (version simple)")
+                    conn.execute(query, {
+                        'result': result, 
+                        'entry_price': entry_price,
+                        'exit_price': exit_price,
+                        'pips': pips,
+                        'id': signal_id
+                    })
+                print(f"[VERIF-M1] 💾 Sauvegardé (version simple avec prix)")
             except Exception as e2:
                 print(f"[VERIF-M1] ❌ Échec total: {e2}")
 
@@ -698,5 +741,131 @@ class AutoResultVerifier:
             
         except Exception as e:
             print(f"[VERIF-M1] ❌ Erreur globale: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    async def repair_missing_prices(self, limit: int = 20):
+        """Répare les signaux avec prix manquants"""
+        try:
+            print(f"\n{'='*70}")
+            print(f"[REPAIR] 🔧 Réparation prix manquants")
+            print(f"{'='*70}")
+            
+            with self.engine.connect() as conn:
+                # Trouver les signaux vérifiés mais sans prix
+                signals_to_repair = conn.execute(
+                    text("""
+                        SELECT id, pair, direction, ts_enter, result, payload_json
+                        FROM signals
+                        WHERE result IN ('WIN', 'LOSE')
+                          AND (entry_price IS NULL OR entry_price = 0 
+                               OR exit_price IS NULL OR exit_price = 0
+                               OR pips IS NULL OR pips = 0)
+                        ORDER BY id DESC
+                        LIMIT :limit
+                    """),
+                    {"limit": limit}
+                ).fetchall()
+            
+            print(f"[REPAIR] 📊 Signaux à réparer: {len(signals_to_repair)}")
+            
+            if not signals_to_repair:
+                print(f"[REPAIR] ✅ Tous les signaux ont déjà des prix")
+                return
+            
+            repaired = 0
+            failed = 0
+            
+            for signal in signals_to_repair:
+                signal_id, pair, direction, ts_enter, result, payload_json = signal
+                
+                print(f"[REPAIR] 🔧 Signal #{signal_id} ({pair})...")
+                
+                try:
+                    # Déterminer le mode
+                    is_otc = False
+                    exchange = 'bybit'
+                    
+                    if payload_json:
+                        try:
+                            payload = json.loads(payload_json)
+                            mode = payload.get('mode', 'Forex')
+                            is_otc = (mode == 'OTC' or mode == 'CRYPTO' or mode == 'CRYPTO_OTC')
+                            exchange = payload.get('exchange', 'bybit')
+                        except:
+                            pass
+                    
+                    # Parser le timestamp
+                    if isinstance(ts_enter, str):
+                        ts_clean = ts_enter.replace('Z', '').replace('+00:00', '').split('.')[0]
+                        try:
+                            signal_time = datetime.fromisoformat(ts_clean)
+                        except:
+                            signal_time = datetime.strptime(ts_clean, '%Y-%m-%d %H:%M:%S')
+                    else:
+                        signal_time = ts_enter
+                    
+                    if signal_time.tzinfo is None:
+                        signal_time = signal_time.replace(tzinfo=timezone.utc)
+                    
+                    # Calculer la bougie M1
+                    candle_start, _ = self._calculate_correct_m1_candle(signal_time)
+                    
+                    # Récupérer les prix réels
+                    entry_price = await self._get_exact_m1_candle_price(
+                        pair, candle_start, 'open', is_otc, exchange
+                    )
+                    
+                    await asyncio.sleep(1)
+                    
+                    exit_price = await self._get_exact_m1_candle_price(
+                        pair, candle_start, 'close', is_otc, exchange
+                    )
+                    
+                    if entry_price is None or exit_price is None:
+                        print(f"[REPAIR] ❌ Prix non disponibles pour #{signal_id}")
+                        failed += 1
+                        continue
+                    
+                    # Calculer les pips
+                    price_diff = exit_price - entry_price
+                    pips_diff = abs(price_diff) * 10000
+                    
+                    # Mettre à jour les prix
+                    with self.engine.begin() as conn:
+                        conn.execute(
+                            text("""
+                                UPDATE signals
+                                SET entry_price = :entry_price,
+                                    exit_price = :exit_price,
+                                    pips = :pips
+                                WHERE id = :signal_id
+                            """),
+                            {
+                                "entry_price": entry_price,
+                                "exit_price": exit_price,
+                                "pips": pips_diff,
+                                "signal_id": signal_id
+                            }
+                        )
+                    
+                    print(f"[REPAIR] ✅ #{signal_id} réparé: {entry_price:.5f} → {exit_price:.5f}")
+                    repaired += 1
+                    
+                    await asyncio.sleep(2)  # Délai pour éviter rate limiting
+                    
+                except Exception as e:
+                    print(f"[REPAIR] ❌ Erreur réparation #{signal_id}: {e}")
+                    failed += 1
+            
+            print(f"\n{'='*70}")
+            print(f"[REPAIR] 📈 RÉPARATION TERMINÉE:")
+            print(f"[REPAIR]   • Réparés: {repaired}")
+            print(f"[REPAIR]   • Échecs: {failed}")
+            print(f"[REPAIR]   • Total: {len(signals_to_repair)}")
+            print(f"{'='*70}")
+            
+        except Exception as e:
+            print(f"[REPAIR] ❌ Erreur globale réparation: {e}")
             import traceback
             traceback.print_exc()
