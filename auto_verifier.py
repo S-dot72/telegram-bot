@@ -1,7 +1,7 @@
 """
 AUTO VERIFIER M1 - VERSION POCKET OPTION RÉELLE SANS DONNÉES FICTIVES
 Utilise OTCDataProvider pour la cohérence des données
-Version 3.1 - Corrections complètes des erreurs de données
+Version 3.2 - Corrections de syntaxe complètes
 """
 
 import asyncio
@@ -50,7 +50,7 @@ class AutoResultVerifier:
         print("[VERIF-M1] 🔥 Support OTC/CRYPTO activé")
         print(f"[VERIF-M1] 🔧 OTC Provider: {'✅ Disponible' if otc_provider else '❌ Non disponible'}")
         print("[VERIF-M1] ⚠️ DONNÉES FICTIVES INTERDITES - Seules les données réelles sont acceptées")
-        print("[VERIF-M1] 📊 Version: 3.1 - Corrections complètes des erreurs de données")
+        print("[VERIF-M1] 📊 Version: 3.2 - Corrections de syntaxe complètes")
 
     def set_bot(self, bot):
         """Configure le bot pour les notifications"""
@@ -576,106 +576,106 @@ class AutoResultVerifier:
                 }
             }
             
-        symbol = symbol_mapping.get(exchange, {}).get(pair)
-        if not symbol:
-            print(f"[VERIF-M1] ⚠️ Paire {pair} non supportée sur {exchange}")
+            symbol = symbol_mapping.get(exchange, {}).get(pair)
+            if not symbol:
+                print(f"[VERIF-M1] ⚠️ Paire {pair} non supportée sur {exchange}")
+                return None
+            
+            # Timestamp en millisecondes
+            start_ms = int(candle_start.timestamp() * 1000)
+            end_ms = start_ms + 60000  # 1 minute plus tard
+            
+            if exchange == 'binance':
+                url = 'https://api.binance.com/api/v3/klines'
+                params = {
+                    'symbol': symbol,
+                    'interval': '1m',
+                    'startTime': start_ms - 180000,  # 3 minutes avant
+                    'endTime': end_ms + 180000,      # 3 minutes après
+                    'limit': 10
+                }
+                
+                resp = self._session.get(url, params=params, timeout=15)
+                self._increment_api_call()
+                
+                if resp.status_code != 200:
+                    print(f"[VERIF-M1] ⚠️ Binance API error: {resp.status_code}")
+                    return None
+                
+                data = resp.json()
+                
+                if isinstance(data, list) and len(data) > 0:
+                    for candle in data:
+                        candle_time = datetime.fromtimestamp(candle[0] / 1000, tz=timezone.utc)
+                        time_diff = abs((candle_time - candle_start).total_seconds())
+                        
+                        if time_diff < 90:  # Accepte 1.5 minutes de différence
+                            if price_type == 'open':
+                                return float(candle[1])
+                            else:
+                                return float(candle[4])
+            
+            elif exchange == 'bybit':
+                url = 'https://api.bybit.com/v5/market/kline'
+                params = {
+                    'category': 'spot',
+                    'symbol': symbol,
+                    'interval': '1',
+                    'start': start_ms - 180000,
+                    'limit': 10
+                }
+                
+                resp = self._session.get(url, params=params, timeout=15)
+                self._increment_api_call()
+                
+                if resp.status_code != 200:
+                    print(f"[VERIF-M1] ⚠️ Bybit API error: {resp.status_code}")
+                    return None
+                
+                data = resp.json()
+                
+                if data.get('retCode') == 0 and data.get('result', {}).get('list'):
+                    candles = data['result']['list']
+                    for candle in candles:
+                        candle_time = datetime.fromtimestamp(int(candle[0]) / 1000, tz=timezone.utc)
+                        time_diff = abs((candle_time - candle_start).total_seconds())
+                        
+                        if time_diff < 90:
+                            if price_type == 'open':
+                                return float(candle[1])
+                            else:
+                                return float(candle[4])
+            
+            elif exchange == 'okx':
+                url = 'https://www.okx.com/api/v5/market/candles'
+                params = {
+                    'instId': symbol,
+                    'bar': '1m',
+                    'after': start_ms - 180000,
+                    'limit': 10
+                }
+                
+                resp = self._session.get(url, params=params, timeout=15)
+                self._increment_api_call()
+                
+                if resp.status_code != 200:
+                    return None
+                
+                data = resp.json()
+                
+                if data.get('code') == '0' and data.get('data'):
+                    candles = data['data']
+                    for candle in candles:
+                        candle_time = datetime.fromtimestamp(int(candle[0]) / 1000, tz=timezone.utc)
+                        time_diff = abs((candle_time - candle_start).total_seconds())
+                        
+                        if time_diff < 90:
+                            if price_type == 'open':
+                                return float(candle[1])
+                            else:
+                                return float(candle[4])
+            
             return None
-        
-        # Timestamp en millisecondes
-        start_ms = int(candle_start.timestamp() * 1000)
-        end_ms = start_ms + 60000  # 1 minute plus tard
-        
-        if exchange == 'binance':
-            url = 'https://api.binance.com/api/v3/klines'
-            params = {
-                'symbol': symbol,
-                'interval': '1m',
-                'startTime': start_ms - 180000,  # 3 minutes avant
-                'endTime': end_ms + 180000,      # 3 minutes après
-                'limit': 10
-            }
-            
-            resp = self._session.get(url, params=params, timeout=15)
-            self._increment_api_call()
-            
-            if resp.status_code != 200:
-                print(f"[VERIF-M1] ⚠️ Binance API error: {resp.status_code}")
-                return None
-            
-            data = resp.json()
-            
-            if isinstance(data, list) and len(data) > 0:
-                for candle in data:
-                    candle_time = datetime.fromtimestamp(candle[0] / 1000, tz=timezone.utc)
-                    time_diff = abs((candle_time - candle_start).total_seconds())
-                    
-                    if time_diff < 90:  # Accepte 1.5 minutes de différence
-                        if price_type == 'open':
-                            return float(candle[1])
-                        else:
-                            return float(candle[4])
-        
-        elif exchange == 'bybit':
-            url = 'https://api.bybit.com/v5/market/kline'
-            params = {
-                'category': 'spot',
-                'symbol': symbol,
-                'interval': '1',
-                'start': start_ms - 180000,
-                'limit': 10
-            }
-            
-            resp = self._session.get(url, params=params, timeout=15)
-            self._increment_api_call()
-            
-            if resp.status_code != 200:
-                print(f"[VERIF-M1] ⚠️ Bybit API error: {resp.status_code}")
-                return None
-            
-            data = resp.json()
-            
-            if data.get('retCode') == 0 and data.get('result', {}).get('list'):
-                candles = data['result']['list']
-                for candle in candles:
-                    candle_time = datetime.fromtimestamp(int(candle[0]) / 1000, tz=timezone.utc)
-                    time_diff = abs((candle_time - candle_start).total_seconds())
-                    
-                    if time_diff < 90:
-                        if price_type == 'open':
-                            return float(candle[1])
-                        else:
-                            return float(candle[4])
-        
-        elif exchange == 'okx':
-            url = 'https://www.okx.com/api/v5/market/candles'
-            params = {
-                'instId': symbol,
-                'bar': '1m',
-                'after': start_ms - 180000,
-                'limit': 10
-            }
-            
-            resp = self._session.get(url, params=params, timeout=15)
-            self._increment_api_call()
-            
-            if resp.status_code != 200:
-                return None
-            
-            data = resp.json()
-            
-            if data.get('code') == '0' and data.get('data'):
-                candles = data['data']
-                for candle in candles:
-                    candle_time = datetime.fromtimestamp(int(candle[0]) / 1000, tz=timezone.utc)
-                    time_diff = abs((candle_time - candle_start).total_seconds())
-                    
-                    if time_diff < 90:
-                        if price_type == 'open':
-                            return float(candle[1])
-                        else:
-                            return float(candle[4])
-        
-        return None
             
         except Exception as e:
             print(f"[VERIF-M1] ⚠️ Erreur API directe {exchange}: {e}")
