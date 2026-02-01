@@ -1,6 +1,6 @@
 """
-Bot de trading M1 - Version Saint Graal Desk Pro v4.2 avec Vérification Automatique Externe
-8 signaux garantis par session - Stratégie asymétrique BUY/SELL (Strict SELL / Reactive BUY)
+Bot de trading M1 - Version Saint Graal avec Vérification Automatique Externe
+8 signaux garantis par session - Vérification 100% automatisée avec prix réels
 Support OTC (crypto) le week-end via APIs multiples
 Signal envoyé immédiatement avec timing 2 minutes avant entrée
 CORRECTION: Bouton apparaît immédiatement après fin de bougie
@@ -31,51 +31,18 @@ except ImportError:
     print("⚠️ Vérificateur externe non disponible")
 
 from config import *
-
-# ================= IMPORT DES FONCTIONS DESK PRO v4.2 =================
-try:
-    from utils import (
-        compute_indicators,
-        get_signal_with_metadata,
-        calculate_signal_quality_score,
-        get_m1_candle_range,
-        get_next_m1_candle,
-        analyze_market_structure,
-        detect_internal_swings,
-        detect_key_zones,
-        is_price_near_zone_pro,
-        validate_candle_for_binary_m1,
-        calculate_zone_strength,
-        analyze_momentum_asymmetric,
-        calculate_structure_score_pro_m1
-    )
-    print("✅ Utils Desk Pro v4.2 chargé avec succès")
-    DESK_PRO_AVAILABLE = True
-except ImportError as e:
-    print(f"❌ Erreur import utils Desk Pro: {e}")
-    traceback.print_exc()
-    DESK_PRO_AVAILABLE = False
-    
-    # Fonctions de secours minimales
-    def compute_indicators(df, *args, **kwargs): 
-        return df
-    def get_signal_with_metadata(df, *args, **kwargs): 
-        return {
-            'direction': 'CALL', 
-            'mode': 'ERROR', 
-            'quality': 'CRITICAL', 
-            'score': 45.0, 
-            'reason': 'Erreur import utils',
-            'session_info': {}
-        }
-    def calculate_signal_quality_score(df):
-        return 0
-    def get_m1_candle_range(dt):
-        return dt, dt + timedelta(minutes=1)
-    def get_next_m1_candle(dt):
-        return dt + timedelta(minutes=1)
-    def analyze_market_structure(df, *args, **kwargs):
-        return "RANGE", 0.0
+from utils import (
+    compute_indicators, 
+    rule_signal_saint_graal_with_guarantee,
+    get_signal_with_metadata,
+    calculate_signal_quality_score,
+    format_signal_reason,
+    get_m1_candle_range,
+    get_next_m1_candle,
+    analyze_market_structure,
+    is_near_swing_high,
+    detect_retest_pattern
+)
 
 # ================= FONCTION HELPER POUR FORMATER LES TIMESTAMPS =================
 
@@ -1012,14 +979,13 @@ async def cmd_debug_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 if 'structure_info' in payload:
                     structure = payload['structure_info']
-                    msg += f"\n🏗️ **Structure marché (Desk Pro):**\n"
+                    msg += f"\n🏗️ **Structure marché:**\n"
                     msg += f"• Structure: {structure.get('market_structure', 'N/A')}\n"
-                    msg += f"• Trend Strength: {structure.get('trend_strength', 'N/A')}%\n"
-                    msg += f"• Near swing high: {structure.get('near_swing_high', 'N/A')}\n"
-                    msg += f"• Distance to high (pips): {structure.get('distance_to_high_pips', 'N/A')}\n"
-                    if 'momentum_info' in payload:
-                        msg += f"• Version stratégie: {payload['momentum_info'].get('version', 'N/A')}\n"
-                        msg += f"• Règles: {payload['momentum_info'].get('asymmetric_rules', 'N/A')}\n"
+                    msg += f"• Force: {structure.get('strength', 'N/A')}%\n"
+                    msg += f"• Près d'un swing high: {structure.get('near_swing_high', 'N/A')}\n"
+                    msg += f"• Distance au high: {structure.get('distance_to_high', 'N/A')}%\n"
+                    msg += f"• Pattern détecté: {structure.get('pattern_detected', 'N/A')}\n"
+                    msg += f"• Confiance pattern: {structure.get('pattern_confidence', 'N/A')}%\n"
             
             msg += "\n━━━━━━━━━━━━━━━━━━━━\n"
             msg += "💡 Utilisez /verifsignal pour vérifier ce signal"
@@ -1152,18 +1118,18 @@ async def send_reminder(signal_id, user_id, app, reminder_time, entry_time, pair
     except Exception as e:
         print(f"[REMINDER] ❌ Erreur dans send_reminder: {e}")
 
-# ================= STRATÉGIE SAINT GRAAL DESK PRO v4.2 =================
+# ================= STRATÉGIE SAINT GRAAL =================
 
 async def generate_m1_signal(user_id, app):
     """
-    Génère un signal M1 avec la stratégie Saint Graal DESK PRO v4.2
-    Garantie de 8 signaux par session avec analyse structure avancée
+    Génère un signal M1 avec la stratégie Saint Graal
+    Garantie de 8 signaux par session avec analyse de structure
     """
     try:
         is_weekend = otc_provider.is_weekend()
         mode = "OTC" if is_weekend else "Forex"
         
-        print(f"\n[SIGNAL] 📤 Génération signal M1 Desk Pro v4.2 - Mode: {mode}")
+        print(f"\n[SIGNAL] 📤 Génération signal M1 Saint Graal - Mode: {mode}")
         
         if user_id not in active_sessions:
             add_error_log(f"User {user_id} n'a pas de session active")
@@ -1194,32 +1160,22 @@ async def generate_m1_signal(user_id, app):
         
         print(f"[SIGNAL] ✅ {len(df)} bougies M1 ({mode})")
         
-        # ============= ANALYSE STRUCTURE DESK PRO =============
-        structure, trend_strength = analyze_market_structure(df)
-        internal_high, internal_low = detect_internal_swings(df.tail(10))
+        # ANALYSE STRUCTURE
+        structure, strength = analyze_market_structure(df, 15)
+        is_near_high, distance = is_near_swing_high(df, 20)
+        pattern_type, pattern_conf = detect_retest_pattern(df, 5)
         
-        # Vérifier si le prix est près d'un swing interne
-        current_price = float(df.iloc[-1]['close'])
-        is_near_high = False
-        distance = 0.0
-        if internal_high:
-            distance_pips = abs(current_price - internal_high['price']) / 0.0001
-            is_near_high = distance_pips <= 5  # 5 pips
-            distance = distance_pips
+        print(f"[STRUCTURE] 📊 Structure: {structure} (force: {strength:.1f}%)")
+        print(f"[STRUCTURE] 📈 Near swing high: {is_near_high} ({distance:.2f}%)")
+        print(f"[PATTERN] 🔍 Pattern détecté: {pattern_type} (confiance: {pattern_conf}%)")
         
-        # Détection des zones S/R
-        supports, resistances = detect_key_zones(df)
-        near_support, nearest_support, dist_support = is_price_near_zone_pro(current_price, supports, 8)
-        near_resistance, nearest_resistance, dist_resistance = is_price_near_zone_pro(current_price, resistances, 8)
-        
-        print(f"[STRUCTURE] 📊 Structure: {structure} (force: {trend_strength:.1f}%)")
-        print(f"[STRUCTURE] 📈 Near swing high: {is_near_high} ({distance:.2f} pips)")
-        print(f"[ZONES] 🔍 Supports proches: {len(supports)} | Résistances proches: {len(resistances)}")
+        if is_near_high:
+            print(f"[STRUCTURE] ⚠️ ATTENTION: Prix près d'un swing high ({distance:.2f}%)")
         
         # Calculer les indicateurs
         df = compute_indicators(df)
         
-        # STRATÉGIE SAINT GRAAL DESK PRO
+        # STRATÉGIE SAINT GRAAL
         signal_data = get_signal_with_metadata(
             df, 
             signal_count=session['signal_count'],
@@ -1227,7 +1183,7 @@ async def generate_m1_signal(user_id, app):
         )
         
         if not signal_data:
-            print(f"[SIGNAL] ❌ Desk Pro: aucun signal trouvé même avec garantie")
+            print(f"[SIGNAL] ❌ Saint Graal: aucun signal trouvé même avec garantie")
             return None
         
         direction = signal_data['direction']
@@ -1236,18 +1192,16 @@ async def generate_m1_signal(user_id, app):
         score = signal_data['score']
         reason = signal_data['reason']
         
-        # Ajouter les informations de structure au reason
+        # Vérifier si le signal va contre la structure
         structure_warning = ""
         if is_near_high and direction == "CALL":
-            structure_warning = f" | ⚠️ ACHAT PRÈS D'UN SWING HIGH ({distance:.1f} pips)"
-        elif internal_low and direction == "PUT":
-            distance_low = abs(current_price - internal_low['price']) / 0.0001
-            if distance_low <= 5:
-                structure_warning = f" | ⚠️ VENTE PRÈS D'UN SWING LOW ({distance_low:.1f} pips)"
+            structure_warning = f" | ⚠️ ACHAT PRÈS D'UN SWING HIGH"
+        elif "NEAR_LOW" in structure and direction == "PUT":
+            structure_warning = f" | ⚠️ VENTE PRÈS D'UN SWING LOW"
         
         reason_with_structure = reason + structure_warning
         
-        print(f"[SIGNAL] 🎯 Desk Pro: {direction} | Mode: {mode_strat} | Qualité: {quality} | Score: {score}")
+        print(f"[SIGNAL] 🎯 Saint Graal: {direction} | Mode: {mode_strat} | Qualité: {quality} | Score: {score}")
         print(f"[SIGNAL] 📝 Raison: {reason_with_structure}")
         
         # MACHINE LEARNING
@@ -1295,28 +1249,18 @@ async def generate_m1_signal(user_id, app):
                 'actual_pair': current_pair,
                 'user_id': user_id, 
                 'mode': mode,
-                'strategy': 'Saint Graal Desk Pro v4.2',
+                'strategy': 'Saint Graal avec Structure',
                 'strategy_mode': mode_strat,
                 'strategy_quality': quality,
                 'strategy_score': score,
                 'ml_confidence': ml_conf,
                 'structure_info': {
                     'market_structure': structure,
-                    'trend_strength': trend_strength,
+                    'strength': strength,
                     'near_swing_high': is_near_high,
-                    'distance_to_high_pips': distance,
-                    'internal_swing_high': internal_high['price'] if internal_high else None,
-                    'internal_swing_low': internal_low['price'] if internal_low else None,
-                    'supports_count': len(supports),
-                    'resistances_count': len(resistances),
-                    'near_support': near_support,
-                    'near_resistance': near_resistance,
-                    'dist_support_pips': dist_support,
-                    'dist_resistance_pips': dist_resistance
-                },
-                'momentum_info': {
-                    'version': 'Desk Pro v4.2',
-                    'asymmetric_rules': 'Strict SELL / Reactive BUY'
+                    'distance_to_high': distance,
+                    'pattern_detected': pattern_type,
+                    'pattern_confidence': pattern_conf
                 },
                 'session_count': session['signal_count'] + 1,
                 'session_total': SIGNALS_PER_SESSION,
@@ -1348,87 +1292,6 @@ async def generate_m1_signal(user_id, app):
         traceback.print_exc()
         return None
 
-# ================= NOUVELLE COMMANDE POUR TESTER DESK PRO =================
-
-async def cmd_test_desk_pro(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Teste la stratégie Desk Pro v4.2"""
-    try:
-        if not DESK_PRO_AVAILABLE:
-            await update.message.reply_text("❌ Stratégie Desk Pro non disponible")
-            return
-        
-        if not context.args:
-            await update.message.reply_text("Usage: /testdesk <pair> [minutes]")
-            return
-        
-        pair = context.args[0].upper()
-        minutes = int(context.args[1]) if len(context.args) > 1 else 15
-        
-        await update.message.reply_text(f"🧪 Test stratégie Desk Pro v4.2 pour {pair} ({minutes} minutes)...")
-        
-        # Récupérer les données
-        df = get_cached_ohlc(pair, TIMEFRAME_M1, outputsize=300)
-        
-        if df is None or len(df) < 50:
-            await update.message.reply_text("❌ Données insuffisantes")
-            return
-        
-        # Analyser la structure
-        structure, trend_strength = analyze_market_structure(df)
-        internal_high, internal_low = detect_internal_swings(df.tail(10))
-        
-        # Détection zones
-        supports, resistances = detect_key_zones(df)
-        current_price = float(df.iloc[-1]['close'])
-        near_support, nearest_support, dist_support = is_price_near_zone_pro(current_price, supports, 8)
-        near_resistance, nearest_resistance, dist_resistance = is_price_near_zone_pro(current_price, resistances, 8)
-        
-        # Momentum asymétrique
-        momentum = analyze_momentum_asymmetric(df)
-        
-        # Générer un signal
-        signal_data = get_signal_with_metadata(df, signal_count=0, total_signals=8)
-        
-        # Construire le rapport
-        report = (
-            f"🧪 **RAPPORT DESK PRO v4.2**\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"📊 **Structure:**\n"
-            f"• Type: {structure}\n"
-            f"• Force: {trend_strength:.2f}%\n"
-            f"• Swing high interne: {internal_high['price'] if internal_high else 'N/A'}\n"
-            f"• Swing low interne: {internal_low['price'] if internal_low else 'N/A'}\n\n"
-            
-            f"🎯 **Zones S/R:**\n"
-            f"• Supports: {len(supports)}\n"
-            f"• Résistances: {len(resistances)}\n"
-            f"• Près support: {near_support} ({dist_support:.1f} pips)\n"
-            f"• Près résistance: {near_resistance} ({dist_resistance:.1f} pips)\n\n"
-            
-            f"⚡ **Momentum asymétrique:**\n"
-            f"• RSI: {momentum['rsi']:.1f}\n"
-            f"• Stoch Fast: {momentum['stoch_k_fast']:.1f}\n"
-            f"• Stoch Slow: {momentum['stoch_k_slow']:.1f}\n"
-            f"• Dominant: {momentum['dominant']}\n"
-            f"• Score BUY: {momentum['buy_score']}\n"
-            f"• Score SELL: {momentum['sell_score']}\n\n"
-            
-            f"🚀 **Signal généré:**\n"
-            f"• Direction: {signal_data['direction']}\n"
-            f"• Mode: {signal_data['mode']}\n"
-            f"• Qualité: {signal_data['quality']}\n"
-            f"• Score: {signal_data['score']:.1f}/100\n"
-            f"• Raison: {signal_data['reason']}\n\n"
-            
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"✅ Stratégie Desk Pro v4.2 active"
-        )
-        
-        await update.message.reply_text(report)
-        
-    except Exception as e:
-        await update.message.reply_text(f"❌ Erreur test: {e}")
-
 # ================= COMMANDES TELEGRAM =================
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1450,24 +1313,18 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_weekend = otc_provider.is_weekend()
         mode_text = "🏖️ OTC (Crypto)" if is_weekend else "📈 Forex"
         verif_status = "✅ Vérificateur externe actif" if EXTERNAL_VERIFIER_AVAILABLE else "⚠️ Vérificateur externe non disponible"
-        desk_status = "✅ Desk Pro v4.2" if DESK_PRO_AVAILABLE else "⚠️ Desk Pro non disponible"
         
         await update.message.reply_text(
             f"✅ **Bienvenue au Bot Trading Saint Graal M1 !**\n\n"
-            f"🚀 **Version: Desk Pro v4.2**\n"
             f"📊 8 signaux garantis par session\n"
             f"🌐 Mode actuel: {mode_text}\n"
             f"🔧 {verif_status}\n"
-            f"⚡ {desk_status}\n"
-            f"🎯 **Stratégie:** Asymétrique BUY/SELL\n"
-            f"🔧 **Règles:** Strict SELL / Reactive BUY\n\n"
             f"**Commandes:**\n"
             f"• /startsession - Démarrer session\n"
             f"• /stats - Statistiques\n"
             f"• /menu - Menu complet\n\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"💡 8 signaux garantis avec bouton IMMÉDIAT!\n"
-            f"🧪 /testdesk - Tester la stratégie Desk Pro"
+            f"💡 8 signaux garantis avec bouton IMMÉDIAT!"
         )
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {e}")
@@ -1475,11 +1332,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Affiche le menu complet"""
     verif_status = "✅ Vérificateur externe actif" if EXTERNAL_VERIFIER_AVAILABLE else "⚠️ Vérificateur externe non disponible"
-    desk_status = "✅ Desk Pro v4.2" if DESK_PRO_AVAILABLE else "⚠️ Desk Pro non disponible"
     
     menu_text = (
         f"📋 **MENU SAINT GRAAL M1 - {verif_status}**\n"
-        f"⚡ {desk_status}\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         "**📊 Session:**\n"
         "• /startsession - Démarrer session\n"
@@ -1508,8 +1363,6 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "**🔍 Debug Signal:**\n"
         "• /debugsignal <id> - Debug complet signal\n"
         "• /debugrecent [n] - Debug derniers signaux\n\n"
-        "**🧪 Stratégie Desk Pro:**\n"
-        "• /testdesk <pair> [min] - Tester stratégie Desk Pro\n\n"
         "**⚠️ Erreurs:**\n"
         "• /lasterrors - Dernières erreurs\n\n"
         "**🔧 Maintenance:**\n"
@@ -1518,7 +1371,6 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "━━━━━━━━━━━━━━━━━━━━\n"
         "🔍 8 signaux garantis/session\n"
         "🏖️ OTC actif le week-end\n"
-        f"🚀 **Stratégie: Desk Pro v4.2** ✅\n"
     )
     await update.message.reply_text(menu_text)
 
@@ -1571,16 +1423,14 @@ async def cmd_start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_weekend = otc_provider.is_weekend()
     mode_text = "🏖️ OTC (Crypto)" if is_weekend else "📈 Forex"
     verif_status = "avec vérification externe" if EXTERNAL_VERIFIER_AVAILABLE else "sans vérification automatique"
-    desk_status = "Desk Pro v4.2" if DESK_PRO_AVAILABLE else "Stratégie standard"
     
     await update.message.reply_text(
-        "🚀 **SESSION SAINT GRAAL DESK PRO DÉMARRÉE**\n"
+        "🚀 **SESSION SAINT GRAAL DÉMARRÉE**\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         f"📅 {now_haiti.strftime('%H:%M:%S')}\n"
         f"🌐 Mode: {mode_text}\n"
         f"🎯 Objectif: {SIGNALS_PER_SESSION} signaux M1\n"
         f"⚠️ Vérification: {verif_status}\n"
-        f"🚀 Stratégie: {desk_status}\n"
         f"🔧 Sources: {'APIs Crypto' if is_weekend else 'TwelveData'}\n\n"
         f"Cliquez pour générer signal #1 ⬇️",
         reply_markup=reply_markup
@@ -1605,7 +1455,7 @@ async def cmd_session_status(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 pending_reminders += 1
     
     msg = (
-        "📊 **ÉTAT SESSION SAINT GRAAL DESK PRO**\n"
+        "📊 **ÉTAT SESSION SAINT GRAAL**\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         f"⏱️ Durée: {duration:.1f} min\n"
         f"📈 Progression: {session['signal_count']}/{SIGNALS_PER_SESSION}\n\n"
@@ -1691,7 +1541,7 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
         await end_session_summary(user_id, context.application, query.message)
         return
     
-    await query.edit_message_text("⏳ Génération signal Saint Graal Desk Pro v4.2...")
+    await query.edit_message_text("⏳ Génération signal Saint Graal M1 avec analyse structure...")
     
     signal_id = await generate_m1_signal(user_id, context.application)
     
@@ -1739,15 +1589,11 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
                 'LAST_RESORT': '🟠',
                 'MAX_QUALITY': '🔵',
                 'HIGH_QUALITY': '🟡',
-                'FORCED': '⚡',
-                'DESK_MAX': '🚀',
-                'DESK_PRO': '⚡',
-                'DESK_STANDARD': '🔵',
-                'DESK_MIN': '🟡'
+                'FORCED': '⚡'
             }.get(strategy_mode, '⚪')
             
             signal_msg = (
-                f"🎯 **SIGNAL #{session['signal_count']} - DESK PRO v4.2**\n"
+                f"🎯 **SIGNAL #{session['signal_count']} - SAINT GRAAL**\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
                 f"💱 {pair}\n"
                 f"🌐 Mode: {mode} {mode_emoji}\n"
@@ -1805,7 +1651,7 @@ async def end_session_summary(user_id, app, message=None):
     winrate = (session['wins'] / session['signal_count'] * 100) if session['signal_count'] > 0 else 0
     
     summary = (
-        "🏁 **SESSION SAINT GRAAL DESK PRO TERMINÉE**\n"
+        "🏁 **SESSION SAINT GRAAL TERMINÉE**\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         f"⏱️ Durée: {duration:.1f} min\n"
         f"📊 Signaux: {session['signal_count']}/{SIGNALS_PER_SESSION}\n\n"
@@ -1814,7 +1660,6 @@ async def end_session_summary(user_id, app, message=None):
         f"📈 Win Rate: **{winrate:.1f}%**\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "🎯 Garantie: 8 signaux/session\n"
-        "🚀 Stratégie: Desk Pro v4.2\n"
         "Utilisez /startsession pour nouvelle session"
     )
     
@@ -1910,13 +1755,12 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         price_rate = (with_prices/total*100) if total > 0 else 0
 
         msg = (
-            f"📊 **Statistiques Saint Graal M1 Desk Pro**\n\n"
+            f"📊 **Statistiques Saint Graal M1**\n\n"
             f"Total: {total}\n"
             f"✅ Wins: {wins}\n"
             f"❌ Losses: {losses}\n"
             f"📈 Win rate: {winrate:.1f}%\n"
             f"🎯 8 signaux/session (GARANTIS)\n"
-            f"🚀 Stratégie: Desk Pro v4.2\n"
         )
         
         await update.message.reply_text(msg)
@@ -1927,7 +1771,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_rapport(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Rapport quotidien M1"""
     try:
-        msg = await update.message.reply_text("📊 Génération rapport Saint Graal Desk Pro...")
+        msg = await update.message.reply_text("📊 Génération rapport Saint Graal...")
         
         now_haiti = get_haiti_now()
         start_haiti = now_haiti.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -1964,14 +1808,13 @@ async def cmd_rapport(update: Update, context: ContextTypes.DEFAULT_TYPE):
         price_rate = (with_prices / total * 100) if total > 0 else 0
         
         report = (
-            f"📊 **RAPPORT SAINT GRAAL M1 DESK PRO**\n"
+            f"📊 **RAPPORT SAINT GRAAL M1**\n"
             f"━━━━━━━━━━━━━━━━━━━━\n\n"
             f"📅 {now_haiti.strftime('%d/%m/%Y')}\n\n"
             f"• Total: {total}\n"
             f"• ✅ Wins: {wins}\n"
             f"• ❌ Losses: {losses}\n"
             f"• 📊 Win Rate: **{winrate:.1f}%**\n"
-            f"• 🚀 Stratégie: Desk Pro v4.2\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
         )
         
@@ -2182,9 +2025,8 @@ async def health_check(request):
         'error_logs_count': len(last_error_logs),
         'external_verifier': EXTERNAL_VERIFIER_AVAILABLE,
         'verifier_otc_provider': verifier is not None and hasattr(verifier, 'otc_provider'),
-        'desk_pro_available': DESK_PRO_AVAILABLE,
         'mode': 'OTC' if otc_provider.is_weekend() else 'Forex',
-        'strategy': 'Saint Graal Desk Pro v4.2',
+        'strategy': 'Saint Graal M1 avec Structure',
         'signals_per_session': SIGNALS_PER_SESSION,
     })
 
@@ -2208,24 +2050,20 @@ async def start_http_server():
 
 async def main():
     print("\n" + "="*60)
-    print("🤖 BOT SAINT GRAAL M1 - DESK PRO v4.2")
-    print("🎯 8 SIGNAUX GARANTIS - ASYMÉTRIE BUY/SELL")
+    print("🤖 BOT SAINT GRAAL M1 - VÉRIFICATION EXTERNE")
+    print("🎯 8 SIGNAUX GARANTIS - ÉVITE LES ACHATS AUX SOMMETS")
     print("🔄 BOUTON IMMÉDIAT APRÈS BOUGIE (CORRIGÉ)")
     print("="*60)
-    print(f"🎯 Stratégie: Saint Graal Desk Pro v4.2")
-    print(f"⚡ Asymétrie: Strict SELL / Reactive BUY")
-    print(f"📊 Règles SELL: RSI min 58, Confirmation swing obligatoire")
-    print(f"📊 Règles BUY: RSI max 45, Plus réactif")
+    print(f"🎯 Stratégie: Saint Graal Forex M1 avec Structure")
     print(f"⚡ Signal envoyé: Immédiatement")
     print(f"🔔 Rappel: 1 min avant entrée")
     print(f"🔄 Bouton prochain signal: IMMÉDIAT après fin de bougie")
     print(f"🤖 Vérification: {'Externe avec otc_provider' if EXTERNAL_VERIFIER_AVAILABLE else 'Non disponible'}")
-    print(f"🚀 Desk Pro: {'Disponible' if DESK_PRO_AVAILABLE else 'Non disponible'}")
+    print(f"⚠️ Analyse: Détection swing highs/lows")
     print(f"🔧 Sources: TwelveData + APIs Crypto")
     print(f"🎯 Garantie: 8 signaux/session")
     print(f"💰 PRIX: Base de données corrigée pour stocker les prix")
     print(f"📊 Commandes prix: /showprices, /checkprices, /repairprices")
-    print(f"🧪 Test stratégie: /testdesk")
     print("="*60 + "\n")
 
     # Initialiser la base de données
@@ -2261,9 +2099,6 @@ async def main():
     app.add_handler(CommandHandler('debugsignal', cmd_debug_signal))
     app.add_handler(CommandHandler('debugrecent', cmd_debug_recent))
     
-    # Nouvelle commande Desk Pro
-    app.add_handler(CommandHandler('testdesk', cmd_test_desk_pro))
-    
     # Commandes existantes
     app.add_handler(CommandHandler('mlstats', cmd_mlstats))
     app.add_handler(CommandHandler('retrain', cmd_retrain))
@@ -2288,18 +2123,16 @@ async def main():
     print(f"✅ BOT ACTIF: @{bot_info.username}\n")
     print(f"🔧 Mode actuel: {'OTC (Crypto)' if otc_provider.is_weekend() else 'Forex'}")
     print(f"🤖 Vérificateur: {'Externe actif avec otc_provider' if EXTERNAL_VERIFIER_AVAILABLE else 'Non disponible'}")
-    print(f"🚀 Desk Pro v4.2: {'Actif' if DESK_PRO_AVAILABLE else 'Non disponible'}")
     print(f"⚡ Signal envoyé: Immédiatement")
     print(f"🔔 Rappel: 1 minute avant l'entrée")
     print(f"🔄 Bouton prochain signal: IMMÉDIAT après fin de bougie (CORRIGÉ)")
-    print(f"🎯 Stratégie: Asymétrique BUY/SELL")
-    print(f"📊 Règles SELL: Strict (RSI ≥ 58, Swing confirmation)")
-    print(f"📊 Règles BUY: Réactif (RSI ≤ 45)")
+    print(f"🎯 Stratégie: Saint Graal M1 avec Structure")
+    print(f"⚠️ Analyse: Détection des swing highs actif")
+    print(f"🔧 Modes: STRICT → GARANTIE → LAST RESORT → FORCED")
     print(f"✅ Garantie: 8 signaux/session")
     print(f"💰 PRIX: Base de données prête pour stockage")
     print(f"📊 Résultat: Envoyé dès qu'il est disponible")
     print(f"🔧 Commandes nouvelles:")
-    print(f"   • /testdesk - Tester la stratégie Desk Pro")
     print(f"   • /showprices <id> - Afficher les prix d'un signal")
     print(f"   • /checkprices - Vérifier état des prix")
     print(f"   • /repairprices [n] - Réparer prix manquants")
@@ -2311,7 +2144,7 @@ async def main():
         while True:
             await asyncio.sleep(1)
     except (KeyboardInterrupt, SystemExit):
-        print("\n🛑 Arrêt du Bot Saint Graal Desk Pro...")
+        print("\n🛑 Arrêt du Bot Saint Graal...")
         await app.updater.stop()
         await app.stop()
         await app.shutdown()
