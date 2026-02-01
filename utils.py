@@ -1,5 +1,7 @@
-"""utils.py - STRATÉGIE BINAIRE M1 PRO - VERSION 4.2 COMPATIBLE
-Niveau desk pro avec compatibilité totale signal_bot
+"""
+utils.py - STRATÉGIE FOREX M1 - 8 SIGNAUX QUALITÉ MAXIMALE AVEC GARANTIE
+Version avec analyse de structure pour éviter d'acheter près des swing highs
+Correction bug JSON serialization
 """
 
 import pandas as pd
@@ -11,1009 +13,291 @@ from ta.volatility import BollingerBands, AverageTrueRange
 import warnings
 warnings.filterwarnings('ignore')
 
-# ================= CONFIGURATION DESK PRO =================
+# ================= CONFIGURATION 8 SIGNAUX QUALITÉ MAX =================
 
 SAINT_GRAAL_CONFIG = {
-    # 🔥 ASYMÉTRIE BUY/SELL
-    'buy_rules': {
-        'stoch_period': 5,      # Rapide pour les BUY
-        'stoch_smooth': 3,
-        'rsi_max_for_buy': 45,  # RSI maximum pour BUY
-        'rsi_oversold': 35,     # Seuil oversold standard
-        'require_swing_confirmation': False,  # BUY plus réactif
+    # Indicateurs M1 optimisés
+    'rsi_period': 7,
+    'ema_fast': 5,
+    'ema_slow': 13,
+    'stoch_period': 5,
+    
+    # Seuils QUALITÉ MAXIMALE POUR 8 SIGNAUX
+    'max_quality': {
+        'rsi_overbought': 68,
+        'rsi_oversold': 32,
+        'adx_min': 25,
+        'stoch_overbought': 74,
+        'stoch_oversold': 26,
+        'min_confluence_points': 7,
+        'min_body_ratio': 0.4,
+        'max_wick_ratio': 0.4,
+        'min_quality_score': 80,
     },
     
-    'sell_rules': {
-        'stoch_period': 9,      # Lent pour les SELL
-        'stoch_smooth': 3,
-        'rsi_min_for_sell': 58,  # 🔥 Augmenté à 58
-        'stoch_min_overbought': 65,
-        'require_swing_break': True,  # 🔥 Confirmation swing obligatoire
-        'max_swing_distance_pips': 5,  # Distance max au swing
-        'momentum_gate_diff': 12,      # 🔥 Augmenté à 12
+    # Seuils QUALITÉ ÉLEVÉE
+    'high_quality': {
+        'rsi_overbought': 72,
+        'rsi_oversold': 28,
+        'adx_min': 22,
+        'stoch_overbought': 78,
+        'stoch_oversold': 22,
+        'min_confluence_points': 6,
+        'min_body_ratio': 0.35,
+        'max_wick_ratio': 0.5,
+        'min_quality_score': 70,
     },
     
-    # Seuils contextuels optimisés
-    'momentum_context': {
-        'trend_overbought': 62,  # 🔥 Baissé à 62
-        'trend_oversold': 38,    # 🔥 Hausse à 38
-        'range_overbought': 72,
-        'range_oversold': 28,
-        'strong_trend_threshold': 1.0,  # 🔥 Hausse à 1.0%
+    # Mode GARANTIE
+    'guarantee_mode': {
+        'rsi_overbought': 75,
+        'rsi_oversold': 25,
+        'adx_min': 20,
+        'stoch_overbought': 80,
+        'stoch_oversold': 20,
+        'min_confluence_points': 5,
+        'min_body_ratio': 0.3,
+        'max_wick_ratio': 0.6,
+        'min_quality_score': 60,
     },
     
-    # Structure rules PRO
-    'structure_rules': {
-        'sell_in_uptrend': {
-            'require_swing_break': True,
-            'min_stoch_overbought': 68,
-            'allow_only_at_resistance': True,
-            'max_rsi': 62,
-        },
-        'buy_in_downtrend': {
-            'require_swing_break': True,
-            'max_stoch_oversold': 32,
-            'allow_only_at_support': True,
-            'min_rsi': 38,
-        },
-        'range_trading': {
-            'min_zone_strength': 25,
-            'require_bounce_confirmation': True,
-            'max_entry_from_zone_pips': 3,
-        }
+    # Filtres anti-manipulation
+    'anti_manip': {
+        'max_wick_ratio': 0.65,
+        'max_candle_size_ratio': 2.5,
+        'min_ema_spread': 0.0006,
+        'max_volatility': 0.04,
+        'min_data_quality': 0.8,
     },
+    
+    # Paramètres structure marché
+    'structure': {
+        'swing_lookback': 15,
+        'near_high_threshold': 0.5,
+        'min_trend_strength': 1.5,
+        'pattern_lookback': 5,
+    },
+    
+    # Paramètres généraux
+    'target_signals': 8,
+    'max_signals': 8,
 }
 
 # ================= FONCTIONS DE BASE =================
 
 def round_to_m1_candle(dt):
-    """Arrondit à la bougie M1"""
+    """Arrondit un datetime à la bougie M1 (minute)"""
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.replace(second=0, microsecond=0)
 
 def get_next_m1_candle(dt):
-    """Début de la prochaine bougie M1"""
+    """Retourne le début de la PROCHAINE bougie M1"""
     current_candle = round_to_m1_candle(dt)
     return current_candle + timedelta(minutes=1)
 
 def get_m1_candle_range(dt):
-    """Range de la bougie M1 actuelle"""
+    """Retourne le range de la bougie M1 actuelle"""
     current_candle = round_to_m1_candle(dt)
     start_time = current_candle
     end_time = current_candle + timedelta(minutes=1)
     return start_time, end_time
 
-# ================= DÉTECTION STRUCTURE =================
+# ================= ANALYSE STRUCTURE MARCHÉ =================
 
 def analyze_market_structure(df, lookback=15):
     """
-    COMPATIBILITÉ : Retourne seulement 2 valeurs (structure, trend_strength)
-    Pour usage dans signal_bot.py
+    Analyse la structure du marché pour éviter d'acheter au sommet
+    Retourne: (structure, strength%)
     """
     if len(df) < lookback + 5:
-        return "INSUFFICIENT_DATA", 0.0
+        return "INSUFFICIENT_DATA", 0
     
     recent = df.tail(lookback).copy()
     highs = recent['high'].values
     lows = recent['low'].values
     
+    # Détection des pivots (swing highs/lows)
     swing_highs = []
     swing_lows = []
     
-    # Détection swings robuste
-    for i in range(3, len(recent)-3):
+    for i in range(2, len(recent)-2):
         # Swing High
         if (highs[i] > highs[i-1] and highs[i] > highs[i-2] and 
-            highs[i] > highs[i-3] and
-            highs[i] > highs[i+1] and highs[i] > highs[i+2] and
-            highs[i] > highs[i+3]):
-            
-            min_height = recent['close'].mean() * 0.0002  # 2 pips min
-            if highs[i] - max(highs[i-3], highs[i-2], highs[i-1],
-                             highs[i+1], highs[i+2], highs[i+3]) > min_height:
-                swing_highs.append({
-                    'index': i,
-                    'price': float(highs[i]),
-                })
+            highs[i] > highs[i+1] and highs[i] > highs[i+2]):
+            swing_highs.append((i, float(highs[i])))
         
         # Swing Low
         if (lows[i] < lows[i-1] and lows[i] < lows[i-2] and 
-            lows[i] < lows[i-3] and
-            lows[i] < lows[i+1] and lows[i] < lows[i+2] and
-            lows[i] < lows[i+3]):
-            
-            min_depth = recent['close'].mean() * 0.0002
-            if min(lows[i-3], lows[i-2], lows[i-1],
-                  lows[i+1], lows[i+2], lows[i+3]) - lows[i] > min_depth:
-                swing_lows.append({
-                    'index': i,
-                    'price': float(lows[i]),
-                })
+            lows[i] < lows[i+1] and lows[i] < lows[i+2]):
+            swing_lows.append((i, float(lows[i])))
     
-    # Logique de détection
-    structure = "RANGE"
-    trend_strength = 0.0
-    
-    if len(swing_highs) >= 3 and len(swing_lows) >= 3:
-        recent_highs = sorted(swing_highs, key=lambda x: x['index'])[-3:]
-        recent_lows = sorted(swing_lows, key=lambda x: x['index'])[-3:]
+    # Analyser la tendance
+    if len(swing_highs) >= 2 and len(swing_lows) >= 2:
+        last_high = swing_highs[-1][1]
+        prev_high = swing_highs[-2][1] if len(swing_highs) >= 2 else last_high
         
-        high_prices = [h['price'] for h in recent_highs]
-        low_prices = [l['price'] for l in recent_lows]
+        last_low = swing_lows[-1][1]
+        prev_low = swing_lows[-2][1] if len(swing_lows) >= 2 else last_low
         
-        is_hh = all(high_prices[i] > high_prices[i-1] for i in range(1, len(high_prices)))
-        is_hl = all(low_prices[i] > low_prices[i-1] for i in range(1, len(low_prices)))
-        is_lh = all(high_prices[i] < high_prices[i-1] for i in range(1, len(high_prices)))
-        is_ll = all(low_prices[i] < low_prices[i-1] for i in range(1, len(low_prices)))
-        
-        if is_hh and is_hl:
+        # Uptrend: HH + HL
+        if last_high > prev_high and last_low > prev_low:
             structure = "UPTREND"
-            trend_strength = float((high_prices[-1] - high_prices[0]) / high_prices[0] * 100)
-        elif is_lh and is_ll:
+            strength = float((last_high - prev_high) / prev_high * 100)
+        
+        # Downtrend: LH + LL
+        elif last_high < prev_high and last_low < prev_low:
             structure = "DOWNTREND"
-            trend_strength = float((low_prices[0] - low_prices[-1]) / low_prices[-1] * 100)
+            strength = float((prev_low - last_low) / last_low * 100)
+        
+        # Range
         else:
             structure = "RANGE"
-    
-    return structure, trend_strength
-
-# ================= DÉTECTION SWING INTERNE =================
-
-def detect_internal_swings(df, lookback=10):
-    """
-    Détection swings internes pour confirmation structure
-    """
-    if len(df) < lookback:
-        return None, None
-    
-    recent = df.tail(lookback).copy()
-    
-    # Dernier swing high interne
-    internal_high_idx = recent['high'].idxmax()
-    internal_high = {
-        'price': float(recent.loc[internal_high_idx, 'high']),
-        'index': internal_high_idx,
-        'bars_ago': len(recent) - 1 - recent.index.get_loc(internal_high_idx)
-    }
-    
-    # Dernier swing low interne
-    internal_low_idx = recent['low'].idxmin()
-    internal_low = {
-        'price': float(recent.loc[internal_low_idx, 'low']),
-        'index': internal_low_idx,
-        'bars_ago': len(recent) - 1 - recent.index.get_loc(internal_low_idx)
-    }
-    
-    return internal_high, internal_low
-
-def check_swing_break(current_price, internal_swing, direction, max_distance_pips=5):
-    """
-    Vérifie si le prix a cassé un swing interne
-    """
-    if internal_swing is None:
-        return False, 0
-    
-    distance_pips = abs(current_price - internal_swing['price']) / 0.0001
-    
-    if direction == "SELL":
-        # Pour SELL: besoin de casser le swing low interne
-        is_broken = current_price < internal_swing['price']
-    else:  # BUY
-        # Pour BUY: besoin de casser le swing high interne
-        is_broken = current_price > internal_swing['price']
-    
-    is_near = distance_pips <= max_distance_pips
-    
-    return is_broken and is_near, distance_pips
-
-# ================= ZONES S/R =================
-
-def detect_key_zones(df, lookback=100, min_touches=2, tolerance_pips=None):
-    """Détection améliorée des zones support/résistance avec clustering"""
-    if len(df) < lookback:
-        return [], []
-    
-    recent = df.tail(lookback).copy()
-    
-    # Calcul ATR pour tolérance dynamique
-    atr = AverageTrueRange(
-        high=recent['high'],
-        low=recent['low'],
-        close=recent['close'],
-        window=14
-    ).average_true_range()
-    
-    current_atr = atr.iloc[-1] if not atr.empty else 0.0005
-    
-    # Tolérance dynamique basée sur ATR (0.5 ATR par défaut)
-    if tolerance_pips is None:
-        tolerance = current_atr * 0.5
+            strength = 0.0
     else:
-        tolerance = tolerance_pips * 0.0001
+        structure = "NO_CLEAR_STRUCTURE"
+        strength = 0.0
     
-    # Détection des swings pour résistances
-    resistances = []
-    for i in range(3, len(recent)-3):
-        current_high = float(recent.iloc[i]['high'])
-        is_swing_high = (
-            current_high == recent['high'].iloc[i-3:i+4].max() and
-            current_high > recent['high'].iloc[i-1] and
-            current_high > recent['high'].iloc[i+1]
-        )
-        
-        if is_swing_high:
-            found_cluster = False
-            for res in resistances:
-                if abs(current_high - res['price']) <= tolerance:
-                    res['prices'].append(current_high)
-                    res['touches'] += 1
-                    res['last_touch'] = recent.index[i]
-                    found_cluster = True
-                    break
-            
-            if not found_cluster:
-                resistances.append({
-                    'price': current_high,
-                    'prices': [current_high],
-                    'touches': 1,
-                    'last_touch': recent.index[i],
-                    'type': 'RESISTANCE',
-                })
-    
-    # Détection des swings pour supports
-    supports = []
-    for i in range(3, len(recent)-3):
-        current_low = float(recent.iloc[i]['low'])
-        is_swing_low = (
-            current_low == recent['low'].iloc[i-3:i+4].min() and
-            current_low < recent['low'].iloc[i-1] and
-            current_low < recent['low'].iloc[i+1]
-        )
-        
-        if is_swing_low:
-            found_cluster = False
-            for sup in supports:
-                if abs(current_low - sup['price']) <= tolerance:
-                    sup['prices'].append(current_low)
-                    sup['touches'] += 1
-                    sup['last_touch'] = recent.index[i]
-                    found_cluster = True
-                    break
-            
-            if not found_cluster:
-                supports.append({
-                    'price': current_low,
-                    'prices': [current_low],
-                    'touches': 1,
-                    'last_touch': recent.index[i],
-                    'type': 'SUPPORT',
-                })
-    
-    # Calcul du score de force
+    # Vérifier proximité des swings
     current_price = float(recent.iloc[-1]['close'])
     
-    for zone in supports + resistances:
-        # Score de base basé sur touches
-        touches_score = min(zone['touches'] * 15, 40)
+    if swing_highs:
+        nearest_high = min(swing_highs, key=lambda x: abs(x[0] - len(recent)))
+        distance_to_high = float((nearest_high[1] - current_price) / current_price * 100)
         
-        # Pénalité pour largeur
-        if len(zone['prices']) > 1:
-            zone_width = max(zone['prices']) - min(zone['prices'])
-            width_pips = zone_width / 0.0001
-            width_penalty = min(width_pips * 1.5, 20)
-        else:
-            width_penalty = 0
+        if distance_to_high < SAINT_GRAAL_CONFIG['structure']['near_high_threshold']:
+            structure += "_NEAR_HIGH"
+    
+    if swing_lows:
+        nearest_low = min(swing_lows, key=lambda x: abs(x[0] - len(recent)))
+        distance_to_low = float((current_price - nearest_low[1]) / current_price * 100)
         
-        # Bonus récence
-        age_bars = len(recent) - recent.index.get_loc(zone['last_touch'])
-        recency_bonus = max(0, (100 - age_bars) * 0.5)
-        
-        # Score brut
-        raw_score = touches_score - width_penalty + recency_bonus
-        
-        # Normalisation 0-50
-        zone['strength_score'] = min(50, max(0, raw_score))
+        if distance_to_low < SAINT_GRAAL_CONFIG['structure']['near_high_threshold']:
+            structure += "_NEAR_LOW"
     
-    # Filtrer zones
-    valid_supports = [
-        s for s in supports 
-        if s['touches'] >= min_touches 
-    ]
-    
-    valid_resistances = [
-        r for r in resistances 
-        if r['touches'] >= min_touches 
-    ]
-    
-    # Trier par score
-    valid_supports.sort(key=lambda x: x['strength_score'], reverse=True)
-    valid_resistances.sort(key=lambda x: x['strength_score'], reverse=True)
-    
-    return valid_supports[:3], valid_resistances[:3]
+    return structure, strength
 
-def is_price_near_zone_pro(current_price, zones, max_distance_pips=10):
-    """Vérifie proximité zone (version pro)"""
-    max_distance = max_distance_pips * 0.0001
-    
-    if not zones:
-        return False, None, float('inf')
-    
-    nearest_zone = None
-    min_distance = float('inf')
-    
-    for zone in zones:
-        distance = abs(current_price - zone['price'])
-        if distance < min_distance:
-            min_distance = distance
-            nearest_zone = zone
-    
-    is_near = min_distance <= max_distance
-    distance_pips = min_distance / 0.0001
-    
-    return is_near, nearest_zone, distance_pips
-
-def calculate_zone_strength(zone):
-    """Calcule un bonus de trading basé sur la force de la zone"""
-    if not zone:
-        return 0, "Aucune zone"
-    
-    strength = zone.get('strength_score', 0)
-    
-    if strength > 45:
-        bonus = 25
-        reason = f"Zone {zone['type']} TRÈS FORTE ({strength:.0f}/50)"
-    elif strength > 35:
-        bonus = 20
-        reason = f"Zone {zone['type']} FORTE ({strength:.0f}/50)"
-    elif strength > 25:
-        bonus = 15
-        reason = f"Zone {zone['type']} MOYENNE ({strength:.0f}/50)"
-    elif strength > 15:
-        bonus = 10
-        reason = f"Zone {zone['type']} FAIBLE ({strength:.0f}/50)"
-    else:
-        bonus = 5
-        reason = f"Zone {zone['type']} TRÈS FAIBLE ({strength:.0f}/50)"
-    
-    return bonus, reason
-
-# ================= MOMENTUM ASYMÉTRIQUE =================
-
-def analyze_momentum_asymmetric(df):
+def is_near_swing_high(df, lookback=20):
     """
-    🔥 NOUVEAU : Momentum asymétrique BUY/SELL
-    Stochastic rapide pour BUY, lent pour SELL
+    Vérifie si le prix est proche d'un swing high récent
+    Retourne: (is_near, distance%)
     """
-    if len(df) < 30:
-        return {"status": "INSUFFICIENT_DATA"}
+    if len(df) < lookback:
+        return False, 0.0
     
-    # RSI commun
-    rsi = RSIIndicator(close=df['close'], window=7).rsi()
-    current_rsi = rsi.iloc[-1]
+    recent = df.tail(lookback)
+    highs = recent['high'].values
     
-    # 🔥 STOCHASTIC RAPIDE POUR BUY (5,3,3)
-    stoch_fast = StochasticOscillator(
-        high=df['high'],
-        low=df['low'],
-        close=df['close'],
-        window=SAINT_GRAAL_CONFIG['buy_rules']['stoch_period'],
-        smooth_window=SAINT_GRAAL_CONFIG['buy_rules']['stoch_smooth']
-    )
-    stoch_k_fast = stoch_fast.stoch()
-    stoch_d_fast = stoch_fast.stoch_signal()
-    
-    # 🔥 STOCHASTIC LENT POUR SELL (9,3,3)
-    stoch_slow = StochasticOscillator(
-        high=df['high'],
-        low=df['low'],
-        close=df['close'],
-        window=SAINT_GRAAL_CONFIG['sell_rules']['stoch_period'],
-        smooth_window=SAINT_GRAAL_CONFIG['sell_rules']['stoch_smooth']
-    )
-    stoch_k_slow = stoch_slow.stoch()
-    stoch_d_slow = stoch_slow.stoch_signal()
-    
-    # Détection structure pour seuils contextuels
-    structure, trend_strength = analyze_market_structure(df.tail(15))
-    is_strong_trend = abs(trend_strength) > SAINT_GRAAL_CONFIG['momentum_context']['strong_trend_threshold']
-    
-    if is_strong_trend:
-        overbought_threshold = SAINT_GRAAL_CONFIG['momentum_context']['trend_overbought']
-        oversold_threshold = SAINT_GRAAL_CONFIG['momentum_context']['trend_oversold']
-    else:
-        overbought_threshold = SAINT_GRAAL_CONFIG['momentum_context']['range_overbought']
-        oversold_threshold = SAINT_GRAAL_CONFIG['momentum_context']['range_oversold']
-    
-    # 🔥 DÉTECTION PIC STOCHASTIC LENT (pour SELL)
-    stoch_slow_values = stoch_k_slow.tail(10).values
-    stoch_peak_detected = False
-    stoch_peak_value = 0
-    
-    if len(stoch_slow_values) >= 8:
-        for i in range(3, len(stoch_slow_values)-3):
-            if (stoch_slow_values[i] > stoch_slow_values[i-1] and 
-                stoch_slow_values[i] > stoch_slow_values[i-2] and
-                stoch_slow_values[i] > stoch_slow_values[i-3] and
-                stoch_slow_values[i] > stoch_slow_values[i+1] and
-                stoch_slow_values[i] > stoch_slow_values[i+2] and
-                stoch_slow_values[i] > stoch_slow_values[i+3]):
-                
-                if stoch_slow_values[i] >= overbought_threshold:
-                    stoch_peak_detected = True
-                    stoch_peak_value = stoch_slow_values[i]
-                    break
-    
-    # Turning bearish sur slow
-    stoch_turning_bearish = False
-    if len(stoch_slow_values) >= 4:
-        recent_slow = stoch_slow_values[-4:]
-        if (recent_slow[0] > recent_slow[1] > recent_slow[2] > recent_slow[3] and
-            recent_slow[0] - recent_slow[3] > 8.0):  # 🔥 8 points minimum
-            stoch_turning_bearish = True
-    
-    # Turning bullish sur fast
-    stoch_fast_values = stoch_k_fast.tail(6).values
-    stoch_turning_bullish = False
-    if len(stoch_fast_values) >= 4:
-        recent_fast = stoch_fast_values[-4:]
-        if (recent_fast[0] < recent_fast[1] < recent_fast[2] < recent_fast[3] and
-            recent_fast[3] - recent_fast[0] > 6.0):
-            stoch_turning_bullish = True
-    
-    # MACD
-    macd_ind = MACD(
-        close=df['close'],
-        window_slow=26,
-        window_fast=12,
-        window_sign=9
-    )
-    macd_line = macd_ind.macd().iloc[-1]
-    macd_signal = macd_ind.macd_signal().iloc[-1]
-    macd_histogram = macd_line - macd_signal
-    
-    # 🔥 CALCUL SCORES ASYMÉTRIQUES
-    sell_score = 0
-    buy_score = 0
-    sell_reasons = []
-    buy_reasons = []
-    
-    # ========== CONDITIONS SELL (STRICTISSIMES) ==========
-    current_stoch_slow = stoch_k_slow.iloc[-1]
-    
-    # RÈGLE 1: RSI minimum 58
-    if current_rsi >= SAINT_GRAAL_CONFIG['sell_rules']['rsi_min_for_sell']:
-        sell_score += 15
-        sell_reasons.append(f"RSI:{current_rsi:.1f}")
-    
-    # RÈGLE 2: Stochastic lent overbought + turning
-    if (current_stoch_slow >= overbought_threshold and 
-        stoch_turning_bearish and
-        current_stoch_slow <= 82):  # 🔥 Éviter extrêmes tardifs
-        
-        sell_score += 25
-        sell_reasons.append(f"StochS:{current_stoch_slow:.1f}↓")
-    
-    # RÈGLE 3: Pic détecté + baisse confirmée
-    elif stoch_peak_detected and stoch_turning_bearish:
-        sell_score += 30  # 🔥 Bonus pic
-        sell_reasons.append(f"Pic:{stoch_peak_value:.1f}↓")
-    
-    # RÈGLE 4: MACD baissier fort
-    if macd_histogram < -0.00015:  # 🔥 Seuil plus strict
-        sell_score += 12
-        sell_reasons.append("MACD↓")
-    
-    # ========== CONDITIONS BUY (RÉACTIVES) ==========
-    current_stoch_fast = stoch_k_fast.iloc[-1]
-    
-    # RSI oversold ou bas
-    if current_rsi <= SAINT_GRAAL_CONFIG['buy_rules']['rsi_max_for_buy']:
-        buy_score += 18  # 🔥 Plus généreux
-        buy_reasons.append(f"RSI:{current_rsi:.1f}")
-    
-    # Stochastic fast oversold ou turning
-    if (current_stoch_fast <= oversold_threshold or 
-        stoch_turning_bullish):
-        
-        buy_score += 28
-        buy_reasons.append(f"StochF:{current_stoch_fast:.1f}↑")
-    
-    # MACD haussier
-    if macd_histogram > 0.0001:
-        buy_score += 10
-        buy_reasons.append("MACD↑")
-    
-    # 🔥 VÉTO MOMENTUM STRICT
-    momentum_gate_passed = True
-    gate_reason = ""
-    
-    if sell_score > buy_score:
-        diff = sell_score - buy_score
-        if diff < SAINT_GRAAL_CONFIG['sell_rules']['momentum_gate_diff']:
-            momentum_gate_passed = False
-            gate_reason = f"Momentum SELL insuffisant ({diff} < {SAINT_GRAAL_CONFIG['sell_rules']['momentum_gate_diff']})"
-    
-    elif buy_score > sell_score:
-        diff = buy_score - sell_score
-        if diff < 8:  # 🔥 Gate plus léger pour BUY
-            momentum_gate_passed = False
-            gate_reason = f"Momentum BUY insuffisant ({diff} < 8)"
-    
-    return {
-        'rsi': float(current_rsi),
-        'stoch_k_fast': float(stoch_k_fast.iloc[-1]),
-        'stoch_d_fast': float(stoch_d_fast.iloc[-1]),
-        'stoch_k_slow': float(stoch_k_slow.iloc[-1]),
-        'stoch_d_slow': float(stoch_d_slow.iloc[-1]),
-        'stoch_turning_bearish': stoch_turning_bearish,
-        'stoch_turning_bullish': stoch_turning_bullish,
-        'stoch_peak_detected': stoch_peak_detected,
-        'stoch_peak_value': float(stoch_peak_value),
-        'macd_histogram': float(macd_histogram),
-        'sell_score': sell_score,
-        'buy_score': buy_score,
-        'sell_reasons': sell_reasons,
-        'buy_reasons': buy_reasons,
-        'overbought_threshold': overbought_threshold,
-        'oversold_threshold': oversold_threshold,
-        'dominant': "SELL" if sell_score > buy_score else "BUY" if buy_score > sell_score else "NEUTRAL",
-        'strength': abs(sell_score - buy_score),
-        'momentum_gate_passed': momentum_gate_passed,
-        'gate_reason': gate_reason,
-        'structure': structure,
-        'trend_strength': trend_strength,
-    }
-
-# ================= STRUCTURE SCORE PRO =================
-
-def calculate_structure_score_pro_m1(structure, direction, momentum_info, internal_swing_break):
-    """
-    🔥 NOUVEAU : Structure score avec règles desk pro
-    """
-    score = 0
-    reasons = []
-    
-    if direction == "SELL":
-        # 🔥 RÈGLE DESK: SELL en uptrend = conditions ultra strictes
-        if "UPTREND" in structure:
-            rules = SAINT_GRAAL_CONFIG['structure_rules']['sell_in_uptrend']
-            
-            if momentum_info['rsi'] > rules['max_rsi']:
-                score = -20
-                reasons.append(f"RSI {momentum_info['rsi']:.1f} > {rules['max_rsi']}")
-            
-            elif not internal_swing_break and rules['require_swing_break']:
-                score = -25
-                reasons.append("Pas de break swing interne")
-            
-            elif momentum_info['stoch_k_slow'] < rules['min_stoch_overbought']:
-                score = -15
-                reasons.append(f"Stoch {momentum_info['stoch_k_slow']:.1f} < {rules['min_stoch_overbought']}")
-            
-            else:
-                score = 15  # 🔥 Score réduit pour SELL contre tendance
-                reasons.append("SELL uptrend strict")
-        
-        # SELL en downtrend = favorable
-        elif "DOWNTREND" in structure:
-            score = 25
-            reasons.append("DOWNTREND fort")
-        
-        # SELL en range = conditions moyennes
-        elif "RANGE" in structure:
-            score = 18
-            reasons.append("Range + zone")
-        
-        # SELL en wedge/chao = éviter
-        elif "WEDGE" in structure or "CHAOTIC" in structure:
-            score = -10
-            reasons.append("Structure défavorable")
-    
-    else:  # BUY
-        # 🔥 RÈGLE DESK: BUY en downtrend = conditions strictes
-        if "DOWNTREND" in structure:
-            rules = SAINT_GRAAL_CONFIG['structure_rules']['buy_in_downtrend']
-            
-            if momentum_info['rsi'] < rules['min_rsi']:
-                score = -20
-                reasons.append(f"RSI {momentum_info['rsi']:.1f} < {rules['min_rsi']}")
-            
-            elif not internal_swing_break and rules['require_swing_break']:
-                score = -25
-                reasons.append("Pas de break swing interne")
-            
-            elif momentum_info['stoch_k_fast'] > rules['max_stoch_oversold']:
-                score = -15
-                reasons.append(f"Stoch {momentum_info['stoch_k_fast']:.1f} > {rules['max_stoch_oversold']}")
-            
-            else:
-                score = 15
-                reasons.append("BUY downtrend strict")
-        
-        # BUY en uptrend = favorable
-        elif "UPTREND" in structure:
-            score = 25
-            reasons.append("UPTREND fort")
-        
-        # BUY en range
-        elif "RANGE" in structure:
-            score = 18
-            reasons.append("Range + zone")
-        
-        # BUY en wedge/chao
-        elif "WEDGE" in structure or "CHAOTIC" in structure:
-            score = -10
-            reasons.append("Structure défavorable")
-    
-    return score, " | ".join(reasons)
-
-# ================= VALIDATION BOUGIE =================
-
-def validate_candle_for_binary_m1(df, direction, require_rejection=True):
-    """
-    Validation bougie pour binaire M1
-    Exige des confirmations claires de retournement
-    """
-    if len(df) < 5:
-        return False, "NO_DATA", 0, ""
-    
-    last_candle = df.iloc[-1]
-    prev_candle = df.iloc[-2]
-    prev2_candle = df.iloc[-3] if len(df) >= 3 else None
-    
-    candle_body = abs(last_candle['close'] - last_candle['open'])
-    candle_size = last_candle['high'] - last_candle['low']
-    
-    if candle_size == 0:
-        return False, "NO_BODY", 0, ""
-    
-    upper_wick = last_candle['high'] - max(last_candle['open'], last_candle['close'])
-    lower_wick = min(last_candle['open'], last_candle['close']) - last_candle['low']
-    
-    patterns = []
-    
-    if direction == "SELL":
-        # 🔥 RÈGLE: Exiger rejet clair en M1 binaire
-        if require_rejection:
-            # Pin bar baissier avec mèche haute > 2x corps
-            if upper_wick > candle_body * 2.0:
-                quality = 85 if upper_wick > candle_body * 3.0 else 75
-                patterns.append(("PIN_BAR_BEARISH", quality, f"Mèche:{upper_wick/candle_body:.1f}x"))
-            
-            # Clôture sous low précédent (confirmation forte)
-            if last_candle['close'] < prev_candle['low']:
-                patterns.append(("CLOSE_BELOW_PREV_LOW", 90, "Break bas"))
-            
-            # Engulfing baissier
-            if (last_candle['close'] < last_candle['open'] and
-                prev_candle['close'] > prev_candle['open'] and
-                last_candle['open'] >= prev_candle['close'] and
-                last_candle['close'] <= prev_candle['open']):
-                
-                size_ratio = candle_body / abs(prev_candle['close'] - prev_candle['open'])
-                quality = 95 if size_ratio > 1.8 else 85 if size_ratio > 1.5 else 75
-                patterns.append(("ENGULFING_BEARISH", quality, f"Ratio:{size_ratio:.1f}"))
-        
-        # Pattern 3-bar reversal
-        if prev2_candle is not None:
-            if (prev2_candle['close'] > prev2_candle['open'] and
-                prev_candle['close'] > prev_candle['open'] and
-                last_candle['close'] < last_candle['open'] and
-                last_candle['close'] < prev2_candle['low']):
-                
-                patterns.append(("3_BAR_REVERSAL", 80, "Retournement 3 bougies"))
-    
-    else:  # BUY
-        if require_rejection:
-            # Pin bar haussier
-            if lower_wick > candle_body * 2.0:
-                quality = 85 if lower_wick > candle_body * 3.0 else 75
-                patterns.append(("PIN_BAR_BULLISH", quality, f"Mèche:{lower_wick/candle_body:.1f}x"))
-            
-            # Clôture au-dessus high précédent
-            if last_candle['close'] > prev_candle['high']:
-                patterns.append(("CLOSE_ABOVE_PREV_HIGH", 90, "Break haut"))
-            
-            # Engulfing haussier
-            if (last_candle['close'] > last_candle['open'] and
-                prev_candle['close'] < prev_candle['open'] and
-                last_candle['open'] <= prev_candle['close'] and
-                last_candle['close'] >= prev_candle['open']):
-                
-                size_ratio = candle_body / abs(prev_candle['close'] - prev_candle['open'])
-                quality = 95 if size_ratio > 1.8 else 85 if size_ratio > 1.5 else 75
-                patterns.append(("ENGULFING_BULLISH", quality, f"Ratio:{size_ratio:.1f}"))
-        
-        # Pattern 3-bar reversal
-        if prev2_candle is not None:
-            if (prev2_candle['close'] < prev2_candle['open'] and
-                prev_candle['close'] < prev_candle['open'] and
-                last_candle['close'] > last_candle['open'] and
-                last_candle['close'] > prev2_candle['high']):
-                
-                patterns.append(("3_BAR_REVERSAL", 80, "Retournement 3 bougies"))
-    
-    if patterns:
-        patterns.sort(key=lambda x: x[1], reverse=True)
-        best_pattern = patterns[0]
-        return True, best_pattern[0], best_pattern[1], best_pattern[2]
-    
-    # Si aucun pattern mais confirmation simple
-    if direction == "SELL" and last_candle['close'] < last_candle['open']:
-        return True, "BEARISH_CANDLE", 60, "Simple bougie baissière"
-    elif direction == "BUY" and last_candle['close'] > last_candle['open']:
-        return True, "BULLISH_CANDLE", 60, "Simple bougie haussière"
-    
-    return False, "NO_PATTERN", 0, "Aucune confirmation bougie"
-
-# ================= FONCTIONS DE FALLBACK =================
-
-def pro_fallback_intelligent(df, signal_count, total_signals):
-    """
-    Fallback pro intelligent
-    """
-    if len(df) < 20:
-        return create_minimal_fallback("Données insuffisantes", signal_count, total_signals)
-    
-    # Calcul indicateurs
-    df_indicators = compute_saint_graal_indicators(df)
-    last = df_indicators.iloc[-1]
-    
-    # Conditions minimales
-    rsi = last.get('rsi_7', 50)
-    stoch_k = last.get('stoch_k', 50)
-    stoch_d = last.get('stoch_d', 50)
-    
-    # Décision
-    ema_5 = last.get('ema_5', 0)
-    ema_13 = last.get('ema_13', 0)
-    
-    buy_conditions = 0
-    sell_conditions = 0
-    
-    if rsi < 45:
-        buy_conditions += 1
-    if stoch_k < stoch_d:
-        buy_conditions += 1
-    if ema_5 > ema_13:
-        buy_conditions += 1
-    
-    if rsi > 55:
-        sell_conditions += 1
-    if stoch_k > stoch_d:
-        sell_conditions += 1
-    if ema_5 < ema_13:
-        sell_conditions += 1
-    
-    if buy_conditions >= 2 and buy_conditions > sell_conditions:
-        direction = "CALL"
-        score = 55.0
-        reason = f"Fallback BUY (RSI:{rsi:.1f}, Stoch:{stoch_k:.1f}/{stoch_d:.1f})"
-    
-    elif sell_conditions >= 2 and sell_conditions > buy_conditions:
-        direction = "PUT"
-        score = 55.0
-        reason = f"Fallback SELL (RSI:{rsi:.1f}, Stoch:{stoch_k:.1f}/{stoch_d:.1f})"
-    
-    else:
-        if rsi > 50:
-            direction = "CALL"
-            score = 50.0
-            reason = f"Fallback DEFAULT CALL (RSI:{rsi:.1f})"
-        else:
-            direction = "PUT"
-            score = 50.0
-            reason = f"Fallback DEFAULT PUT (RSI:{rsi:.1f})"
-    
-    return {
-        'signal': direction,
-        'mode': 'FALLBACK_PRO',
-        'quality': 'MINIMUM',
-        'score': float(score),
-        'reason': reason,
-    }
-
-def create_minimal_fallback(reason, signal_count, total_signals):
-    """Fallback absolu minimal"""
-    return {
-        'signal': 'CALL',
-        'mode': 'FALLBACK_MINIMAL',
-        'quality': 'CRITICAL',
-        'score': 45.0,
-        'reason': f"Fallback minimal: {reason}",
-    }
-
-# ================= FONCTION PRINCIPALE V4.2 =================
-
-def rule_signal_saint_graal_m1_pro_v2(df, signal_count=0, total_signals_needed=8):
-    """
-    🔥 VERSION 4.2 : LOGIQUE DESK PRO
-    Asymétrie BUY/SELL + règles structure strictes
-    """
-    print(f"\n{'='*70}")
-    print(f"🚀 DESK PRO M1 - Signal #{signal_count+1}")
-    print(f"{'='*70}")
-    
-    if len(df) < 50:
-        return pro_fallback_intelligent(df, signal_count, total_signals_needed)
+    # Trouver le swing high récent
+    swing_high_idx = np.argmax(highs)
+    swing_high = float(highs[swing_high_idx])
     
     current_price = float(df.iloc[-1]['close'])
+    distance = float((swing_high - current_price) / swing_high * 100)
     
-    # ===== 1. ANALYSE COMPLÈTE =====
-    structure, trend_strength = analyze_market_structure(df)
-    internal_high, internal_low = detect_internal_swings(df.tail(10))
+    threshold = SAINT_GRAAL_CONFIG['structure']['near_high_threshold']
+    is_near = distance < threshold
     
-    print(f"🏗️  Structure: {structure} | Force: {trend_strength:.1f}%")
-    
-    # ===== 2. MOMENTUM ASYMÉTRIQUE =====
-    momentum = analyze_momentum_asymmetric(df)
-    print(f"⚡ Momentum: RSI {momentum['rsi']:.1f} | StochF {momentum['stoch_k_fast']:.1f} | StochS {momentum['stoch_k_slow']:.1f}")
-    
-    # ===== 3. ZONES S/R =====
-    supports, resistances = detect_key_zones(df)
-    near_support, nearest_support, dist_support = is_price_near_zone_pro(current_price, supports, 8)
-    near_resistance, nearest_resistance, dist_resistance = is_price_near_zone_pro(current_price, resistances, 8)
-    
-    # ===== 4. VÉRIFICATION SWING BREAK =====
-    swing_break_sell = False
-    swing_break_buy = False
-    
-    if internal_low:
-        swing_break_sell, dist_break_sell = check_swing_break(
-            current_price, internal_low, "SELL", 
-            SAINT_GRAAL_CONFIG['sell_rules']['max_swing_distance_pips']
-        )
-    
-    if internal_high:
-        swing_break_buy, dist_break_buy = check_swing_break(
-            current_price, internal_high, "BUY", 5
-        )
-    
-    # ===== 5. SCORING DESK PRO =====
-    sell_score = 0
-    buy_score = 0
-    sell_details = []
-    buy_details = []
-    
-    # Structure score avec règles pro
-    structure_score_sell, structure_reason_sell = calculate_structure_score_pro_m1(
-        structure, "SELL", momentum, swing_break_sell
-    )
-    sell_score += structure_score_sell
-    
-    structure_score_buy, structure_reason_buy = calculate_structure_score_pro_m1(
-        structure, "BUY", momentum, swing_break_buy
-    )
-    buy_score += structure_score_buy
-    
-    # Momentum scores
-    sell_score += momentum['sell_score']
-    buy_score += momentum['buy_score']
-    
-    # Zones bonus
-    if near_resistance and dist_resistance <= 5:
-        zone_bonus, zone_reason = calculate_zone_strength(nearest_resistance)
-        sell_score += int(zone_bonus * 0.8)
-    
-    if near_support and dist_support <= 5:
-        zone_bonus, zone_reason = calculate_zone_strength(nearest_support)
-        buy_score += int(zone_bonus * 0.8)
-    
-    print(f"🎯 Scores: SELL {sell_score}/100 - BUY {buy_score}/100")
-    
-    # ===== 6. DÉCISION AVEC FILTRES DESK =====
-    direction = None
-    final_score = 0
-    
-    # 🔥 VÉTO ABSOLU POUR SELL
-    if sell_score > buy_score:
-        # VÉTO 1: Momentum gate
-        if not momentum['momentum_gate_passed']:
-            pass
-        # VÉTO 2: Structure contre tendance sans break
-        elif "UPTREND" in structure and not swing_break_sell:
-            pass
-        # VÉTO 3: RSI trop bas
-        elif momentum['rsi'] < 52:
-            pass
-        # VÉTO 4: Stochastic lent insuffisant
-        elif momentum['stoch_k_slow'] < 58 and not momentum['stoch_peak_detected']:
-            pass
-        else:
-            # Validation bougie
-            candle_valid, pattern, pattern_conf, candle_reason = validate_candle_for_binary_m1(
-                df, "SELL", require_rejection=True
-            )
-            
-            if candle_valid:
-                direction = "SELL"
-                final_score = sell_score + (pattern_conf / 10)
-    
-    # 🔥 BUY (moins strict)
-    elif buy_score > sell_score:
-        if not momentum['momentum_gate_passed']:
-            pass
-        # VÉTO BUY en downtrend sans break
-        elif "DOWNTREND" in structure and not swing_break_buy:
-            pass
-        else:
-            candle_valid, pattern, pattern_conf, candle_reason = validate_candle_for_binary_m1(
-                df, "BUY", require_rejection=False
-            )
-            
-            if candle_valid:
-                direction = "BUY"
-                final_score = buy_score + (pattern_conf / 10)
-    
-    # ===== 7. DÉCISION FINALE =====
-    if direction and final_score >= 65:
-        # Qualité basée sur score et structure
-        if final_score >= 88 and ("TREND" in structure or swing_break_sell or swing_break_buy):
-            quality = "EXCELLENT"
-            mode = "DESK_MAX"
-        elif final_score >= 78:
-            quality = "HIGH"
-            mode = "DESK_PRO"
-        elif final_score >= 68:
-            quality = "SOLID"
-            mode = "DESK_STANDARD"
-        else:
-            quality = "MINIMUM"
-            mode = "DESK_MIN"
-        
-        direction_display = "CALL" if direction == "BUY" else "PUT"
-        
-        return {
-            'signal': direction_display,
-            'mode': mode,
-            'quality': quality,
-            'score': float(final_score),
-            'reason': f"{direction} | {quality} | Score {final_score:.1f} | {structure}",
-        }
-    
-    # ===== 8. FALLBACK SÉCURISÉ =====
-    return pro_fallback_intelligent(df, signal_count, total_signals_needed)
+    return bool(is_near), distance  # Convertir en bool pour JSON
 
-# ================= FONCTIONS DE COMPATIBILITÉ =================
+def detect_retest_pattern(df, lookback=5):
+    """
+    Détecte les patterns de retest (rouge → vert → vert)
+    Retourne: pattern_type, confidence
+    """
+    if len(df) < lookback + 1:
+        return "NO_PATTERN", 0
+    
+    confidence = 0
+    pattern_type = "NO_PATTERN"
+    
+    # Bougies nécessaires pour le pattern
+    if len(df) >= 4:
+        # Indices: -4 = bougie rouge, -3 et -2 = vertes, -1 = actuelle
+        idx_red = -4
+        idx_green1 = -3
+        idx_green2 = -2
+        
+        # Vérifier le pattern rouge → vert → vert
+        red_candle = df.iloc[idx_red]
+        green1_candle = df.iloc[idx_green1]
+        green2_candle = df.iloc[idx_green2]
+        
+        is_red = bool(red_candle['close'] < red_candle['open'])
+        is_green1 = bool(green1_candle['close'] > green1_candle['open'])
+        is_green2 = bool(green2_candle['close'] > green2_candle['open'])
+        
+        if is_red and is_green1 and is_green2:
+            # Pattern détecté
+            pattern_type = "RETEST_PATTERN"
+            
+            # Calculer la confiance
+            # 1. Les vertes doivent être plus petites que la rouge
+            red_size = float(abs(red_candle['close'] - red_candle['open']))
+            green1_size = float(abs(green1_candle['close'] - green1_candle['open']))
+            green2_size = float(abs(green2_candle['close'] - green2_candle['open']))
+            
+            if green1_size < red_size and green2_size < red_size:
+                confidence += 30
+            
+            # 2. La bougie actuelle doit être sous le haut de la rouge
+            current_candle = df.iloc[-1]
+            if float(current_candle['high']) < float(red_candle['high']):
+                confidence += 30
+            
+            # 3. Les vertes doivent fermer dans la moitié supérieure de la rouge
+            red_body_mid = float((red_candle['open'] + red_candle['close']) / 2)
+            if float(green1_candle['close']) > red_body_mid:
+                confidence += 20
+            if float(green2_candle['close']) > red_body_mid:
+                confidence += 20
+    
+    return pattern_type, confidence
 
-def compute_indicators(df, ema_fast=8, ema_slow=21, rsi_len=14, bb_len=20):
-    """
-    🔥 FONCTION DE COMPATIBILITÉ POUR SIGNAL_BOT
-    Wrapper pour compute_saint_graal_indicators
-    """
-    return compute_saint_graal_indicators(df)
+# ================= INDICATEURS QUALITÉ MAX =================
 
 def compute_saint_graal_indicators(df):
-    """Calcule les indicateurs pour qualité maximale"""
+    """
+    Calcule les indicateurs pour qualité maximale
+    """
     df = df.copy()
     
+    # Assurer les types numériques
     for col in ['open', 'high', 'low', 'close']:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
     
+    # Remplir les NaN
     df.fillna(method='ffill', inplace=True)
     df.fillna(method='bfill', inplace=True)
     
-    # EMA
-    df['ema_5'] = EMAIndicator(close=df['close'], window=5).ema_indicator()
-    df['ema_13'] = EMAIndicator(close=df['close'], window=13).ema_indicator()
+    config = SAINT_GRAAL_CONFIG
     
-    # RSI
-    df['rsi_7'] = RSIIndicator(close=df['close'], window=7).rsi()
+    # ===== 1. INDICATEURS PRINCIPAUX =====
     
-    # Stochastic
+    # EMA 5 & 13
+    df['ema_5'] = EMAIndicator(close=df['close'], window=config['ema_fast']).ema_indicator()
+    df['ema_13'] = EMAIndicator(close=df['close'], window=config['ema_slow']).ema_indicator()
+    df['ema_spread'] = abs(df['ema_5'] - df['ema_13']) / df['close']
+    df['ema_trend'] = (df['ema_5'] > df['ema_13']).astype(int)
+    
+    # RSI 7
+    df['rsi_7'] = RSIIndicator(close=df['close'], window=config['rsi_period']).rsi()
+    df['rsi_trend'] = (df['rsi_7'] > 50).astype(int)
+    
+    # Stochastique 5,3,3
     stoch = StochasticOscillator(
         high=df['high'],
         low=df['low'],
         close=df['close'],
-        window=5,
+        window=config['stoch_period'],
         smooth_window=3
     )
     df['stoch_k'] = stoch.stoch()
     df['stoch_d'] = stoch.stoch_signal()
+    df['stoch_trend'] = (df['stoch_k'] > df['stoch_d']).astype(int)
     
-    # ADX
+    # ADX 10
     adx = ADXIndicator(
         high=df['high'],
         low=df['low'],
@@ -1021,17 +305,81 @@ def compute_saint_graal_indicators(df):
         window=10
     )
     df['adx'] = adx.adx()
+    df['adx_pos'] = adx.adx_pos()
+    df['adx_neg'] = adx.adx_neg()
+    df['adx_trend'] = (df['adx_pos'] > df['adx_neg']).astype(int)
     
-    # Price action
+    # ===== 2. VOLATILITÉ ET RISQUE =====
+    
+    # ATR 10
+    df['atr_10'] = AverageTrueRange(
+        high=df['high'],
+        low=df['low'],
+        close=df['close'],
+        window=10
+    ).average_true_range()
+    
+    # Bollinger Bands
+    bb = BollingerBands(close=df['close'], window=20, window_dev=2)
+    df['bb_upper'] = bb.bollinger_hband()
+    df['bb_middle'] = bb.bollinger_mavg()
+    df['bb_lower'] = bb.bollinger_lband()
+    df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['bb_middle']
+    df['bb_position'] = (df['close'] - df['bb_lower']) / (df['bb_upper'] - df['bb_lower'])
+    
+    # ===== 3. PRICE ACTION DÉTAILLÉE =====
+    
+    # Bougie actuelle
     df['candle_body'] = df['close'] - df['open']
     df['candle_size'] = df['high'] - df['low']
     df['body_ratio'] = abs(df['candle_body']) / df['candle_size'].replace(0, 0.00001)
+    
+    # Mèches
+    df['upper_wick'] = df['high'] - df[['open', 'close']].max(axis=1)
+    df['lower_wick'] = df[['open', 'close']].min(axis=1) - df['low']
+    df['total_wick'] = df['upper_wick'] + df['lower_wick']
+    df['wick_ratio'] = df['total_wick'] / abs(df['candle_body']).replace(0, 0.00001)
+    
+    # Tendance prix
+    df['price_trend'] = (df['close'] > df['open']).astype(int)
+    df['momentum_1'] = df['close'].pct_change(1) * 100
+    
+    # ===== 4. QUALITÉ ET CONVERGENCE =====
+    
+    # Score de convergence (5 indicateurs alignés)
+    df['convergence_raw'] = (
+        df['ema_trend'] + 
+        df['rsi_trend'] + 
+        df['stoch_trend'] + 
+        df['adx_trend'] + 
+        df['price_trend']
+    )
+    df['convergence_score'] = df['convergence_raw'] / 5.0
+    
+    # Qualité globale
+    df['data_quality'] = (
+        (df['close'].notna()).astype(int) +
+        (df['bb_width'] < 0.04).astype(int) +
+        (df['wick_ratio'] < 0.6).astype(int) +
+        (df['body_ratio'] > 0.2).astype(int)
+    ) / 4.0
+    
+    # Remplir les derniers NaN
+    df.fillna(method='ffill', inplace=True)
+    df.fillna(method='bfill', inplace=True)
+    
+    # Convertir tous les types numériques pour éviter les problèmes
+    for col in df.columns:
+        if df[col].dtype in ['float32', 'float64']:
+            df[col] = df[col].astype('float64')
+        elif df[col].dtype in ['int32', 'int64']:
+            df[col] = df[col].astype('int64')
     
     return df
 
 def calculate_signal_quality_score(df):
     """
-    🔥 COMPATIBILITÉ : Calcule un score de qualité global du signal (0-100)
+    Calcule un score de qualité global du signal (0-100)
     """
     if len(df) < 20:
         return 0
@@ -1039,44 +387,752 @@ def calculate_signal_quality_score(df):
     last = df.iloc[-1]
     score = 0
     
-    # Convergence (30 points)
-    if 'rsi_7' in last and 'stoch_k' in last:
-        rsi_ok = 30 < last['rsi_7'] < 70
-        stoch_ok = 20 < last['stoch_k'] < 80
-        if rsi_ok and stoch_ok:
-            score += 30
+    # Convergence (30 points max)
+    convergence = last.get('convergence_score', 0.5)
+    score += float(convergence) * 30
     
-    # Force tendance (25 points)
-    if 'adx' in last:
-        if last['adx'] > 30:
-            score += 25
-        elif last['adx'] > 25:
-            score += 20
-        elif last['adx'] > 20:
-            score += 15
+    # Force de la tendance (25 points)
+    adx = last.get('adx', 0)
+    if adx > 30:
+        score += 25
+    elif adx > 25:
+        score += 20
+    elif adx > 20:
+        score += 15
+    elif adx > 15:
+        score += 10
     
-    # Qualité bougie (15 points)
-    if 'body_ratio' in last:
-        if last['body_ratio'] > 0.4:
-            score += 15
-        elif last['body_ratio'] > 0.3:
-            score += 10
+    # Alignement des indicateurs (20 points)
+    aligned_indicators = 0
+    if last.get('ema_trend', 0) == 1:
+        aligned_indicators += 1
+    if last.get('rsi_trend', 0) == 1:
+        aligned_indicators += 1
+    if last.get('stoch_trend', 0) == 1:
+        aligned_indicators += 1
+    if last.get('adx_trend', 0) == 1:
+        aligned_indicators += 1
+    
+    score += (aligned_indicators / 4) * 20
+    
+    # Volatilité contrôlée (15 points)
+    bb_width = last.get('bb_width', 0)
+    if 0.01 < bb_width < 0.03:
+        score += 15
+    elif 0.005 < bb_width < 0.04:
+        score += 10
+    elif 0.002 < bb_width < 0.05:
+        score += 5
+    
+    # Qualité de la bougie (10 points)
+    body_ratio = last.get('body_ratio', 0)
+    wick_ratio = last.get('wick_ratio', 0)
+    
+    if body_ratio > 0.4 and wick_ratio < 0.3:
+        score += 10
+    elif body_ratio > 0.3 and wick_ratio < 0.4:
+        score += 5
     
     return min(score, 100)
 
+# ================= FILTRES ANTI-MANIPULATION =================
+
 def check_anti_manipulation(df, strict_mode=True):
-    """
-    🔥 COMPATIBILITÉ : Vérifie les conditions anti-manipulation
-    """
+    """Vérifie les conditions anti-manipulation"""
     if len(df) < 15:
         return False, "Données insuffisantes"
     
+    last = df.iloc[-1]
+    anti = SAINT_GRAAL_CONFIG['anti_manip']
+    
+    # 1. Qualité des données minimale
+    min_quality = 0.85 if strict_mode else anti['min_data_quality']
+    if last['data_quality'] < min_quality:
+        return False, f"Qualité données faible: {last['data_quality']:.2f}"
+    
+    # 2. Mèches suspectes
+    max_wick = anti['max_wick_ratio'] * (0.9 if strict_mode else 1.0)
+    if last['wick_ratio'] > max_wick:
+        return False, f"Mèche suspecte: {last['wick_ratio']:.1%}"
+    
+    # 3. Bougie anormale
+    if last['candle_size'] > last['atr_10'] * 3:
+        return False, f"Bougie trop grande: {last['candle_size']:.5f} > ATRx3"
+    
+    # 4. Volatilité excessive
+    if last['bb_width'] > anti['max_volatility']:
+        return False, f"Volatilité excessive: {last['bb_width']:.3%}"
+    
+    # 5. EMA trop plates
+    if last['ema_spread'] < anti['min_ema_spread']:
+        return False, f"EMA plates: écart {last['ema_spread']:.5%}"
+    
+    # 6. ADX trop faible (sauf mode non-strict)
+    if strict_mode and last['adx'] < 15:
+        return False, f"ADX faible: {last['adx']:.1f}"
+    
     return True, "OK"
 
+# ================= STRATÉGIE 8 SIGNAUX AVEC ANALYSE STRUCTURE =================
+
+def rule_signal_saint_graal_with_guarantee(df, signal_count=0, total_signals_needed=8):
+    """
+    STRATÉGIE - 8 signaux qualité maximale avec analyse de structure
+    """
+    
+    if len(df) < 30:
+        print("[STRATEGIE] ⚠️ Données insuffisantes")
+        return None
+    
+    target_signals = SAINT_GRAAL_CONFIG['target_signals']
+    
+    print(f"\n[STRATEGIE] 🎯 Signal #{signal_count+1}/{target_signals}")
+    
+    # ===== ANALYSE STRUCTURE MARCHÉ =====
+    structure, strength = analyze_market_structure(df, 15)
+    is_near_high, distance_to_high = is_near_swing_high(df, 20)
+    pattern_type, pattern_confidence = detect_retest_pattern(df, 5)
+    
+    print(f"[STRUCTURE] {structure} (force: {strength:.1f}%)")
+    print(f"[STRUCTURE] Near high: {is_near_high} ({distance_to_high:.2f}%)")
+    print(f"[PATTERN] {pattern_type} (confiance: {pattern_confidence}%)")
+    
+    # ===== 1. QUALITÉ MAXIMALE (signaux 1-6) =====
+    if signal_count < 6:
+        print(f"[STRATEGIE] 🔵 Mode QUALITÉ MAXIMALE")
+        
+        manip_ok, manip_reason = check_anti_manipulation(df, strict_mode=True)
+        if not manip_ok:
+            print(f"[STRATEGIE] ⚠️ Anti-manip: {manip_reason}")
+        
+        max_quality_signal = rule_signal_max_quality(df, structure, is_near_high, pattern_type, pattern_confidence)
+        if max_quality_signal:
+            quality_score = calculate_signal_quality(df, max_quality_signal)
+            min_score = SAINT_GRAAL_CONFIG['max_quality']['min_quality_score']
+            
+            if quality_score >= min_score:
+                print(f"[STRATEGIE] ✅ Signal QUALITÉ MAX #{signal_count+1} | Score: {quality_score}/100")
+                return {
+                    'signal': max_quality_signal,
+                    'mode': 'MAX_QUALITY',
+                    'quality': 'EXCELLENT',
+                    'score': quality_score,
+                    'structure_info': {
+                        'market_structure': structure,
+                        'near_high': is_near_high,
+                        'distance_to_high': float(distance_to_high),
+                        'pattern': pattern_type,
+                        'pattern_confidence': pattern_confidence,
+                        'trend_strength': float(strength)
+                    }
+                }
+    
+    # ===== 2. QUALITÉ ÉLEVÉE =====
+    print(f"[STRATEGIE] 🟡 Mode QUALITÉ ÉLEVÉE")
+    
+    manip_ok, manip_reason = check_anti_manipulation(df, strict_mode=False)
+    if not manip_ok:
+        print(f"[STRATEGIE] ⚠️ Anti-manip (toléré): {manip_reason}")
+    
+    high_quality_signal = rule_signal_high_quality(df, structure, is_near_high)
+    if high_quality_signal:
+        quality_score = calculate_signal_quality_for_mode(df, high_quality_signal, 'HIGH_QUALITY')
+        min_score = SAINT_GRAAL_CONFIG['high_quality']['min_quality_score']
+        
+        if quality_score >= min_score:
+            print(f"[STRATEGIE] ✅ Signal QUALITÉ ÉLEVÉE #{signal_count+1} | Score: {quality_score}/100")
+            return {
+                'signal': high_quality_signal,
+                'mode': 'HIGH_QUALITY',
+                'quality': 'HIGH',
+                'score': quality_score,
+                'structure_info': {
+                    'market_structure': structure,
+                    'near_high': is_near_high,
+                    'distance_to_high': float(distance_to_high),
+                    'pattern': pattern_type,
+                    'pattern_confidence': pattern_confidence,
+                    'trend_strength': float(strength)
+                }
+            }
+    
+    # ===== 3. MODE GARANTIE =====
+    print(f"[STRATEGIE] 🟠 Mode GARANTIE")
+    
+    guarantee_signal = rule_signal_guarantee_mode(df, structure, is_near_high)
+    if guarantee_signal:
+        quality_score = calculate_signal_quality_for_mode(df, guarantee_signal, 'GUARANTEE')
+        min_score = SAINT_GRAAL_CONFIG['guarantee_mode']['min_quality_score']
+        
+        if quality_score >= min_score:
+            print(f"[STRATEGIE] ✅ Signal GARANTIE #{signal_count+1} | Score: {quality_score}/100")
+            return {
+                'signal': guarantee_signal,
+                'mode': 'GUARANTEE',
+                'quality': 'ACCEPTABLE',
+                'score': quality_score,
+                'structure_info': {
+                    'market_structure': structure,
+                    'near_high': is_near_high,
+                    'distance_to_high': float(distance_to_high),
+                    'pattern': pattern_type,
+                    'pattern_confidence': pattern_confidence,
+                    'trend_strength': float(strength)
+                }
+            }
+    
+    # ===== 4. FORCÉ =====
+    print(f"[STRATEGIE] ⚡ Mode FORCÉ pour garantir le signal #{signal_count+1}")
+    
+    forced_signal = force_signal_with_structure(df, structure, is_near_high)
+    if forced_signal:
+        print(f"[STRATEGIE] ✅ Signal FORCÉ #{signal_count+1}")
+        return {
+            'signal': forced_signal,
+            'mode': 'FORCED',
+            'quality': 'MINIMUM',
+            'score': 50,
+            'structure_info': {
+                'market_structure': structure,
+                'near_high': is_near_high,
+                'distance_to_high': float(distance_to_high),
+                'pattern': pattern_type,
+                'pattern_confidence': pattern_confidence,
+                'trend_strength': float(strength)
+            }
+        }
+    
+    print(f"[STRATEGIE] ❌ ERREUR: Impossible de générer un signal")
+    return None
+
+def rule_signal_max_quality(df, structure, is_near_high, pattern_type, pattern_confidence):
+    """QUALITÉ MAXIMALE avec analyse de structure"""
+    if len(df) < 25:
+        return None
+    
+    config = SAINT_GRAAL_CONFIG['max_quality']
+    last = df.iloc[-1]
+    
+    # === FILTRES ABSOLUS ===
+    if last['data_quality'] < 0.85:
+        return None
+    if last['adx'] < config['adx_min']:
+        return None
+    if last['convergence_raw'] < 3:
+        return None
+    
+    # === ANALYSE STRUCTURE ===
+    call_penalty = 0.0
+    put_bonus = 0.0
+    
+    # 1. Si près d'un swing high, pénalité pour CALL
+    if is_near_high:
+        call_penalty -= 2.0
+        put_bonus += 1.5
+    
+    # 2. Si pattern de retest, forte pénalité CALL
+    if pattern_type == "RETEST_PATTERN" and pattern_confidence > 50:
+        call_penalty -= 3.0
+        put_bonus += 2.0
+    
+    # 3. Si UPTREND mature, prudence
+    if "UPTREND" in structure and "NEAR_HIGH" in structure:
+        call_penalty -= 1.5
+        put_bonus += 1.0
+    
+    # 4. Si DOWNTREND et près d'un low, bonus CALL
+    if "DOWNTREND" in structure and "NEAR_LOW" in structure:
+        call_penalty += 1.5
+    
+    # === ANALYSE CALL ===
+    call_points = 0.0
+    
+    # 1. EMA alignées
+    if last['ema_5'] > last['ema_13'] and last['ema_spread'] > 0.001:
+        call_points += 3.0
+    elif last['ema_5'] > last['ema_13']:
+        call_points += 2.0
+    
+    # 2. RSI optimal
+    if 58 < last['rsi_7'] < config['rsi_overbought']:
+        call_points += 2.0
+    elif 55 < last['rsi_7'] < 70:
+        call_points += 1.0
+    
+    # 3. Stochastique
+    if last['stoch_k'] > last['stoch_d'] and last['stoch_k'] < config['stoch_overbought']:
+        call_points += 2.0
+    elif last['stoch_k'] > last['stoch_d']:
+        call_points += 1.0
+    
+    # 4. ADX
+    if last['adx_pos'] > last['adx_neg'] and last['adx_pos'] > 25:
+        call_points += 2.0
+    elif last['adx_pos'] > last['adx_neg']:
+        call_points += 1.0
+    
+    # 5. Bougie haussière
+    if last['price_trend'] == 1:
+        call_points += 1.0
+    
+    # 6. Qualité bougie
+    if last['body_ratio'] > config['min_body_ratio']:
+        call_points += 0.5
+    if last['wick_ratio'] < config['max_wick_ratio']:
+        call_points += 0.5
+    
+    # Appliquer pénalités structure
+    call_points += call_penalty
+    
+    # === ANALYSE PUT ===
+    put_points = 0.0
+    
+    # 1. EMA alignées
+    if last['ema_5'] < last['ema_13'] and last['ema_spread'] > 0.001:
+        put_points += 3.0
+    elif last['ema_5'] < last['ema_13']:
+        put_points += 2.0
+    
+    # 2. RSI optimal
+    if config['rsi_oversold'] < last['rsi_7'] < 42:
+        put_points += 2.0
+    elif 30 < last['rsi_7'] < 45:
+        put_points += 1.0
+    
+    # 3. Stochastique
+    if last['stoch_k'] < last['stoch_d'] and last['stoch_k'] > config['stoch_oversold']:
+        put_points += 2.0
+    elif last['stoch_k'] < last['stoch_d']:
+        put_points += 1.0
+    
+    # 4. ADX
+    if last['adx_neg'] > last['adx_pos'] and last['adx_neg'] > 25:
+        put_points += 2.0
+    elif last['adx_neg'] > last['adx_pos']:
+        put_points += 1.0
+    
+    # 5. Bougie baissière
+    if last['price_trend'] == 0:
+        put_points += 1.0
+    
+    # 6. Qualité bougie
+    if last['body_ratio'] > config['min_body_ratio']:
+        put_points += 0.5
+    if last['wick_ratio'] < config['max_wick_ratio']:
+        put_points += 0.5
+    
+    # Appliquer bonus structure
+    put_points += put_bonus
+    
+    # === DÉCISION ===
+    min_points = config['min_confluence_points']
+    
+    print(f"[STRUCTURE] CALL: {call_points:.1f}, PUT: {put_points:.1f}, Min: {min_points}")
+    print(f"[STRUCTURE] Call penalty: {call_penalty:.1f}, Put bonus: {put_bonus:.1f}")
+    
+    # Augmenter seuil pour CALL si près d'un high
+    min_points_call = min_points + (1 if is_near_high else 0)
+    
+    if call_points >= min_points_call and call_points > put_points:
+        return 'CALL'
+    if put_points >= min_points and put_points > call_points:
+        return 'PUT'
+    
+    # Si égalité, décider par structure
+    if call_points == put_points and call_points >= min_points - 1:
+        if is_near_high:
+            return 'PUT'
+        elif "DOWNTREND" in structure and "NEAR_LOW" in structure:
+            return 'CALL'
+        else:
+            if last['rsi_7'] > 50:
+                return 'CALL'
+            else:
+                return 'PUT'
+    
+    return None
+
+def rule_signal_high_quality(df, structure, is_near_high):
+    """QUALITÉ ÉLEVÉE avec analyse structure"""
+    if len(df) < 20:
+        return None
+    
+    config = SAINT_GRAAL_CONFIG['high_quality']
+    last = df.iloc[-1]
+    
+    if last['data_quality'] < 0.75:
+        return None
+    if last['adx'] < config['adx_min']:
+        return None
+    
+    # Ajustements structure
+    call_adj = 0
+    put_adj = 0
+    
+    if is_near_high:
+        call_adj -= 1
+        put_adj += 1
+    
+    # Conditions CALL
+    call_conditions = [
+        bool(last['ema_5'] > last['ema_13']),
+        bool(last['rsi_7'] > 52),
+        bool(last['stoch_k'] > last['stoch_d']),
+        bool(last['adx_pos'] > last['adx_neg']),
+        bool(last['price_trend'] == 1),
+        bool(last['body_ratio'] > config['min_body_ratio']),
+        bool(last['wick_ratio'] < config['max_wick_ratio']),
+    ]
+    
+    # Conditions PUT
+    put_conditions = [
+        bool(last['ema_5'] < last['ema_13']),
+        bool(last['rsi_7'] < 48),
+        bool(last['stoch_k'] < last['stoch_d']),
+        bool(last['adx_neg'] > last['adx_pos']),
+        bool(last['price_trend'] == 0),
+        bool(last['body_ratio'] > config['min_body_ratio']),
+        bool(last['wick_ratio'] < config['max_wick_ratio']),
+    ]
+    
+    call_score = sum(call_conditions) + call_adj
+    put_score = sum(put_conditions) + put_adj
+    
+    min_conditions = config['min_confluence_points']
+    
+    if call_score >= min_conditions and call_score > put_score:
+        return 'CALL'
+    if put_score >= min_conditions and put_score > call_score:
+        return 'PUT'
+    
+    return None
+
+def rule_signal_guarantee_mode(df, structure, is_near_high):
+    """MODE GARANTIE avec analyse structure"""
+    if len(df) < 15:
+        return None
+    
+    config = SAINT_GRAAL_CONFIG['guarantee_mode']
+    last = df.iloc[-1]
+    
+    if last['data_quality'] < 0.65:
+        return None
+    
+    # Ajustements structure forts
+    call_adj = 0
+    put_adj = 0
+    
+    if is_near_high:
+        call_adj -= 2
+        put_adj += 2
+    
+    # Conditions simples
+    call_conditions = [
+        bool(last['ema_5'] > last['ema_13']),
+        bool(last['rsi_7'] > 50),
+        bool(last['stoch_k'] > last['stoch_d']),
+        bool(last['price_trend'] == 1),
+    ]
+    
+    put_conditions = [
+        bool(last['ema_5'] < last['ema_13']),
+        bool(last['rsi_7'] < 50),
+        bool(last['stoch_k'] < last['stoch_d']),
+        bool(last['price_trend'] == 0),
+    ]
+    
+    call_score = sum(call_conditions) + call_adj
+    put_score = sum(put_conditions) + put_adj
+    
+    min_conditions = config['min_confluence_points']
+    
+    if call_score >= min_conditions:
+        return 'CALL'
+    if put_score >= min_conditions:
+        return 'PUT'
+    
+    # Dernier recours
+    if is_near_high:
+        return 'PUT'
+    else:
+        if last['rsi_7'] > 50:
+            return 'CALL'
+        else:
+            return 'PUT'
+
+def force_signal_with_structure(df, structure, is_near_high):
+    """Force un signal en considérant la structure"""
+    if len(df) < 10:
+        return None
+    
+    last = df.iloc[-1]
+    
+    # Si près d'un swing high, forcer PUT
+    if is_near_high:
+        return 'PUT'
+    
+    # Si DOWNTREND et près d'un low, forcer CALL
+    if "DOWNTREND" in structure and "NEAR_LOW" in structure:
+        return 'CALL'
+    
+    # Sinon basé sur RSI + EMA
+    if last['rsi_7'] > 50 and last['ema_5'] > last['ema_13']:
+        return 'CALL'
+    elif last['rsi_7'] < 50 and last['ema_5'] < last['ema_13']:
+        return 'PUT'
+    
+    # Default
+    if last['rsi_7'] > 50:
+        return 'CALL'
+    else:
+        return 'PUT'
+
+# ================= FONCTIONS DE QUALITÉ =================
+
+def calculate_signal_quality(df, direction):
+    """Calcule un score de qualité (0-100)"""
+    if len(df) < 20:
+        return 0
+    
+    last = df.iloc[-1]
+    score = 0
+    
+    # Convergence (40 points)
+    convergence = last['convergence_raw']
+    if convergence >= 4:
+        score += 40
+    elif convergence >= 3:
+        score += 30
+    elif convergence >= 2:
+        score += 20
+    
+    # Force tendance (30 points)
+    if last['adx'] > 30:
+        score += 30
+    elif last['adx'] > 25:
+        score += 25
+    elif last['adx'] > 20:
+        score += 20
+    elif last['adx'] > 15:
+        score += 15
+    
+    # Qualité bougie (20 points)
+    if last['body_ratio'] > 0.5:
+        score += 15
+    elif last['body_ratio'] > 0.4:
+        score += 10
+    elif last['body_ratio'] > 0.3:
+        score += 5
+    
+    if last['wick_ratio'] < 0.3:
+        score += 5
+    
+    # Alignement (10 points)
+    aligned = 0
+    if direction == 'CALL':
+        if last['ema_5'] > last['ema_13']:
+            aligned += 1
+        if last['rsi_trend'] == 1:
+            aligned += 1
+        if last['stoch_trend'] == 1:
+            aligned += 1
+        if last['adx_trend'] == 1:
+            aligned += 1
+    else:
+        if last['ema_5'] < last['ema_13']:
+            aligned += 1
+        if last['rsi_trend'] == 0:
+            aligned += 1
+        if last['stoch_trend'] == 0:
+            aligned += 1
+        if last['adx_trend'] == 0:
+            aligned += 1
+    
+    score += (aligned / 4) * 10
+    
+    return min(score, 100)
+
+def calculate_signal_quality_for_mode(df, direction, mode):
+    """Calcule le score de qualité adapté au mode"""
+    last = df.iloc[-1]
+    score = 0
+    
+    base_scores = {
+        'MAX_QUALITY': 80,
+        'HIGH_QUALITY': 70,
+        'GUARANTEE': 60
+    }
+    
+    score = base_scores.get(mode, 60)
+    
+    # Bonus indicateurs
+    if direction == 'CALL':
+        if last['ema_5'] > last['ema_13']:
+            score += 5
+        if last['rsi_7'] > 55:
+            score += 5
+        if last['stoch_k'] > last['stoch_d']:
+            score += 5
+        if last['adx_pos'] > last['adx_neg']:
+            score += 5
+    else:
+        if last['ema_5'] < last['ema_13']:
+            score += 5
+        if last['rsi_7'] < 45:
+            score += 5
+        if last['stoch_k'] < last['stoch_d']:
+            score += 5
+        if last['adx_neg'] > last['adx_pos']:
+            score += 5
+    
+    # Bonus convergence
+    if last['convergence_raw'] >= 3:
+        score += 5
+    
+    return min(score, 100)
+
+def format_signal_reason(direction, confidence, indicators):
+    """Formate la raison du signal"""
+    last = indicators.iloc[-1]
+    quality_score = calculate_signal_quality_score(indicators)
+    
+    reason_parts = [f"🎯 {direction}"]
+    
+    # Évaluation qualité
+    if quality_score >= 90:
+        reason_parts.append("⭐⭐⭐⭐⭐")
+    elif quality_score >= 85:
+        reason_parts.append("⭐⭐⭐⭐")
+    elif quality_score >= 80:
+        reason_parts.append("⭐⭐⭐")
+    elif quality_score >= 75:
+        reason_parts.append("⭐⭐")
+    else:
+        reason_parts.append("⭐")
+    
+    # Indicateurs clés
+    reason_parts.append(f"RSI7: {last['rsi_7']:.1f}")
+    reason_parts.append(f"ADX: {last['adx']:.1f}")
+    
+    # Convergence
+    if last['convergence_raw'] >= 4:
+        reason_parts.append("CONV: EXCELLENTE")
+    elif last['convergence_raw'] >= 3:
+        reason_parts.append("CONV: BONNE")
+    
+    # Confiance
+    reason_parts.append(f"CONF: {int(confidence)}%")
+    
+    return " | ".join(reason_parts)
+
+# ================= FONCTIONS DE COMPATIBILITÉ =================
+
+def compute_indicators(df, ema_fast=8, ema_slow=21, rsi_len=14, bb_len=20):
+    """Wrapper pour compatibilité"""
+    return compute_saint_graal_indicators(df)
+
+def rule_signal(df):
+    """Version par défaut"""
+    result = rule_signal_saint_graal_with_guarantee(df, signal_count=0, total_signals_needed=8)
+    return result['signal'] if result else None
+
+def get_signal_with_metadata(df, signal_count=0, total_signals=8):
+    """Fonction principale pour le bot - CORRIGÉ POUR JSON"""
+    result = rule_signal_saint_graal_with_guarantee(df, signal_count, total_signals)
+    
+    if result:
+        # Analyser structure pour rapport
+        structure, strength = analyze_market_structure(df, 15)
+        is_near_high, distance = is_near_swing_high(df, 20)
+        pattern_type, pattern_conf = detect_retest_pattern(df, 5)
+        
+        # Construire raison avec info structure
+        base_reason = format_signal_reason(result['signal'], result['score'], df)
+        
+        # Ajouter warnings structure
+        warnings = []
+        if is_near_high and result['signal'] == 'CALL':
+            warnings.append(f"⚠️ NEAR HIGH ({distance:.1f}%)")
+        if pattern_type == "RETEST_PATTERN" and pattern_conf > 50:
+            warnings.append(f"⚠️ RETEST PATTERN")
+        
+        if warnings:
+            reason = base_reason + " | " + " | ".join(warnings)
+        else:
+            reason = base_reason
+        
+        # Préparer les données structure pour JSON
+        structure_info = {
+            'market_structure': str(structure),
+            'strength': float(strength),
+            'near_swing_high': bool(is_near_high),
+            'distance_to_high': float(distance),
+            'pattern_detected': str(pattern_type),
+            'pattern_confidence': int(pattern_conf)
+        }
+        
+        mode_display = {
+            'MAX_QUALITY': '🔵 STRICT',
+            'HIGH_QUALITY': '🟡 HIGH',
+            'GUARANTEE': '🟠 GARANTIE',
+            'FORCED': '⚡ FORCED'
+        }.get(result['mode'], '⚪ STANDARD')
+        
+        quality_text = {
+            'EXCELLENT': 'EXCELLENTE',
+            'HIGH': 'ÉLEVÉE',
+            'ACCEPTABLE': 'ACCEPTABLE',
+            'MINIMUM': 'MINIMUM'
+        }.get(result['quality'], 'STANDARD')
+        
+        return {
+            'direction': result['signal'],
+            'mode': result['mode'],
+            'quality': result['quality'],
+            'score': float(result['score']),  # Convertir en float pour JSON
+            'reason': reason,
+            'structure_info': structure_info,
+            'session_info': {
+                'current_signal': signal_count + 1,
+                'total_signals': total_signals,
+                'mode_used': result['mode'],
+                'quality_level': result['quality']
+            }
+        }
+    
+    # Fallback absolu
+    last = df.iloc[-1] if len(df) > 0 else None
+    if last is not None:
+        forced_direction = 'CALL' if last.get('rsi_7', 50) > 50 else 'PUT'
+    else:
+        forced_direction = 'CALL'
+    
+    return {
+        'direction': forced_direction,
+        'mode': 'FALLBACK',
+        'quality': 'MINIMUM',
+        'score': 50.0,
+        'reason': f"FALLBACK {forced_direction} - Aucun signal trouvé",
+        'structure_info': {
+            'market_structure': 'UNKNOWN',
+            'strength': 0.0,
+            'near_swing_high': False,
+            'distance_to_high': 0.0,
+            'pattern_detected': 'NO_PATTERN',
+            'pattern_confidence': 0
+        },
+        'session_info': {
+            'current_signal': signal_count + 1,
+            'total_signals': total_signals,
+            'mode_used': 'FALLBACK',
+            'quality_level': 'MINIMUM'
+        }
+    }
+
+# ================= FONCTIONS DE TIMING =================
+
 def is_kill_zone_optimal(hour_utc):
-    """
-    🔥 COMPATIBILITÉ : Heures de trading optimales
-    """
+    """Heures de trading optimales"""
     if 7 <= hour_utc < 10:
         return True, "London Open", 10
     if 13 <= hour_utc < 16:
@@ -1087,166 +1143,3 @@ def is_kill_zone_optimal(hour_utc):
         return True, "Asia Close", 6
     
     return False, "Heure non optimale", 3
-
-def rule_signal(df):
-    """
-    🔥 COMPATIBILITÉ : Version simple pour signal_bot
-    """
-    result = rule_signal_saint_graal_m1_pro_v2(df, signal_count=0, total_signals_needed=8)
-    return result['signal'] if result else 'CALL'
-
-def get_signal_with_metadata(df, signal_count=0, total_signals=8):
-    """
-    🔥 FONCTION PRINCIPALE DE COMPATIBILITÉ
-    Utilisée par signal_bot.py
-    """
-    try:
-        if df is None or len(df) < 30:
-            return create_minimal_fallback("Données insuffisantes", signal_count, total_signals)
-        
-        # Utiliser la version PRO
-        result = rule_signal_saint_graal_m1_pro_v2(df, signal_count, total_signals)
-        
-        if result:
-            direction_display = result['signal']
-            quality_display = {
-                'EXCELLENT': '⭐⭐⭐⭐⭐',
-                'HIGH': '⭐⭐⭐⭐',
-                'SOLID': '⭐⭐⭐',
-                'MINIMUM': '⭐⭐',
-                'CRITICAL': '⭐'
-            }.get(result['quality'], '⭐')
-            
-            reason = f"{quality_display} {direction_display} | Score: {result['score']:.0f}/100"
-            
-            return {
-                'direction': direction_display,
-                'mode': result['mode'],
-                'quality': result['quality'],
-                'score': float(result['score']),
-                'reason': reason,
-                'session_info': {
-                    'current_signal': signal_count + 1,
-                    'total_signals': total_signals,
-                    'mode_used': result['mode'],
-                }
-            }
-        
-    except Exception as e:
-        print(f"❌ Erreur dans get_signal_with_metadata: {str(e)}")
-    
-    # Fallback absolu
-    return {
-        'direction': 'CALL',
-        'mode': 'ERROR',
-        'quality': 'CRITICAL',
-        'score': 45.0,
-        'reason': 'Erreur système',
-        'session_info': {
-            'current_signal': signal_count + 1,
-            'total_signals': total_signals,
-            'mode_used': 'ERROR',
-        }
-    }
-
-# ================= FONCTION DE COMPATIBILITÉ POUR SIGNAL_BOT =================
-
-def rule_signal_saint_graal_with_guarantee(df, signal_count=0, total_signals_needed=8):
-    """
-    🔥 FONCTION DE COMPATIBILITÉ : Version compatible pour signal_bot.py
-    Wrapper autour de rule_signal_saint_graal_m1_pro_v2
-    """
-    try:
-        # Utiliser la logique principale
-        result = rule_signal_saint_graal_m1_pro_v2(df, signal_count, total_signals_needed)
-        
-        # Convertir en format compatible avec l'ancien code
-        direction_map = {
-            'CALL': 'BUY',
-            'PUT': 'SELL'
-        }
-        
-        direction_display = result['signal']
-        raw_direction = direction_map.get(direction_display, direction_display)
-        
-        # Calculer la confiance basée sur le score
-        confidence = min(100, max(40, int(result['score'])))
-        
-        # Déterminer la qualité textuelle
-        quality_map = {
-            'EXCELLENT': 'HIGH',
-            'HIGH': 'HIGH',
-            'SOLID': 'MEDIUM',
-            'MINIMUM': 'LOW',
-            'CRITICAL': 'VERY_LOW'
-        }
-        
-        quality = quality_map.get(result['quality'], 'LOW')
-        
-        # Format de sortie compatible
-        return {
-            'signal': raw_direction,  # 'BUY' ou 'SELL'
-            'confidence': confidence,
-            'quality': quality,
-            'score': float(result['score']),
-            'mode': result['mode'],
-            'reason': result['reason'],
-            'direction': direction_display,  # 'CALL' ou 'PUT' pour compatibilité
-            'timestamp': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
-            'execution_time': datetime.now(timezone.utc).strftime('%H:%M:%S')
-        }
-        
-    except Exception as e:
-        print(f"❌ Erreur dans rule_signal_saint_graal_with_guarantee: {str(e)}")
-        
-        # Fallback avec logique simple
-        try:
-            simple_result = rule_signal(df)
-            return {
-                'signal': 'BUY' if simple_result == 'CALL' else 'SELL',
-                'confidence': 50,
-                'quality': 'LOW',
-                'score': 50.0,
-                'mode': 'FALLBACK',
-                'reason': f'Erreur: {str(e)[:50]} - Utilisation fallback simple',
-                'direction': simple_result,
-                'timestamp': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
-                'execution_time': datetime.now(timezone.utc).strftime('%H:%M:%S')
-            }
-        except:
-            # Fallback absolu
-            return {
-                'signal': 'BUY',
-                'confidence': 45,
-                'quality': 'VERY_LOW',
-                'score': 45.0,
-                'mode': 'CRITICAL_FALLBACK',
-                'reason': 'Erreur critique - Fallback absolu',
-                'direction': 'CALL',
-                'timestamp': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
-                'execution_time': datetime.now(timezone.utc).strftime('%H:%M:%S')
-            }
-
-# ================= ALIAS POUR COMPATIBILITÉ MAXIMALE =================
-
-# Alias pour compatibilité avec différents noms de fonction
-generate_signal = rule_signal_saint_graal_m1_pro_v2
-get_signal = rule_signal_saint_graal_with_guarantee
-rule_signal_saint_graal = rule_signal_saint_graal_m1_pro_v2
-
-if __name__ == "__main__":
-    print("🚀 DESK PRO BINAIRE M1 - VERSION 4.2 COMPATIBLE")
-    print("📊 Compatibilité totale avec signal_bot.py")
-    print("\n✅ Fonctions de compatibilité ajoutées:")
-    print("   - compute_indicators")
-    print("   - calculate_signal_quality_score")
-    print("   - check_anti_manipulation")
-    print("   - is_kill_zone_optimal")
-    print("   - rule_signal")
-    print("   - get_signal_with_metadata")
-    print("   - rule_signal_saint_graal_with_guarantee (NOUVELLE)")
-    print("   - generate_signal (alias)")
-    print("   - get_signal (alias)")
-    print("   - rule_signal_saint_graal (alias)")
-    print("\n🎯 Prêt pour déploiement sur Render!")
-    print("✅ ImportError résolu: rule_signal_saint_graal_with_guarantee est maintenant disponible")
