@@ -1,5 +1,4 @@
-"""
-utils.py - STRATÉGIE BINAIRE M1 PRO - VERSION 4.2 COMPATIBLE
+"""utils.py - STRATÉGIE BINAIRE M1 PRO - VERSION 4.2 COMPATIBLE
 Niveau desk pro avec compatibilité totale signal_bot
 """
 
@@ -1150,6 +1149,91 @@ def get_signal_with_metadata(df, signal_count=0, total_signals=8):
         }
     }
 
+# ================= FONCTION DE COMPATIBILITÉ POUR SIGNAL_BOT =================
+
+def rule_signal_saint_graal_with_guarantee(df, signal_count=0, total_signals_needed=8):
+    """
+    🔥 FONCTION DE COMPATIBILITÉ : Version compatible pour signal_bot.py
+    Wrapper autour de rule_signal_saint_graal_m1_pro_v2
+    """
+    try:
+        # Utiliser la logique principale
+        result = rule_signal_saint_graal_m1_pro_v2(df, signal_count, total_signals_needed)
+        
+        # Convertir en format compatible avec l'ancien code
+        direction_map = {
+            'CALL': 'BUY',
+            'PUT': 'SELL'
+        }
+        
+        direction_display = result['signal']
+        raw_direction = direction_map.get(direction_display, direction_display)
+        
+        # Calculer la confiance basée sur le score
+        confidence = min(100, max(40, int(result['score'])))
+        
+        # Déterminer la qualité textuelle
+        quality_map = {
+            'EXCELLENT': 'HIGH',
+            'HIGH': 'HIGH',
+            'SOLID': 'MEDIUM',
+            'MINIMUM': 'LOW',
+            'CRITICAL': 'VERY_LOW'
+        }
+        
+        quality = quality_map.get(result['quality'], 'LOW')
+        
+        # Format de sortie compatible
+        return {
+            'signal': raw_direction,  # 'BUY' ou 'SELL'
+            'confidence': confidence,
+            'quality': quality,
+            'score': float(result['score']),
+            'mode': result['mode'],
+            'reason': result['reason'],
+            'direction': direction_display,  # 'CALL' ou 'PUT' pour compatibilité
+            'timestamp': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
+            'execution_time': datetime.now(timezone.utc).strftime('%H:%M:%S')
+        }
+        
+    except Exception as e:
+        print(f"❌ Erreur dans rule_signal_saint_graal_with_guarantee: {str(e)}")
+        
+        # Fallback avec logique simple
+        try:
+            simple_result = rule_signal(df)
+            return {
+                'signal': 'BUY' if simple_result == 'CALL' else 'SELL',
+                'confidence': 50,
+                'quality': 'LOW',
+                'score': 50.0,
+                'mode': 'FALLBACK',
+                'reason': f'Erreur: {str(e)[:50]} - Utilisation fallback simple',
+                'direction': simple_result,
+                'timestamp': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
+                'execution_time': datetime.now(timezone.utc).strftime('%H:%M:%S')
+            }
+        except:
+            # Fallback absolu
+            return {
+                'signal': 'BUY',
+                'confidence': 45,
+                'quality': 'VERY_LOW',
+                'score': 45.0,
+                'mode': 'CRITICAL_FALLBACK',
+                'reason': 'Erreur critique - Fallback absolu',
+                'direction': 'CALL',
+                'timestamp': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
+                'execution_time': datetime.now(timezone.utc).strftime('%H:%M:%S')
+            }
+
+# ================= ALIAS POUR COMPATIBILITÉ MAXIMALE =================
+
+# Alias pour compatibilité avec différents noms de fonction
+generate_signal = rule_signal_saint_graal_m1_pro_v2
+get_signal = rule_signal_saint_graal_with_guarantee
+rule_signal_saint_graal = rule_signal_saint_graal_m1_pro_v2
+
 if __name__ == "__main__":
     print("🚀 DESK PRO BINAIRE M1 - VERSION 4.2 COMPATIBLE")
     print("📊 Compatibilité totale avec signal_bot.py")
@@ -1160,4 +1244,9 @@ if __name__ == "__main__":
     print("   - is_kill_zone_optimal")
     print("   - rule_signal")
     print("   - get_signal_with_metadata")
+    print("   - rule_signal_saint_graal_with_guarantee (NOUVELLE)")
+    print("   - generate_signal (alias)")
+    print("   - get_signal (alias)")
+    print("   - rule_signal_saint_graal (alias)")
     print("\n🎯 Prêt pour déploiement sur Render!")
+    print("✅ ImportError résolu: rule_signal_saint_graal_with_guarantee est maintenant disponible")
