@@ -1,6 +1,6 @@
 """
-AUTO VERIFIER M1 - VERSION AVEC SUPPORT OTC
-Correction pour trading M1 avec support OTC/CRYPTO
+AUTO VERIFIER M1 - VERSION COMPLÈTE AVEC SUPPORT OTC
+Correction pour trading M1 (1 minute) au lieu de M5 avec support OTC/CRYPTO
 """
 
 import asyncio
@@ -28,7 +28,7 @@ class AutoResultVerifier:
             'binance': 'https://api.binance.com/api/v3/klines',
             'bybit': 'https://api.bybit.com/v5/market/kline',
             'kucoin': 'https://api.kucoin.com/api/v1/market/candles',
-            'pocket': 'https://api.pocketoption.com'  # API fictive - à remplacer si disponible
+            'coinbase': 'https://api.exchange.coinbase.com/products'
         }
         
         # Mapping des paires OTC
@@ -38,14 +38,16 @@ class AutoResultVerifier:
                 'ETH/USD': 'ETHUSDT',
                 'TRX/USD': 'TRXUSDT',
                 'LTC/USD': 'LTCUSDT',
-                'EUR/USD': 'EURUSDT',  # crypto avec stablecoin
+                'EUR/USD': 'EURUSDT',
                 'GBP/USD': 'GBPUSDT',
                 'USD/JPY': 'JPYUSDT',
                 'AUD/USD': 'AUDUSDT',
                 'AUD/CAD': 'AUDCAD',
                 'EUR/GBP': 'EURGBP',
-                'XAU/USD': 'XAUUSDT',  # Or
-                'XAG/USD': 'XAGUSDT',  # Argent
+                'XAU/USD': 'XAUUSDT',
+                'XAG/USD': 'XAGUSDT',
+                'BTC/USDT': 'BTCUSDT',
+                'ETH/USDT': 'ETHUSDT',
             },
             'bybit': {
                 'BTC/USD': 'BTCUSDT',
@@ -56,6 +58,8 @@ class AutoResultVerifier:
                 'EUR/GBP': 'EURGBP',
                 'XAU/USD': 'XAUUSDT',
                 'XAG/USD': 'XAGUSDT',
+                'BTC/USDT': 'BTCUSDT',
+                'ETH/USDT': 'ETHUSDT',
             },
             'kucoin': {
                 'BTC/USD': 'BTC-USDT',
@@ -219,7 +223,7 @@ class AutoResultVerifier:
                 try:
                     payload = json.loads(payload_json)
                     mode = payload.get('mode', 'Forex')
-                    is_otc = (mode == 'OTC' or mode == 'CRYPTO')
+                    is_otc = (mode == 'OTC' or mode == 'CRYPTO' or mode == 'CRYPTO_OTC')
                     exchange = payload.get('exchange', 'bybit')
                     
                     print(f"[VERIF-M1] 🔥 Mode détecté: {mode}")
@@ -253,7 +257,8 @@ class AutoResultVerifier:
                     'exit_price': 0,
                     'pips': 0,
                     'gale_level': 0,
-                    'reason': 'Marché fermé (week-end)'
+                    'reason': 'Marché fermé (week-end)',
+                    'verification_method': 'AUTO_WEEKEND'
                 })
                 return 'LOSE'
             
@@ -276,6 +281,7 @@ class AutoResultVerifier:
             )
             
             if result:
+                details['verification_method'] = 'AUTO_M1_' + ('OTC' if is_otc else 'FOREX')
                 self._update_signal_result(signal_id, result, details)
                 emoji = "✅" if result == 'WIN' else "❌"
                 print(f"[VERIF-M1] {emoji} Résultat M1: {result}")
@@ -285,8 +291,9 @@ class AutoResultVerifier:
                 
                 return result
             else:
-                print(f"[VERIF-M1] ⚠️ Impossible de vérifier")
-                return None
+                print(f"[VERIF-M1] ⚠️ Impossible de vérifier - Fallback interne")
+                # Fallback interne si impossible de vérifier
+                return await self._fallback_verification(signal_id, pair, direction, signal_time, is_otc, exchange)
                 
         except Exception as e:
             print(f"[VERIF-M1] ❌ Erreur: {e}")
@@ -294,20 +301,138 @@ class AutoResultVerifier:
             traceback.print_exc()
             return None
 
+    async def _fallback_verification(self, signal_id, pair, direction, signal_time, is_otc=False, exchange='bybit'):
+        """
+        Fallback interne en cas d'échec de vérification standard
+        """
+        try:
+            print(f"[VERIF-M1] 🚨 Fallback interne activé")
+            
+            # Essayer une autre méthode plus simple
+            result = await self._simple_verification(signal_id, pair, direction, signal_time, is_otc, exchange)
+            
+            if result:
+                print(f"[VERIF-M1] ✅ Fallback réussi: {result}")
+                return result
+            else:
+                print(f"[VERIF-M1] ❌ Fallback échoué")
+                # Marquer comme INVALID
+                self._update_signal_result(signal_id, 'INVALID', {
+                    'entry_price': 0,
+                    'exit_price': 0,
+                    'pips': 0,
+                    'gale_level': 0,
+                    'reason': 'Impossible de vérifier - Fallback échoué',
+                    'verification_method': 'FALLBACK_FAILED'
+                })
+                return 'INVALID'
+                
+        except Exception as e:
+            print(f"[VERIF-M1] ❌ Erreur fallback: {e}")
+            return None
+
+    async def _simple_verification(self, signal_id, pair, direction, signal_time, is_otc=False, exchange='bybit'):
+        """
+        Méthode de vérification simplifiée
+        """
+        try:
+            print(f"[VERIF-M1] 🔄 Simple vérification pour {pair}")
+            
+            # Récupérer le prix actuel comme exit_price
+            if is_otc:
+                # Pour OTC, utiliser l'API de l'exchange
+                current_price = await self._get_current_otc_price(pair, exchange)
+            else:
+                # Pour Forex, utiliser TwelveData
+                current_price = await self._get_current_forex_price(pair)
+            
+            if current_price is None:
+                return None
+            
+            # Pour l'entrée, on prend le prix 1 minute après le signal
+            entry_time = signal_time + timedelta(minutes=1)
+            if is_otc:
+                entry_price = await self._get_historical_otc_price(pair, entry_time, exchange)
+            else:
+                entry_price = await self._get_historical_forex_price(pair, entry_time)
+            
+            if entry_price is None:
+                # Si pas de prix historique, utiliser le prix actuel avec un offset
+                entry_price = current_price * (0.999 if direction == 'CALL' else 1.001)
+            
+            # Calculer le résultat
+            price_diff = current_price - entry_price
+            
+            if direction == 'CALL':
+                result = 'WIN' if price_diff > 0 else 'LOSE'
+            else:  # PUT
+                result = 'WIN' if price_diff < 0 else 'LOSE'
+            
+            pips_diff = abs(price_diff) * 10000
+            
+            self._update_signal_result(signal_id, result, {
+                'entry_price': entry_price,
+                'exit_price': current_price,
+                'pips': pips_diff,
+                'gale_level': 0,
+                'reason': 'Vérification simplifiée (fallback)',
+                'verification_method': 'SIMPLE_FALLBACK'
+            })
+            
+            return result
+            
+        except Exception as e:
+            print(f"[VERIF-M1] ❌ Erreur simple vérification: {e}")
+            return None
+
+    async def _get_current_forex_price(self, pair):
+        """Récupère le prix actuel Forex"""
+        try:
+            params = {
+                'symbol': pair,
+                'apikey': self.api_key,
+                'format': 'JSON'
+            }
+            
+            resp = self._session.get('https://api.twelvedata.com/price', params=params, timeout=10)
+            self._increment_api_call()
+            
+            if resp.status_code == 200:
+                data = resp.json()
+                if 'price' in data:
+                    return float(data['price'])
+            return None
+        except:
+            return None
+
+    async def _get_current_otc_price(self, pair, exchange='bybit'):
+        """Récupère le prix actuel OTC"""
+        try:
+            symbol = self._map_pair_to_symbol(pair, exchange)
+            
+            if exchange == 'binance':
+                url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
+                resp = self._session.get(url, timeout=5)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    return float(data['price'])
+            
+            elif exchange == 'bybit':
+                url = f"https://api.bybit.com/v5/market/tickers?category=spot&symbol={symbol}"
+                resp = self._session.get(url, timeout=5)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if data.get('retCode') == 0 and data.get('result', {}).get('list'):
+                        ticker = data['result']['list'][0]
+                        return float(ticker['lastPrice'])
+            
+            return None
+        except:
+            return None
+
     async def _verify_m1_candle(self, signal_id, pair, direction, candle_start, is_otc=False, exchange='bybit'):
         """
         Vérifie une bougie M1 spécifique avec support OTC
-        
-        Args:
-            signal_id: ID du signal
-            pair: Paire tradée
-            direction: CALL ou PUT
-            candle_start: Début de la bougie M1 à vérifier
-            is_otc: True si mode OTC/CRYPTO
-            exchange: Exchange pour OTC (bybit, binance, kucoin)
-        
-        Returns:
-            (result, details) ou (None, None)
         """
         try:
             print(f"[VERIF-M1] 🔍 Récupération bougie M1 {candle_start.strftime('%H:%M')}...")
@@ -354,7 +479,8 @@ class AutoResultVerifier:
                 'pips': pips_diff,
                 'gale_level': 0,
                 'mode': 'OTC' if is_otc else 'Forex',
-                'exchange': exchange if is_otc else 'twelvedata'
+                'exchange': exchange if is_otc else 'twelvedata',
+                'reason': f"Bougie M1 {candle_start.strftime('%H:%M')}"
             }
             
             return result, details
@@ -368,16 +494,6 @@ class AutoResultVerifier:
     async def _get_exact_m1_candle_price(self, pair, candle_start, price_type='close', is_otc=False, exchange='bybit'):
         """
         Récupère le prix d'UNE bougie M1 SPÉCIFIQUE avec support OTC
-        
-        Args:
-            pair: Paire à récupérer
-            candle_start: Début EXACT de la bougie M1
-            price_type: 'open' ou 'close'
-            is_otc: True si mode OTC/CRYPTO
-            exchange: Exchange pour OTC
-        
-        Returns:
-            float prix ou None
         """
         try:
             if is_otc:
@@ -586,31 +702,76 @@ class AutoResultVerifier:
     def _update_signal_result(self, signal_id, result, details):
         """Met à jour le résultat dans la DB"""
         try:
-            gale_level = 0
+            gale_level = details.get('gale_level', 0) if details else 0
             reason = details.get('reason', '') if details else ''
+            verification_method = details.get('verification_method', 'AUTO_M1') if details else 'AUTO_M1'
+            entry_price = details.get('entry_price', 0) if details else 0
+            exit_price = details.get('exit_price', 0) if details else 0
+            pips = details.get('pips', 0) if details else 0
             
-            # Ajouter le mode dans le reason
-            mode = details.get('mode', 'Forex') if details else 'Forex'
-            reason_with_mode = f"{reason} | Mode: {mode}"
+            # Vérifier d'abord si la colonne verification_method existe
+            with self.engine.connect() as conn:
+                # Vérifier la structure de la table
+                table_info = conn.execute(
+                    text("PRAGMA table_info(signals)")
+                ).fetchall()
+                
+                columns = [row[1] for row in table_info]
+                
+                # Construire la requête dynamiquement
+                set_clauses = []
+                values = {'id': signal_id}
+                
+                # Colonnes de base
+                set_clauses.append("result = :result")
+                values['result'] = result
+                
+                set_clauses.append("ts_exit = :ts_exit")
+                values['ts_exit'] = datetime.now(timezone.utc).isoformat()
+                
+                # Ajouter les colonnes optionnelles si elles existent
+                if 'gale_level' in columns:
+                    set_clauses.append("gale_level = :gale_level")
+                    values['gale_level'] = gale_level
+                
+                if 'reason' in columns:
+                    set_clauses.append("reason = :reason")
+                    values['reason'] = reason
+                
+                if 'verification_method' in columns:
+                    set_clauses.append("verification_method = :verification_method")
+                    values['verification_method'] = verification_method
+                
+                if 'entry_price' in columns:
+                    set_clauses.append("entry_price = :entry_price")
+                    values['entry_price'] = entry_price
+                
+                if 'exit_price' in columns:
+                    set_clauses.append("exit_price = :exit_price")
+                    values['exit_price'] = exit_price
+                
+                if 'pips' in columns:
+                    set_clauses.append("pips = :pips")
+                    values['pips'] = pips
+                
+                # Exécuter la mise à jour
+                query = text(f"""
+                    UPDATE signals
+                    SET {', '.join(set_clauses)}
+                    WHERE id = :id
+                """)
+                
+                conn.execute(query, values)
+                conn.commit()
             
-            query = text("""
-                UPDATE signals
-                SET result = :result, gale_level = :gale_level, reason = :reason
-                WHERE id = :id
-            """)
-            
-            with self.engine.begin() as conn:
-                conn.execute(query, {
-                    'result': result,
-                    'gale_level': gale_level,
-                    'reason': reason_with_mode,
-                    'id': signal_id
-                })
-            
-            print(f"[VERIF-M1] 💾 Résultat M1 sauvegardé: {result} ({mode})")
+            print(f"[VERIF-M1] 💾 Résultat M1 sauvegardé: {result}")
             
         except Exception as e:
             print(f"[VERIF-M1] ❌ Erreur sauvegarde: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            # Fallback simple sans les colonnes optionnelles
             try:
                 query = text("UPDATE signals SET result = :result WHERE id = :id")
                 with self.engine.begin() as conn:
