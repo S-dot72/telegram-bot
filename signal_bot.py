@@ -29,6 +29,50 @@ from utils import (
     detect_retest_pattern
 )
 
+# ================= FONCTION HELPER POUR FORMATER LES TIMESTAMPS =================
+
+def safe_strftime(timestamp, fmt='%H:%M:%S'):
+    """
+    Convertit un timestamp en string formatée de manière sécurisée.
+    Supporte: datetime, str, None.
+    """
+    if not timestamp:
+        return 'N/A'
+    
+    # Si c'est déjà un objet datetime
+    if isinstance(timestamp, datetime):
+        return timestamp.strftime(fmt)
+    
+    # Si c'est une chaîne, convertir
+    try:
+        # Nettoyer la chaîne
+        if isinstance(timestamp, str):
+            ts_clean = timestamp.replace('Z', '').replace('+00:00', '').split('.')[0]
+            
+            # Essayer différents formats
+            try:
+                dt = datetime.fromisoformat(ts_clean)
+            except:
+                try:
+                    dt = datetime.strptime(ts_clean, '%Y-%m-%d %H:%M:%S')
+                except:
+                    # Essayer un autre format
+                    try:
+                        dt = datetime.strptime(ts_clean, '%Y-%m-%d %H:%M')
+                    except:
+                        return str(timestamp)[:8]  # Retourner les 8 premiers caractères
+            
+            # Assurer que c'est en UTC
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            
+            return dt.strftime(fmt)
+    except Exception as e:
+        print(f"[DEBUG] Erreur format timestamp: {e}")
+    
+    # Fallback: retourner la représentation string
+    return str(timestamp)[:8]
+
 # ================= CLASSES MINIMALES =================
 
 class MLSignalPredictor:
@@ -78,7 +122,7 @@ class OTCDataProvider:
         now_utc = datetime.now(timezone.utc)
         weekday = now_utc.weekday()
         hour = now_utc.hour
-        return weekday >= 5 or (weekday == 4 and hour >= 22)
+        return weekday >= 5 or (weekend == 4 and hour >= 22)
     
     def get_status(self):
         """Retourne le statut OTC"""
@@ -867,9 +911,9 @@ async def cmd_debug_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg += f"• Raison: {signal[3] or 'N/A'}\n\n"
             
             msg += f"⏰ **Timing:**\n"
-            msg += f"• Envoyé: {signal[5].strftime('%H:%M:%S') if signal[5] else 'N/A'}\n"
-            msg += f"• Entrée: {signal[4].strftime('%H:%M:%S') if signal[4] else 'N/A'}\n"
-            msg += f"• Sortie: {signal[6].strftime('%H:%M:%S') if signal[6] else 'N/A'}\n\n"
+            msg += f"• Envoyé: {safe_strftime(signal[5])}\n"  # CORRIGÉ ICI
+            msg += f"• Entrée: {safe_strftime(signal[4])}\n"  # CORRIGÉ ICI
+            msg += f"• Sortie: {safe_strftime(signal[6])}\n\n"  # CORRIGÉ ICI
             
             msg += f"💰 **Prix:**\n"
             msg += f"• Entrée: {signal[7] or 'N/A'}\n"
@@ -923,7 +967,7 @@ async def cmd_debug_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if verifications:
                 msg += f"\n🔍 **Vérifications associées:**\n"
                 for i, verif in enumerate(verifications, 1):
-                    msg += f"{i}. {verif[0]} à {verif[1].strftime('%H:%M:%S') if verif[1] else 'N/A'}"
+                    msg += f"{i}. {verif[0]} à {safe_strftime(verif[1])}"  # CORRIGÉ ICI
                     if verif[2]:
                         msg += f" (ID: {verif[2]})"
                     msg += "\n"
@@ -987,7 +1031,7 @@ async def cmd_debug_recent(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if verif_method:
                     msg += f" | 📊 {verif_method}"
                 
-                msg += f"\n  ⏰ {ts_enter.strftime('%H:%M:%S') if ts_enter else 'N/A'}\n\n"
+                msg += f"\n  ⏰ {safe_strftime(ts_enter)}\n\n"  # CORRIGÉ ICI
             
             # Statistiques rapides
             stats = conn.execute(
@@ -1053,7 +1097,7 @@ async def cmd_debug_po(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg += f"• Direction: {direction}\n"
             msg += f"• Kill Zone: {kill_zone or 'Standard'}\n"
             msg += f"• Niveau Gale: {gale_level or 0}\n"
-            msg += f"• Heure entrée: {ts_enter.strftime('%H:%M:%S') if ts_enter else 'N/A'}\n\n"
+            msg += f"• Heure entrée: {safe_strftime(ts_enter)}\n\n"  # CORRIGÉ ICI
             
             msg += f"💰 **Prix:**\n"
             msg += f"• Entrée: {entry_price or 'N/A'}\n"
