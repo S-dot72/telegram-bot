@@ -441,13 +441,14 @@ class AutoResultVerifier:
             import asyncio
             import functools
             
+            # CORRECTION : Appeler get_otc_data sans le paramètre 'limit'
             df = await asyncio.get_event_loop().run_in_executor(
                 None,
                 functools.partial(
                     self.otc_provider.get_otc_data,
                     pair=pair,
-                    interval='1min',
-                    limit=10
+                    interval='1min'
+                    # Supprimé: 'limit=10' - ce paramètre n'est pas accepté
                 )
             )
             
@@ -456,6 +457,10 @@ class AutoResultVerifier:
                 return None
             
             print(f"[VERIF-M1] 📊 otc_provider retourné {len(df)} bougies pour {pair}")
+            
+            # Si nous avons trop de bougies, limiter aux 10 dernières pour la recherche
+            if len(df) > 10:
+                df = df.tail(10)
             
             # Chercher la bougie la plus proche de candle_start
             # Convertir les index en datetime timezone-aware
