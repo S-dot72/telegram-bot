@@ -1,12 +1,13 @@
 """
 signal_bot.py - Bot de trading M1 - Version Saint Graal 4.5
-Analyse multi-marchés par rotation itérative avec limites API
+Analyse multi-marchés par rotation itérative avec bouton persistant
 """
 
-import os, json, asyncio, random, traceback, time
+import os, json, asyncio, random, traceback, time, html
 import logging
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
+from typing import Dict, List, Optional, Tuple
 import requests
 import pandas as pd
 import numpy as np
@@ -15,120 +16,161 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
 from aiohttp import web
 
-# DÉSACTIVER LES LOGS HTTP VERBOSE
+# ================= CONFIGURATION INITIALE =================
+# Désactiver les logs HTTP verbose
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
-# Import du vérificateur externe
-try:
-    from auto_verifier import AutoResultVerifier
-    EXTERNAL_VERIFIER_AVAILABLE = True
-except ImportError:
-    EXTERNAL_VERIFIER_AVAILABLE = False
-    print("⚠️ Vérificateur externe non disponible")
+# Import des modules externes - CRITIQUE : pas de fallback
+from utils import get_signal_with_metadata
+print("✅ Utils importé avec succès - Fonction: get_signal_with_metadata")
 
 from config import *
-# CORRECTION DES IMPORTS - Utiliser uniquement la fonction disponible
-try:
-    from utils import get_signal_with_metadata
-    UTILS_AVAILABLE = True
-    print("✅ Utils importé avec succès - Fonction: get_signal_with_metadata")
-except ImportError as e:
-    print(f"❌ ERREUR CRITIQUE: Impossible d'importer get_signal_with_metadata depuis utils.py")
-    print(f"   Détails: {e}")
-    print("   Vérifiez que utils.py contient bien cette fonction")
-    exit(1)
+print("✅ Config importé avec succès")
 
-# ================= LISTE DES PAIRES DEPUIS CONFIG.PY =================
+# ================= CONSTANTES GLOBALES =================
+HAITI_TZ = ZoneInfo("America/Port-au-Prince")
+TIMEFRAME_M1 = "1min"
+SIGNALS_PER_SESSION = 8
+CONFIDENCE_THRESHOLD = 0.65
+BUTTON_TIMEOUT_MINUTES = 5  # ⏱️ Timeout pour régénération automatique du bouton
 
+# ================= GESTION DES ÉTATS =================
+class SessionManager:
+    """Gestionnaire centralisé des sessions utilisateur"""
+    
+    def __init__(self):
+        self.active_sessions: Dict[int, dict] = {}
+        self.pending_buttons: Dict[int, dict] = {}  # Stocke les boutons en attente
+        self.button_tasks: Dict[int, asyncio.Task] = {}  # Tâches de régénération
+        self.signal_tracking: Dict[int, int] = {}  # Compteur de signaux par utilisateur
+        
+    def create_session(self, user_id: int) -> dict:
+        """Crée une nouvelle session pour un utilisateur"""
+        session = {
+            'user_id': user_id,
+            'start_time': get_haiti_now(),
+            'signal_count': 0,
+            'wins': 0,
+            'losses': 0,
+            'pending_signals': 0,
+            'active_buttons': [],
+            'last_signal_time': None,
+            'next_signal_number': 1,
+            'status': 'active'
+        }
+        self.active_sessions[user_id] = session
+        return session
+    
+    def get_session(self, user_id: int) -> Optional[dict]:
+        """Récupère la session d'un utilisateur"""
+        return self.active_sessions.get(user_id)
+    
+    def update_signal_count(self, user_id: int) -> int:
+        """Incrémente le compteur de signaux et retourne le nouveau numéro"""
+        if user_id in self.active_sessions:
+            session = self.active_sessions[user_id]
+            session['signal_count'] += 1
+            session['next_signal_number'] = session['signal_count'] + 1
+            session['last_signal_time'] = get_haiti_now()
+            return session['signal_count']
+        return 0
+    
+    def can_generate_signal(self, user_id: int) -> Tuple[bool, str]:
+        """Vérifie si un signal peut être généré"""
+        if user_id not in self.active_sessions:
+            return False, "Aucune session active"
+        
+        session = self.active_sessions[user_id]
+        
+        if session['status'] != 'active':
+            return False, "Session terminée"
+        
+        if session['signal_count'] >= SIGNALS_PER_SESSION:
+            return False, "Limite de signaux atteinte"
+        
+        # Vérifier le timeout entre les signaux
+        if session['last_signal_time']:
+            time_since_last = (get_haiti_now() - session['last_signal_time']).total_seconds()
+            if time_since_last < 60:  # 1 minute minimum entre les signaux
+                wait_time = 60 - time_since_last
+                return False, f"Attendez {int(wait_time)} secondes"
+        
+        return True, "OK"
+    
+    def end_session(self, user_id: int):
+        """Termine une session"""
+        if user_id in self.active_sessions:
+            self.active_sessions[user_id]['status'] = 'ended'
+            
+            # Annuler les tâches de bouton
+            if user_id in self.button_tasks:
+                try:
+                    self.button_tasks[user_id].cancel()
+                except:
+                    pass
+                del self.button_tasks[user_id]
+
+# ================= CONFIGURATION ROTATION =================
 # Utilise directement PAIRS de config.py
-ROTATION_PAIRS = PAIRS  # 🔥 DIRECTEMENT DE CONFIG.PY
-print(f"📊 Chargement de {len(ROTATION_PAIRS)} paires depuis config.py")
+ROTATION_PAIRS = PAIRS if 'PAIRS' in globals() else [
+    'EUR/USD', 'GBP/USD', 'USD/JPY', 'AUD/USD', 'BTC/USD', 'ETH/USD',
+    'USD/CAD', 'EUR/RUB', 'USD/CLP', 'AUD/CAD', 'AUD/NZD', 'CAD/CHF',
+    'EUR/CHF', 'EUR/GBP', 'USD/THB', 'USD/COP', 'USD/EGP', 'AED/CNY', 'QAR/CNY'
+]
 
-# Configuration rotation itérative
+print(f"📊 Chargement de {len(ROTATION_PAIRS)} paires")
+
 ROTATION_CONFIG = {
-    'pairs_per_batch': 4,               # 4 paires analysées par batch
-    'max_batches_per_signal': 3,        # Maximum 3 batches (12 paires max)
-    'min_data_points': 100,             # Minimum 100 bougies M1
-    'api_cooldown_seconds': 2,          # 2 secondes entre chaque appel API
-    'batch_cooldown_seconds': 1,        # 1 seconde entre chaque batch
-    'min_score_threshold': 85,          # Score minimum pour accepter un signal
-    'max_api_calls_per_signal': 12,     # Maximum 12 appels API par signal
-    'enable_iterative_search': True,    # 🔥 NOUVEAU: Recherche itérative
-    'continue_if_no_signal': True,      # 🔥 Continuer avec batch suivant si pas de signal
-    'rotation_strategy': 'ITERATIVE',   # Stratégie: itérative
+    'pairs_per_batch': 4,
+    'max_batches_per_signal': 3,
+    'min_data_points': 100,
+    'api_cooldown_seconds': 2,
+    'batch_cooldown_seconds': 1,
+    'min_score_threshold': 85,
+    'max_api_calls_per_signal': 12,
+    'enable_iterative_search': True,
+    'continue_if_no_signal': True,
+    'rotation_strategy': 'ITERATIVE',
+    'button_timeout_minutes': BUTTON_TIMEOUT_MINUTES,
 }
 
-# ================= FONCTIONS HELPER =================
-
-def safe_strftime(timestamp, fmt='%H:%M:%S'):
-    """Convertit un timestamp en string formatée de manière sécurisée"""
-    if not timestamp:
-        return 'N/A'
-    
-    if isinstance(timestamp, datetime):
-        return timestamp.strftime(fmt)
-    
-    try:
-        if isinstance(timestamp, str):
-            ts_clean = timestamp.replace('Z', '').replace('+00:00', '').split('.')[0]
-            try:
-                dt = datetime.fromisoformat(ts_clean)
-            except:
-                try:
-                    dt = datetime.strptime(ts_clean, '%Y-%m-%d %H:%M:%S')
-                except:
-                    try:
-                        dt = datetime.strptime(ts_clean, '%Y-%m-%d %H:%M')
-                    except:
-                        return str(timestamp)[:8]
-            
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            
-            return dt.strftime(fmt)
-    except Exception as e:
-        print(f"[DEBUG] Erreur format timestamp: {e}")
-    
-    return str(timestamp)[:8]
-
-# ================= GESTION API LIMITS AMÉLIORÉE =================
-
+# ================= GESTION API LIMITS =================
 class APILimitManager:
-    """Gestionnaire des limites d'API avec tracking par signal"""
+    """Gestionnaire des limites d'API"""
     
     def __init__(self):
         self.api_calls = []
         self.daily_calls = 0
-        self.signal_calls = {}  # 🔥 Tracking des appels par signal
-        self.max_calls_per_minute = 30  # Limite TwelveData
-        self.max_calls_per_day = 800    # Limite quotidienne
+        self.signal_calls = {}
+        self.max_calls_per_minute = 30
+        self.max_calls_per_day = 800
         self.daily_reset_time = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
         
     def can_make_call(self, signal_id=None):
         """Vérifie si un nouvel appel API est possible"""
         now = datetime.now()
         
-        # Vérifier réinitialisation quotidienne
+        # Réinitialisation quotidienne
         if now.date() > self.daily_reset_time.date():
             self.daily_calls = 0
             self.daily_reset_time = now.replace(hour=0, minute=0, second=0, microsecond=0)
         
-        # Vérifier limite minute
+        # Limite par minute
         minute_ago = now - timedelta(minutes=1)
         recent_calls = [t for t in self.api_calls if t > minute_ago]
         
         if len(recent_calls) >= self.max_calls_per_minute:
-            return False, f"Limite minute atteinte: {len(recent_calls)}/{self.max_calls_per_minute}"
+            return False, f"Limite minute: {len(recent_calls)}/{self.max_calls_per_minute}"
         
-        # Vérifier limite quotidienne
+        # Limite quotidienne
         if self.daily_calls >= self.max_calls_per_day:
-            return False, f"Limite quotidienne atteinte: {self.daily_calls}/{self.max_calls_per_day}"
+            return False, f"Limite quotidienne: {self.daily_calls}/{self.max_calls_per_day}"
         
-        # Vérifier limite par signal (si spécifié)
+        # Limite par signal
         if signal_id and signal_id in self.signal_calls:
             if self.signal_calls[signal_id] >= ROTATION_CONFIG['max_api_calls_per_signal']:
-                return False, f"Limite signal atteinte: {self.signal_calls[signal_id]}/{ROTATION_CONFIG['max_api_calls_per_signal']}"
+                return False, f"Limite signal: {self.signal_calls[signal_id]}/{ROTATION_CONFIG['max_api_calls_per_signal']}"
         
         return True, "OK"
     
@@ -138,24 +180,21 @@ class APILimitManager:
         self.api_calls.append(now)
         self.daily_calls += 1
         
-        # Tracking par signal
         if signal_id:
             if signal_id not in self.signal_calls:
                 self.signal_calls[signal_id] = 0
             self.signal_calls[signal_id] += 1
         
-        # Nettoyer les appels anciens (plus de 2 heures)
+        # Nettoyer les anciens appels
         two_hours_ago = now - timedelta(hours=2)
         self.api_calls = [t for t in self.api_calls if t > two_hours_ago]
         
-        # Nettoyer les signaux anciens (plus de 1 heure)
         one_hour_ago = now - timedelta(hours=1)
         self.signal_calls = {k: v for k, v in self.signal_calls.items() 
                            if self.get_signal_time(k) > one_hour_ago}
     
     def get_signal_time(self, signal_id):
         """Temps du premier appel pour un signal"""
-        # Simple approximation
         return datetime.now() - timedelta(minutes=5)
     
     def get_stats(self):
@@ -178,17 +217,39 @@ class APILimitManager:
             'active_signals_tracking': len(self.signal_calls)
         }
 
-# ================= CLASSES MINIMALES =================
+# ================= INITIALISATION =================
+engine = create_engine(DB_URL, connect_args={'check_same_thread': False})
+session_manager = SessionManager()
+api_manager = APILimitManager()
 
+# Initialisation OTC
+class OTCDataProvider:
+    def __init__(self, api_key):
+        self.api_key = api_key
+    
+    def is_weekend(self):
+        now_utc = datetime.now(timezone.utc)
+        weekday = now_utc.weekday()
+        hour = now_utc.hour
+        return weekday >= 5 or (weekday == 4 and hour >= 22)
+    
+    def get_status(self):
+        return {
+            'is_weekend': self.is_weekend(),
+            'available_pairs': ['BTC/USD', 'ETH/USD', 'TRX/USD', 'LTC/USD'],
+            'active_apis': 2
+        }
+
+otc_provider = OTCDataProvider(TWELVEDATA_API_KEY)
+
+# Initialisation ML
 class MLSignalPredictor:
     def __init__(self):
         self.total_predictions = 0
         self.correct_predictions = 0
     
     def predict_signal(self, df, direction):
-        """Prédit un signal avec ML"""
         self.total_predictions += 1
-        
         confidence = random.uniform(0.65, 0.95)
         
         if random.random() < 0.15:
@@ -201,7 +262,6 @@ class MLSignalPredictor:
         return predicted_direction, confidence
     
     def get_stats(self):
-        """Retourne les statistiques ML"""
         accuracy = self.correct_predictions / self.total_predictions if self.total_predictions > 0 else 0
         return {
             'model_trained': 'Oui' if self.total_predictions > 0 else 'Non',
@@ -209,62 +269,20 @@ class MLSignalPredictor:
             'correct_predictions': self.correct_predictions,
             'accuracy': accuracy
         }
-    
-    async def retrain_model(self):
-        """Réentraîne le modèle ML"""
-        print("🤖 Réentraînement du modèle ML...")
-        await asyncio.sleep(2)
-        return True
 
-class OTCDataProvider:
-    def __init__(self, api_key):
-        self.api_key = api_key
-    
-    def is_weekend(self):
-        """Détermine si c'est le week-end"""
-        now_utc = datetime.now(timezone.utc)
-        weekday = now_utc.weekday()
-        hour = now_utc.hour
-        return weekday >= 5 or (weekday == 4 and hour >= 22)
-    
-    def get_status(self):
-        """Retourne le statut OTC"""
-        return {
-            'is_weekend': self.is_weekend(),
-            'available_pairs': ['BTC/USD', 'ETH/USD', 'TRX/USD', 'LTC/USD'],
-            'active_apis': 2
-        }
-
-# ================= CONFIGURATION =================
-HAITI_TZ = ZoneInfo("America/Port-au-Prince")
-TIMEFRAME_M1 = "1min"
-SIGNALS_PER_SESSION = 8
-CONFIDENCE_THRESHOLD = 0.65
-
-# Initialisation des composants
-engine = create_engine(DB_URL, connect_args={'check_same_thread': False})
 ml_predictor = MLSignalPredictor()
-otc_provider = OTCDataProvider(TWELVEDATA_API_KEY)
-api_manager = APILimitManager()
-
-# Initialisation du vérificateur externe
-if EXTERNAL_VERIFIER_AVAILABLE:
-    verifier = AutoResultVerifier(engine, TWELVEDATA_API_KEY, otc_provider=otc_provider)
-    print("✅ Vérificateur externe initialisé avec otc_provider")
-else:
-    verifier = None
-    print("⚠️ Vérificateur externe non disponible")
 
 # Variables globales
-active_sessions = {}
-pending_signal_tasks = {}
-signal_message_ids = {}
-TWELVE_TS_URL = 'https://api.twelvedata.com/time_series'
 ohlc_cache = {}
 last_error_logs = []
-current_signal_id = 0  # 🔥 Pour tracking des appels API par signal
+current_signal_id = 0
 
 # ================= FONCTIONS UTILITAIRES =================
+def get_haiti_now():
+    return datetime.now(HAITI_TZ)
+
+def get_utc_now():
+    return datetime.now(timezone.utc)
 
 def add_error_log(message):
     """Ajoute un message d'erreur à la liste des logs"""
@@ -276,31 +294,9 @@ def add_error_log(message):
     if len(last_error_logs) > 20:
         last_error_logs.pop(0)
 
-def get_haiti_now():
-    return datetime.now(HAITI_TZ)
-
-def get_utc_now():
-    return datetime.now(timezone.utc)
-
-def is_forex_open():
-    """Vérifie si marché Forex est ouvert"""
-    now_utc = get_utc_now()
-    weekday = now_utc.weekday()
-    hour = now_utc.hour
-    
-    if weekday == 5:  # Samedi
-        return False
-    if weekday == 6 and hour < 22:  # Dimanche avant 22h UTC
-        return False
-    if weekday == 4 and hour >= 22:  # Vendredi après 22h UTC
-        return False
-    
-    return True
-
 def get_current_pair(pair):
     """Retourne la paire à utiliser (Forex ou Crypto) en fonction du jour"""
     if otc_provider.is_weekend():
-        # Mapping pour toutes les paires de config.py
         forex_to_crypto = {
             'EUR/USD': 'BTC/USD',
             'GBP/USD': 'ETH/USD',
@@ -322,25 +318,34 @@ def get_current_pair(pair):
             'AED/CNY': 'LTC/USD',
             'QAR/CNY': 'BTC/USD'
         }
-        # Ajout des paires manquantes avec mapping par défaut
         return forex_to_crypto.get(pair, 'BTC/USD')
     return pair
 
-# ================= GESTION DONNÉES AVEC LIMITES API =================
+def is_forex_open():
+    """Vérifie si marché Forex est ouvert"""
+    now_utc = get_utc_now()
+    weekday = now_utc.weekday()
+    hour = now_utc.hour
+    
+    if weekday == 5:
+        return False
+    if weekday == 6 and hour < 22:
+        return False
+    if weekday == 4 and hour >= 22:
+        return False
+    
+    return True
 
 def fetch_ohlc_with_limits(pair, interval, outputsize=300, signal_id=None):
     """
-    Récupération données avec gestion des limites API et tracking par signal
+    Récupération données avec gestion des limites API
     """
-    # Vérifier les limites API avec tracking par signal
     can_call, reason = api_manager.can_make_call(signal_id)
     if not can_call:
-        raise RuntimeError(f"Limite API atteinte: {reason}")
+        raise RuntimeError(f"Limite API: {reason}")
     
-    # Enregistrer l'appel avec tracking par signal
     api_manager.record_call(signal_id)
     
-    # Mode normal
     params = {
         'symbol': pair, 
         'interval': interval, 
@@ -350,12 +355,12 @@ def fetch_ohlc_with_limits(pair, interval, outputsize=300, signal_id=None):
     }
     
     try:
-        r = requests.get(TWELVE_TS_URL, params=params, timeout=10)
+        r = requests.get('https://api.twelvedata.com/time_series', params=params, timeout=10)
         r.raise_for_status()
         j = r.json()
         
         if 'code' in j and j['code'] == 429:
-            raise RuntimeError(f"Limite API TwelveData atteinte")
+            raise RuntimeError("Limite API TwelveData atteinte")
         
         if 'values' not in j:
             raise RuntimeError(f"TwelveData error: {j}")
@@ -373,7 +378,7 @@ def fetch_ohlc_with_limits(pair, interval, outputsize=300, signal_id=None):
         
         return df
     except Exception as e:
-        add_error_log(f"Erreur fetch_ohlc_with_limits: {e}")
+        add_error_log(f"Erreur fetch_ohlc: {e}")
         raise RuntimeError(f"Erreur API: {e}")
 
 def get_cached_ohlc(pair, interval, outputsize=300, signal_id=None):
@@ -398,189 +403,11 @@ def get_cached_ohlc(pair, interval, outputsize=300, signal_id=None):
             print(f"⚠️ Données vides pour {current_pair}")
             
         return df
-    except RuntimeError as e:
-        add_error_log(f"Cache OHLC: {e}")
-        return None
     except Exception as e:
         add_error_log(f"Erreur get_cached_ohlc: {e}")
         return None
 
-# ================= ANALYSE MULTI-MARCHÉS ITÉRATIVE =================
-
-async def analyze_multiple_markets_iterative(user_id, session_count, signal_id=None):
-    """
-    🔥 NOUVEAU: Analyse itérative de plusieurs marchés
-    Analyse par batches jusqu'à trouver un signal valide ou épuiser les limites
-    """
-    print(f"\n[ROTATION] 🔄 Analyse itérative pour signal #{session_count}")
-    print(f"[ROTATION] 📊 Total paires disponibles: {len(ROTATION_PAIRS)}")
-    
-    # Mélanger les paires pour rotation aléatoire
-    shuffled_pairs = ROTATION_PAIRS.copy()
-    random.shuffle(shuffled_pairs)
-    
-    best_signal = None
-    best_score = 0
-    total_analyzed = 0
-    batch_count = 0
-    
-    # 🔥 ANALYSE PAR BATCHES ITÉRATIFS
-    for batch_start in range(0, len(shuffled_pairs), ROTATION_CONFIG['pairs_per_batch']):
-        batch_count += 1
-        
-        # Vérifier si on a atteint le maximum de batches
-        if batch_count > ROTATION_CONFIG['max_batches_per_signal']:
-            print(f"[ROTATION] ⏹️ Maximum de batches atteint ({ROTATION_CONFIG['max_batches_per_signal']})")
-            break
-        
-        batch_pairs = shuffled_pairs[batch_start:batch_start + ROTATION_CONFIG['pairs_per_batch']]
-        
-        print(f"\n[ROTATION] 📦 Batch #{batch_count}: analyse {len(batch_pairs)} paires")
-        
-        batch_best_signal = None
-        batch_best_score = 0
-        
-        # Analyser chaque paire du batch
-        for pair in batch_pairs:
-            total_analyzed += 1
-            
-            try:
-                # Vérifier les limites API avant chaque appel
-                can_call, reason = api_manager.can_make_call(signal_id)
-                if not can_call:
-                    print(f"[ROTATION] ⏸️ Limite API atteinte: {reason}")
-                    break  # Arrêter ce batch si limite atteinte
-                
-                print(f"[ROTATION] 📊 Analyse {pair} ({total_analyzed}ème)")
-                
-                # Récupérer données avec tracking du signal
-                df = get_cached_ohlc(pair, TIMEFRAME_M1, outputsize=400, signal_id=signal_id)
-                
-                if df is None or len(df) < ROTATION_CONFIG['min_data_points']:
-                    print(f"[ROTATION] ❌ {pair}: données insuffisantes")
-                    continue
-                
-                # 🔥 UTILISATION DE LA FONCTION PRINCIPALE
-                signal_data = get_signal_with_metadata(
-                    df, 
-                    signal_count=session_count-1,
-                    total_signals=SIGNALS_PER_SESSION
-                )
-                
-                if signal_data is None:
-                    print(f"[ROTATION] ❌ {pair}: aucun signal")
-                    continue
-                
-                # Vérifier score minimum
-                current_score = signal_data.get('score', 0)
-                print(f"[ROTATION] ✅ {pair}: Score {current_score:.1f}")
-                
-                # Mettre à jour le meilleur signal du batch
-                if current_score > batch_best_score:
-                    batch_best_score = current_score
-                    batch_best_signal = {
-                        **signal_data,
-                        'pair': pair,
-                        'original_pair': pair,
-                        'actual_pair': get_current_pair(pair),
-                        'batch': batch_count,
-                        'position_in_batch': batch_pairs.index(pair) + 1
-                    }
-                
-                # 🔥 SI SCORE EXCELLENT, ARRÊTER IMMÉDIATEMENT
-                if current_score >= 95:
-                    print(f"[ROTATION] 🎯 Signal excellent trouvé sur {pair} (Score: {current_score:.1f})")
-                    best_signal = {
-                        **signal_data,
-                        'pair': pair,
-                        'original_pair': pair,
-                        'actual_pair': get_current_pair(pair),
-                        'batch': batch_count,
-                        'position_in_batch': batch_pairs.index(pair) + 1
-                    }
-                    best_score = current_score
-                    
-                    # Statistiques finales
-                    print(f"[ROTATION] 📊 Analyse terminée: {total_analyzed} paires analysées, {batch_count} batches")
-                    return best_signal, total_analyzed, batch_count
-                
-                # Respecter cooldown entre paires
-                await asyncio.sleep(ROTATION_CONFIG['api_cooldown_seconds'])
-                
-            except Exception as e:
-                print(f"[ROTATION] ❌ Erreur sur {pair}: {str(e)[:100]}")
-                continue
-        
-        # 🔥 APRÈS CHAQUE BATCH: vérifier si on a un signal acceptable
-        if batch_best_signal and batch_best_score >= ROTATION_CONFIG['min_score_threshold']:
-            print(f"[ROTATION] 🎯 Signal acceptable trouvé dans batch #{batch_count} (Score: {batch_best_score:.1f})")
-            best_signal = batch_best_signal
-            best_score = batch_best_score
-            break  # Arrêter la recherche itérative
-        
-        # 🔥 SI PAS DE SIGNAL DANS CE BATCH, CONTINUER AU SUIVANT
-        print(f"[ROTATION] ⚠️ Aucun signal valide dans batch #{batch_count}, score max: {batch_best_score:.1f}")
-        
-        # Vérifier si on doit continuer
-        if not ROTATION_CONFIG['continue_if_no_signal']:
-            print(f"[ROTATION] ⏹️ Configuration: ne pas continuer sans signal")
-            break
-        
-        # Cooldown entre batches
-        await asyncio.sleep(ROTATION_CONFIG['batch_cooldown_seconds'])
-    
-    # 🔥 RÉSULTAT FINAL
-    if best_signal and best_score >= ROTATION_CONFIG['min_score_threshold']:
-        print(f"[ROTATION] ✅ Meilleur signal: {best_signal['pair']} (Score: {best_score:.1f})")
-        print(f"[ROTATION] 📊 Analyse totale: {total_analyzed} paires, {batch_count} batches")
-        return best_signal, total_analyzed, batch_count
-    
-    print(f"[ROTATION] ❌ Aucun signal valide après {total_analyzed} paires analysées")
-    return None, total_analyzed, batch_count
-
-# ================= FONCTIONS DE BASE =================
-
-def persist_signal(payload):
-    """Persiste un signal en base de données"""
-    q = text("""INSERT INTO signals (pair,direction,reason,ts_enter,ts_send,confidence,payload_json,max_gales,timeframe)
-    VALUES (:pair,:direction,:reason,:ts_enter,:ts_send,:confidence,:payload_json,:max_gales,:timeframe)""")
-    with engine.begin() as conn:
-        result = conn.execute(q, payload)
-    return result.lastrowid
-
-def fix_database_structure():
-    """Corrige la structure de la base de données avec colonnes de prix"""
-    try:
-        with engine.begin() as conn:
-            result = conn.execute(text("PRAGMA table_info(signals)")).fetchall()
-            existing_cols = {row[1] for row in result}
-            
-            required_columns = {
-                'ts_exit': 'DATETIME',
-                'entry_price': 'REAL DEFAULT 0',
-                'exit_price': 'REAL DEFAULT 0',
-                'pips': 'REAL DEFAULT 0',
-                'result': 'TEXT',
-                'max_gales': 'INTEGER DEFAULT 0',
-                'timeframe': 'INTEGER DEFAULT 1',
-                'ts_send': 'DATETIME',
-                'reason': 'TEXT',
-                'confidence': 'REAL',
-                'kill_zone': 'TEXT',
-                'gale_level': 'INTEGER DEFAULT 0',
-                'verification_method': 'TEXT'
-            }
-            
-            for col, col_type in required_columns.items():
-                if col not in existing_cols:
-                    try:
-                        conn.execute(text(f"ALTER TABLE signals ADD COLUMN {col} {col_type}"))
-                    except:
-                        pass
-            
-    except Exception as e:
-        print(f"❌ Erreur correction DB: {e}")
-
+# ================= GESTION BASE DE DONNÉES =================
 def ensure_db():
     """Initialise la base de données"""
     try:
@@ -588,6 +415,7 @@ def ensure_db():
             conn.execute(text("""
                 CREATE TABLE IF NOT EXISTS signals (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
                     pair TEXT NOT NULL,
                     direction TEXT NOT NULL,
                     reason TEXT,
@@ -605,6 +433,7 @@ def ensure_db():
                     kill_zone TEXT,
                     gale_level INTEGER DEFAULT 0,
                     verification_method TEXT,
+                    button_message_id INTEGER,
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             """))
@@ -618,50 +447,278 @@ def ensure_db():
                     last_active DATETIME
                 )
             """))
+            
+            # Vérifier et ajouter la colonne user_id si elle n'existe pas
+            try:
+                result = conn.execute(text("PRAGMA table_info(signals)")).fetchall()
+                existing_cols = {row[1] for row in result}
+                if 'user_id' not in existing_cols:
+                    conn.execute(text("ALTER TABLE signals ADD COLUMN user_id INTEGER"))
+            except:
+                pass
         
-        fix_database_structure()
         print("✅ Base de données prête")
         
     except Exception as e:
         print(f"⚠️ Erreur DB: {e}")
 
-# ================= GÉNÉRATION SIGNAL AVEC ROTATION ITÉRATIVE =================
+def persist_signal(user_id, payload):
+    """Persiste un signal en base de données"""
+    q = text("""INSERT INTO signals (
+        user_id, pair, direction, reason, ts_enter, ts_send, confidence, 
+        payload_json, max_gales, timeframe, button_message_id
+    ) VALUES (
+        :user_id, :pair, :direction, :reason, :ts_enter, :ts_send, :confidence, 
+        :payload_json, :max_gales, :timeframe, :button_message_id
+    )""")
+    
+    payload['user_id'] = user_id
+    
+    with engine.begin() as conn:
+        result = conn.execute(q, payload)
+    return result.lastrowid
 
+# ================= ANALYSE MULTI-MARCHÉS =================
+async def analyze_multiple_markets_iterative(user_id, session_count, signal_id=None):
+    """
+    Analyse itérative de plusieurs marchés
+    """
+    print(f"\n[ROTATION] 🔄 Analyse itérative pour signal #{session_count}")
+    print(f"[ROTATION] 📊 Total paires: {len(ROTATION_PAIRS)}")
+    
+    shuffled_pairs = ROTATION_PAIRS.copy()
+    random.shuffle(shuffled_pairs)
+    
+    best_signal = None
+    best_score = 0
+    total_analyzed = 0
+    batch_count = 0
+    
+    for batch_start in range(0, len(shuffled_pairs), ROTATION_CONFIG['pairs_per_batch']):
+        batch_count += 1
+        
+        if batch_count > ROTATION_CONFIG['max_batches_per_signal']:
+            print(f"[ROTATION] ⏹️ Maximum de batches atteint")
+            break
+        
+        batch_pairs = shuffled_pairs[batch_start:batch_start + ROTATION_CONFIG['pairs_per_batch']]
+        print(f"\n[ROTATION] 📦 Batch #{batch_count}: analyse {len(batch_pairs)} paires")
+        
+        batch_best_signal = None
+        batch_best_score = 0
+        
+        for pair in batch_pairs:
+            total_analyzed += 1
+            
+            try:
+                can_call, reason = api_manager.can_make_call(signal_id)
+                if not can_call:
+                    print(f"[ROTATION] ⏸️ Limite API: {reason}")
+                    break
+                
+                print(f"[ROTATION] 📊 Analyse {pair} ({total_analyzed}ème)")
+                
+                df = get_cached_ohlc(pair, TIMEFRAME_M1, outputsize=400, signal_id=signal_id)
+                
+                if df is None or len(df) < ROTATION_CONFIG['min_data_points']:
+                    print(f"[ROTATION] ❌ {pair}: données insuffisantes")
+                    continue
+                
+                # 🔥 UTILISATION EXCLUSIVE DE get_signal_with_metadata - PAS DE FALLBACK
+                signal_data = get_signal_with_metadata(
+                    df, 
+                    signal_count=session_count-1,
+                    total_signals=SIGNALS_PER_SESSION
+                )
+                
+                if signal_data is None:
+                    print(f"[ROTATION] ❌ {pair}: aucun signal")
+                    continue
+                
+                current_score = signal_data.get('score', 0)
+                print(f"[ROTATION] ✅ {pair}: Score {current_score:.1f}")
+                
+                if current_score > batch_best_score:
+                    batch_best_score = current_score
+                    batch_best_signal = {
+                        **signal_data,
+                        'pair': pair,
+                        'original_pair': pair,
+                        'actual_pair': get_current_pair(pair),
+                        'batch': batch_count,
+                        'position_in_batch': batch_pairs.index(pair) + 1
+                    }
+                
+                if current_score >= 95:
+                    print(f"[ROTATION] 🎯 Signal excellent trouvé")
+                    best_signal = {
+                        **signal_data,
+                        'pair': pair,
+                        'original_pair': pair,
+                        'actual_pair': get_current_pair(pair),
+                        'batch': batch_count,
+                        'position_in_batch': batch_pairs.index(pair) + 1
+                    }
+                    best_score = current_score
+                    return best_signal, total_analyzed, batch_count
+                
+                await asyncio.sleep(ROTATION_CONFIG['api_cooldown_seconds'])
+                
+            except Exception as e:
+                print(f"[ROTATION] ❌ Erreur sur {pair}: {str(e)[:100]}")
+                continue
+        
+        if batch_best_signal and batch_best_score >= ROTATION_CONFIG['min_score_threshold']:
+            print(f"[ROTATION] 🎯 Signal acceptable trouvé")
+            best_signal = batch_best_signal
+            best_score = batch_best_score
+            break
+        
+        print(f"[ROTATION] ⚠️ Aucun signal valide dans batch #{batch_count}")
+        
+        if not ROTATION_CONFIG['continue_if_no_signal']:
+            print(f"[ROTATION] ⏹️ Configuration: ne pas continuer sans signal")
+            break
+        
+        await asyncio.sleep(ROTATION_CONFIG['batch_cooldown_seconds'])
+    
+    if best_signal and best_score >= ROTATION_CONFIG['min_score_threshold']:
+        print(f"[ROTATION] ✅ Meilleur signal: {best_signal['pair']} (Score: {best_score:.1f})")
+        return best_signal, total_analyzed, batch_count
+    
+    print(f"[ROTATION] ❌ Aucun signal valide après {total_analyzed} paires")
+    return None, total_analyzed, batch_count
+
+# ================= GESTION BOUTON PERSISTANT =================
+async def create_signal_button(user_id: int, app, message_id: int = None) -> int:
+    """
+    Crée ou met à jour un bouton pour générer le prochain signal
+    Retourne l'ID du message contenant le bouton
+    """
+    session = session_manager.get_session(user_id)
+    if not session:
+        return None
+    
+    next_signal_num = session['next_signal_number']
+    button_text = f"🎯 Générer Signal #{next_signal_num}"
+    
+    keyboard = [[InlineKeyboardButton(button_text, callback_data=f"gen_signal_{user_id}")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    try:
+        if message_id:
+            # Mettre à jour le message existant
+            await app.bot.edit_message_reply_markup(
+                chat_id=user_id,
+                message_id=message_id,
+                reply_markup=reply_markup
+            )
+            return message_id
+        else:
+            # Créer un nouveau message avec bouton
+            message = await app.bot.send_message(
+                chat_id=user_id,
+                text=f"🔄 **Bouton actif pour le signal #{next_signal_num}**\n"
+                     f"━━━━━━━━━━━━━━━━━━━━\n"
+                     f"Cliquez pour générer le prochain signal ⬇️\n"
+                     f"⏱️ Ce bouton expire dans {BUTTON_TIMEOUT_MINUTES} minutes",
+                reply_markup=reply_markup
+            )
+            
+            # Planifier la régénération automatique
+            asyncio.create_task(schedule_button_regeneration(user_id, app, message.message_id))
+            
+            return message.message_id
+    except Exception as e:
+        print(f"❌ Erreur création bouton: {e}")
+        return None
+
+async def schedule_button_regeneration(user_id: int, app, message_id: int):
+    """
+    Planifie la régénération automatique du bouton après timeout
+    """
+    try:
+        # Attendre le timeout
+        await asyncio.sleep(BUTTON_TIMEOUT_MINUTES * 60)
+        
+        # Vérifier si la session est toujours active
+        session = session_manager.get_session(user_id)
+        if not session or session['status'] != 'active':
+            return
+        
+        if session['signal_count'] >= SIGNALS_PER_SESSION:
+            return
+        
+        print(f"🔄 Régénération automatique du bouton pour l'utilisateur {user_id}")
+        
+        # Régénérer le bouton
+        new_message_id = await create_signal_button(user_id, app, message_id)
+        
+        if new_message_id:
+            # Mettre à jour la session
+            if 'active_buttons' not in session:
+                session['active_buttons'] = []
+            
+            if message_id in session['active_buttons']:
+                session['active_buttons'].remove(message_id)
+            
+            if new_message_id:
+                session['active_buttons'].append(new_message_id)
+            
+    except asyncio.CancelledError:
+        print(f"⏹️ Tâche de régénération annulée pour l'utilisateur {user_id}")
+    except Exception as e:
+        print(f"❌ Erreur régénération bouton: {e}")
+
+async def cleanup_old_buttons(user_id: int, app):
+    """
+    Nettoie les anciens boutons
+    """
+    session = session_manager.get_session(user_id)
+    if not session or 'active_buttons' not in session:
+        return
+    
+    for message_id in session['active_buttons'][:-1]:  # Garder seulement le dernier
+        try:
+            await app.bot.delete_message(chat_id=user_id, message_id=message_id)
+        except:
+            pass
+    
+    # Garder seulement le dernier bouton
+    if session['active_buttons']:
+        session['active_buttons'] = [session['active_buttons'][-1]]
+
+# ================= GÉNÉRATION DE SIGNAL =================
 async def generate_m1_signal_with_iterative_rotation(user_id, app):
     """
-    🔥 NOUVEAU: Génère un signal avec rotation itérative multi-marchés
+    Génère un signal avec rotation itérative - PAS DE FALLBACK
     """
     global current_signal_id
     
     try:
-        if user_id not in active_sessions:
+        session = session_manager.get_session(user_id)
+        if not session:
             add_error_log(f"User {user_id} n'a pas de session active")
             return None
         
-        session = active_sessions[user_id]
         session_count = session['signal_count'] + 1
-        
-        # Incrémenter l'ID de signal pour tracking API
         current_signal_id += 1
         signal_tracking_id = f"sig_{session_count}_{current_signal_id}"
         
-        print(f"\n[SIGNAL] 🔄 Génération signal #{session_count} avec rotation itérative")
-        print(f"[SIGNAL] 📊 Tracking ID: {signal_tracking_id}")
+        print(f"\n[SIGNAL] 🔄 Génération signal #{session_count}")
         
-        # 🔥 ANALYSE MULTI-MARCHÉS ITÉRATIVE
+        # Analyse multi-marchés - PAS DE FALLBACK
         signal_data, total_pairs_analyzed, total_batches = await analyze_multiple_markets_iterative(
             user_id, 
             session_count,
             signal_id=signal_tracking_id
         )
         
+        # 🔥 AUCUN FALLBACK - SI PAS DE SIGNAL, RETOURNER None
         if signal_data is None:
-            print(f"[SIGNAL] ❌ Aucun signal trouvé après {total_pairs_analyzed} paires analysées")
-            
-            # Même si pas de signal, créer un signal fallback
-            return await create_fallback_signal(user_id, session_count, total_pairs_analyzed, signal_tracking_id)
+            print(f"[SIGNAL] ❌ Aucun signal valide trouvé après analyse rotation")
+            return None
         
-        # Récupérer les données du meilleur signal
         pair = signal_data['pair']
         direction = signal_data['direction']
         mode_strat = signal_data['mode']
@@ -671,10 +728,9 @@ async def generate_m1_signal_with_iterative_rotation(user_id, app):
         actual_pair = signal_data.get('actual_pair', pair)
         batch_info = f"Batch {signal_data.get('batch', '?')}.{signal_data.get('position_in_batch', '?')}"
         
-        print(f"[SIGNAL] 🎯 Meilleur signal: {pair} -> {direction} (Score: {score:.1f}, {batch_info})")
-        print(f"[SIGNAL] 📊 Analyse: {total_pairs_analyzed} paires, {total_batches} batches")
+        print(f"[SIGNAL] 🎯 Meilleur signal: {pair} -> {direction} (Score: {score:.1f})")
         
-        # MACHINE LEARNING
+        # Machine Learning
         ml_signal, ml_conf = ml_predictor.predict_signal(None, direction)
         
         if ml_signal is None:
@@ -685,7 +741,7 @@ async def generate_m1_signal_with_iterative_rotation(user_id, app):
             ml_conf = CONFIDENCE_THRESHOLD + random.uniform(0.05, 0.15)
             print(f"[SIGNAL] ⚡ Confiance ML ajustée: {ml_conf:.1%}")
         
-        # CALCUL DES TEMPS
+        # Calcul des temps
         now_haiti = get_haiti_now()
         now_utc = get_utc_now()
         
@@ -698,7 +754,7 @@ async def generate_m1_signal_with_iterative_rotation(user_id, app):
         
         print(f"[SIGNAL_TIMING] ⏰ Heure entrée: {entry_time_haiti.strftime('%H:%M:%S')}")
         
-        # PERSISTENCE
+        # Persistence
         payload = {
             'pair': actual_pair,
             'direction': ml_signal, 
@@ -734,198 +790,90 @@ async def generate_m1_signal_with_iterative_rotation(user_id, app):
                 }
             }),
             'max_gales': 0,
-            'timeframe': 1
+            'timeframe': 1,
+            'button_message_id': None  # À remplir après création du bouton
         }
-        signal_id = persist_signal(payload)
         
-        print(f"[SIGNAL] ✅ Signal #{signal_id} persisté (Rotation itérative)")
+        signal_id = persist_signal(user_id, payload)
         
-        # Retourner l'ID du signal
+        print(f"[SIGNAL] ✅ Signal #{signal_id} persisté")
+        
         return signal_id
         
     except Exception as e:
-        error_msg = f"[SIGNAL] ❌ Erreur rotation itérative: {e}"
+        error_msg = f"[SIGNAL] ❌ Erreur: {e}"
         add_error_log(error_msg)
         traceback.print_exc()
         return None
 
-async def create_fallback_signal(user_id, session_count, total_pairs_analyzed, signal_tracking_id):
+# ================= FONCTION POUR BOUTON APRÈS BOUGIE =================
+async def schedule_button_after_candle(signal_id, user_id, app, entry_time):
     """
-    Crée un signal fallback quand aucune paire ne donne de signal valide
-    """
-    try:
-        print(f"[FALLBACK] 🔄 Création signal fallback après {total_pairs_analyzed} paires analysées")
-        
-        # Prendre une paire aléatoire comme fallback
-        fallback_pair = random.choice(ROTATION_PAIRS)
-        actual_pair = get_current_pair(fallback_pair)
-        
-        # Direction aléatoire mais biaisée
-        direction = "CALL" if random.random() > 0.4 else "PUT"
-        ml_conf = CONFIDENCE_THRESHOLD - 0.1  # Confiance réduite
-        
-        # CALCUL DES TEMPS
-        now_haiti = get_haiti_now()
-        now_utc = get_utc_now()
-        
-        entry_time_haiti = (now_haiti + timedelta(minutes=2)).replace(second=0, microsecond=0)
-        entry_time_utc = entry_time_haiti.astimezone(timezone.utc)
-        
-        # PERSISTENCE
-        payload = {
-            'pair': actual_pair,
-            'direction': direction, 
-            'reason': f"Fallback après {total_pairs_analyzed} paires sans signal valide",
-            'ts_enter': entry_time_utc.isoformat(), 
-            'ts_send': now_utc.isoformat(),
-            'confidence': ml_conf, 
-            'payload_json': json.dumps({
-                'original_pair': fallback_pair,
-                'actual_pair': actual_pair,
-                'user_id': user_id, 
-                'mode': 'FALLBACK',
-                'strategy': 'Fallback Rotation',
-                'strategy_mode': 'FALLBACK',
-                'strategy_quality': 'LOW',
-                'strategy_score': 50,
-                'ml_confidence': ml_conf,
-                'rotation_info': {
-                    'pairs_analyzed': total_pairs_analyzed,
-                    'fallback_reason': 'Aucun signal valide trouvé',
-                    'signal_tracking_id': signal_tracking_id,
-                    'api_stats': api_manager.get_stats()
-                },
-                'session_count': session_count,
-                'session_total': SIGNALS_PER_SESSION
-            }),
-            'max_gales': 0,
-            'timeframe': 1
-        }
-        signal_id = persist_signal(payload)
-        
-        print(f"[FALLBACK] ⚠️ Signal fallback #{signal_id} créé sur {fallback_pair}")
-        return signal_id
-        
-    except Exception as e:
-        print(f"[FALLBACK] ❌ Erreur création fallback: {e}")
-        return None
-
-# ================= NOUVELLES FONCTIONS POUR BOUTON =================
-
-async def schedule_verification_button(signal_id, user_id, app, entry_time):
-    """
-    Programme l'envoi du bouton IMMÉDIATEMENT après la fin de la bougie
+    Programme l'envoi du bouton APRÈS la fin de la bougie M1
     """
     try:
-        print(f"[VERIF-TIMING] ⏰ Programmation bouton pour signal #{signal_id}")
+        print(f"[BOUGIE-BOUTON] ⏰ Programmation bouton pour signal #{signal_id}")
         
         # Calculer la fin de la bougie M1 (1 minute après l'entrée)
         candle_end_time = entry_time + timedelta(minutes=1)
         now_utc = get_utc_now()
         
-        # Attendre EXACTEMENT la fin de la bougie, pas de délai supplémentaire
+        # Attendre EXACTEMENT la fin de la bougie
         wait_seconds = max(0, (candle_end_time - now_utc).total_seconds())
         
         if wait_seconds > 0:
-            print(f"[VERIF-TIMING] ⏳ Attente de {wait_seconds:.0f}s pour fin de bougie signal #{signal_id}")
+            print(f"[BOUGIE-BOUTON] ⏳ Attente de {wait_seconds:.0f}s pour fin de bougie")
             await asyncio.sleep(wait_seconds)
         
         # ENVOYER LE BOUTON IMMÉDIATEMENT APRÈS FIN BOUGIE
-        print(f"[VERIF-TIMING] ✅ Bougie terminée, envoi bouton IMMÉDIAT pour signal #{signal_id}")
-        await send_verification_button(user_id, signal_id, app)
+        print(f"[BOUGIE-BOUTON] ✅ Bougie terminée, envoi bouton IMMÉDIAT pour signal #{signal_id}")
         
-    except Exception as e:
-        print(f"[VERIF-TIMING] ❌ Erreur programmation bouton: {e}")
-
-async def send_verification_button(user_id, signal_id, app):
-    """
-    Envoie le bouton pour générer le prochain signal
-    Appelé IMMÉDIATEMENT après la fin de la bougie
-    """
-    try:
-        if user_id not in active_sessions:
-            print(f"[VERIF-BUTTON] ❌ User {user_id} n'a pas de session active")
+        # Créer le bouton comme dans le code précédent
+        session = session_manager.get_session(user_id)
+        if not session:
             return
         
-        session = active_sessions[user_id]
+        # Nettoyer les anciens boutons
+        await cleanup_old_buttons(user_id, app)
         
-        # Mettre à jour le compteur pending
-        session['pending'] = max(0, session['pending'] - 1)
+        # Créer un nouveau bouton
+        new_message_id = await create_signal_button(user_id, app)
         
-        if session['signal_count'] < SIGNALS_PER_SESSION:
-            next_num = session['signal_count'] + 1
+        if new_message_id:
+            # Mettre à jour la session
+            if 'active_buttons' not in session:
+                session['active_buttons'] = []
+            session['active_buttons'].append(new_message_id)
             
-            # Récupérer des infos sur le signal pour le message
-            with engine.connect() as conn:
-                signal = conn.execute(
-                    text("SELECT pair, direction, ts_enter FROM signals WHERE id = :sid"),
-                    {"sid": signal_id}
-                ).fetchone()
-            
-            if signal:
-                pair, direction, ts_enter = signal
-                direction_emoji = "📈" if direction == "CALL" else "📉"
-                
-                # Formater le temps
-                if isinstance(ts_enter, str):
-                    try:
-                        entry_time = datetime.fromisoformat(ts_enter.replace('Z', '+00:00')).astimezone(HAITI_TZ)
-                        entry_str = entry_time.strftime('%H:%M')
-                    except:
-                        entry_str = "N/A"
-                else:
-                    entry_str = ts_enter.strftime('%H:%M') if hasattr(ts_enter, 'strftime') else "N/A"
-                
-                msg = (
-                    f"🔄 **Bougie terminée**\n"
-                    f"━━━━━━━━━━━━━━━━━━━━\n\n"
-                    f"{direction_emoji} {pair} {direction}\n"
-                    f"⏰ Bougie: {entry_str}\n"
-                    f"📊 Progression: {session['signal_count']}/{SIGNALS_PER_SESSION}\n\n"
-                    f"⏳ Résultat en cours de vérification...\n"
-                    f"Le résultat sera envoyé dès qu'il sera disponible.\n\n"
-                    f"💡 Prêt pour le prochain signal ?"
-                )
-            else:
-                msg = (
-                    f"🔄 **Bougie terminée**\n"
-                    f"━━━━━━━━━━━━━━━━━━━━\n\n"
-                    f"📊 Progression: {session['signal_count']}/{SIGNALS_PER_SESSION}\n\n"
-                    f"⏳ Résultat en cours de vérification...\n"
-                    f"Le résultat sera envoyé dès qu'il sera disponible.\n\n"
-                    f"💡 Prêt pour le prochain signal ?"
-                )
-            
-            # 🔥 BOUTON EXACTEMENT COMME DANS LE CODE DE RÉFÉRENCE
-            keyboard = [[InlineKeyboardButton(
-                f"🎯 Générer Signal #{next_num}", 
-                callback_data=f"gen_signal_{user_id}"
-            )]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
+            # Envoyer un message d'information
             try:
-                await app.bot.send_message(
-                    chat_id=user_id, 
-                    text=msg, 
-                    reply_markup=reply_markup
+                info_msg = (
+                    f"🔄 **Bougie terminée**\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"⏰ La bougie M1 est maintenant terminée.\n"
+                    f"📊 Progression: {session['signal_count']}/{SIGNALS_PER_SESSION}\n\n"
+                    f"🎯 Bouton disponible pour le signal #{session['next_signal_number']}\n"
+                    f"⏱️ Cliquez pour continuer!"
                 )
-                print(f"[VERIF-BUTTON] ✅ Bouton envoyé IMMÉDIATEMENT pour signal #{signal_id}")
-            except Exception as e:
-                print(f"[VERIF-BUTTON] ❌ Erreur envoi bouton: {e}")
-        else:
-            # Session terminée
-            print(f"[VERIF-BUTTON] ✅ Session terminée pour user {user_id}")
-            await end_session_summary(user_id, app)
+                
+                await app.bot.send_message(
+                    chat_id=user_id,
+                    text=info_msg
+                )
+            except:
+                pass
             
+    except asyncio.CancelledError:
+        print(f"[BOUGIE-BOUTON] ❌ Tâche annulée pour signal #{signal_id}")
     except Exception as e:
-        print(f"[VERIF-BUTTON] ❌ Erreur send_verification_button: {e}")
+        print(f"[BOUGIE-BOUTON] ❌ Erreur: {e}")
 
 # ================= COMMANDES TELEGRAM =================
-
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Commande de démarrage du bot"""
+    """Commande de démarrage"""
     user_id = update.effective_user.id
     username = update.effective_user.username or "Unknown"
+    
     try:
         with engine.begin() as conn:
             existing = conn.execute(
@@ -944,16 +892,13 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"✅ **Bienvenue au Bot Trading Saint Graal 4.5 !**\n\n"
             f"🎯 Rotation Itérative Multi-Marchés\n"
-            f"📊 {len(ROTATION_PAIRS)} paires depuis config.py\n"
-            f"🔄 Analyse: {ROTATION_CONFIG['pairs_per_batch']} paires/batch\n"
-            f"📦 Maximum: {ROTATION_CONFIG['max_batches_per_signal']} batches/signal\n"
+            f"📊 {len(ROTATION_PAIRS)} paires disponibles\n"
+            f"🔄 Bouton après bougie avec régénération automatique\n"
+            f"⏱️ Timeout bouton: {BUTTON_TIMEOUT_MINUTES} minutes\n"
             f"🌐 Mode actuel: {mode_text}\n\n"
             f"**Commandes:**\n"
             f"• /startsession - Démarrer session\n"
-            f"• /rotationstats - Stats rotation\n"
-            f"• /menu - Menu complet\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"💡 Recherche itérative jusqu'à trouver signal valide"
+            f"• /menu - Menu complet\n"
         )
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {e}")
@@ -961,255 +906,120 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Affiche le menu complet"""
     menu_text = (
-        f"📋 **MENU SAINT GRAAL 4.5 - ROTATION ITÉRATIVE**\n"
+        f"📋 **MENU SAINT GRAAL 4.5**\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         "**📊 Session:**\n"
         "• /startsession - Démarrer session\n"
         "• /sessionstatus - État session\n"
-        "• /endsession - Terminer session\n"
-        "• /forceend - Forcer fin session\n\n"
-        "**🔄 Rotation Itérative:**\n"
+        "• /endsession - Terminer session\n\n"
+        "**🔄 Rotation:**\n"
         "• /rotationstats - Stats rotation\n"
         "• /apistats - Stats API\n"
-        "• /pairslist - Liste paires\n"
-        "• /rotationconfig - Configuration\n\n"
-        "**📈 Statistiques:**\n"
-        "• /stats - Stats globales\n\n"
+        "• /pairslist - Liste paires\n\n"
+        "**⚙️ Configuration:**\n"
+        "• /buttonconfig - Configuration bouton\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        f"🎯 Paires: {len(ROTATION_PAIRS)} depuis config.py\n"
-        f"🔄 Batch: {ROTATION_CONFIG['pairs_per_batch']} paires\n"
-        f"📦 Max batches: {ROTATION_CONFIG['max_batches_per_signal']}\n"
-        f"⚡ Recherche itérative: {'ACTIVE' if ROTATION_CONFIG['enable_iterative_search'] else 'INACTIVE'}\n"
+        f"🎯 Paires: {len(ROTATION_PAIRS)}\n"
+        f"🔄 Bouton timeout: {BUTTON_TIMEOUT_MINUTES} min\n"
+        f"⚡ Bouton après bougie: ACTIVÉ\n"
     )
     await update.message.reply_text(menu_text)
 
-async def cmd_rotation_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Affiche les statistiques de rotation"""
-    stats = api_manager.get_stats()
-    
-    msg = (
-        f"🔄 **STATISTIQUES ROTATION ITÉRATIVE**\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"📊 Paires totales: {len(ROTATION_PAIRS)} (config.py)\n"
-        f"🔄 Paires/batch: {ROTATION_CONFIG['pairs_per_batch']}\n"
-        f"📦 Max batches/signal: {ROTATION_CONFIG['max_batches_per_signal']}\n"
-        f"🎯 Score minimum: {ROTATION_CONFIG['min_score_threshold']}\n"
-        f"⚡ Recherche itérative: {'✅ ACTIVE' if ROTATION_CONFIG['enable_iterative_search'] else '❌ INACTIVE'}\n"
-        f"🔄 Continue si pas de signal: {'✅ OUI' if ROTATION_CONFIG['continue_if_no_signal'] else '❌ NON'}\n\n"
-        f"🌐 **API Stats:**\n"
-        f"• Appels aujourd'hui: {stats['daily_calls']}/{stats['max_daily']}\n"
-        f"• Appels dernière minute: {stats['recent_minute']}/{stats['max_minute']}\n"
-        f"• Appels dernière heure: {stats['recent_hour']}\n"
-        f"• Disponible minute: {stats['calls_available_minute']}\n"
-        f"• Restant quotidien: {stats['daily_remaining']}\n"
-        f"• Signaux trackés: {stats['active_signals_tracking']}\n\n"
-        f"⚡ **Configuration:**\n"
-        f"• Cooldown API: {ROTATION_CONFIG['api_cooldown_seconds']}s\n"
-        f"• Cooldown batch: {ROTATION_CONFIG['batch_cooldown_seconds']}s\n"
-        f"• Max appels/signal: {ROTATION_CONFIG['max_api_calls_per_signal']}\n"
-        f"• Données minimum: {ROTATION_CONFIG['min_data_points']} bougies\n"
-    )
-    
-    await update.message.reply_text(msg)
-
-async def cmd_rotation_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Affiche la configuration de rotation"""
-    msg = (
-        f"⚙️ **CONFIGURATION ROTATION ITÉRATIVE**\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🔄 **Batch Configuration:**\n"
-        f"• Paires par batch: {ROTATION_CONFIG['pairs_per_batch']}\n"
-        f"• Max batches par signal: {ROTATION_CONFIG['max_batches_per_signal']}\n"
-        f"• Max paires analysées: {ROTATION_CONFIG['pairs_per_batch'] * ROTATION_CONFIG['max_batches_per_signal']}\n\n"
-        f"🎯 **Critères de Signal:**\n"
-        f"• Score minimum: {ROTATION_CONFIG['min_score_threshold']}\n"
-        f"• Score excellent: 95 (arrêt immédiat)\n"
-        f"• Bougies minimum: {ROTATION_CONFIG['min_data_points']}\n\n"
-        f"⏱️ **Timing:**\n"
-        f"• Cooldown API: {ROTATION_CONFIG['api_cooldown_seconds']}s\n"
-        f"• Cooldown batch: {ROTATION_CONFIG['batch_cooldown_seconds']}s\n"
-        f"• Max appels API/signal: {ROTATION_CONFIG['max_api_calls_per_signal']}\n\n"
-        f"🔧 **Logique:**\n"
-        f"• Recherche itérative: {ROTATION_CONFIG['enable_iterative_search']}\n"
-        f"• Continue sans signal: {ROTATION_CONFIG['continue_if_no_signal']}\n"
-        f"• Stratégie: {ROTATION_CONFIG['rotation_strategy']}\n\n"
-        f"📊 **Statut:**\n"
-        f"• Paires disponibles: {len(ROTATION_PAIRS)}\n"
-        f"• Mode: {'OTC (Crypto)' if otc_provider.is_weekend() else 'Forex'}\n"
-        f"• Forex ouvert: {is_forex_open()}\n"
-    )
-    
-    await update.message.reply_text(msg)
-
-async def cmd_api_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Affiche les statistiques API détaillées"""
-    stats = api_manager.get_stats()
-    
-    msg = (
-        f"🌐 **STATISTIQUES API DÉTAILLÉES**\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"📊 **Utilisation quotidienne:**\n"
-        f"• Appels: {stats['daily_calls']}/{stats['max_daily']}\n"
-        f"• Pourcentage: {(stats['daily_calls']/stats['max_daily']*100):.1f}%\n"
-        f"• Restant: {stats['daily_remaining']}\n\n"
-        f"⏱️ **Utilisation minute:**\n"
-        f"• Appels: {stats['recent_minute']}/{stats['max_minute']}\n"
-        f"• Pourcentage: {(stats['recent_minute']/stats['max_minute']*100):.1f}%\n"
-        f"• Disponible: {stats['calls_available_minute']}\n\n"
-        f"📈 **Utilisation heure:**\n"
-        f"• Appels dernière heure: {stats['recent_hour']}\n\n"
-        f"🎯 **Signaux trackés:** {stats['active_signals_tracking']}\n\n"
-        f"⚡ **Recommandations:**\n"
-    )
-    
-    if stats['calls_available_minute'] < 5:
-        msg += f"• ⚠️ Limite minute proche ({stats['calls_available_minute']} appels disponibles)\n"
-    if stats['daily_remaining'] < 100:
-        msg += f"• ⚠️ Limite quotidienne proche ({stats['daily_remaining']} appels restants)\n"
-    
-    if stats['calls_available_minute'] > 10 and stats['daily_remaining'] > 200:
-        msg += f"• ✅ Bonne marge de manœuvre\n"
-    
-    if stats['daily_calls'] > stats['max_daily'] * 0.8:
-        msg += f"• 🔴 Réduction recommandée de l'activité\n"
-    
-    await update.message.reply_text(msg)
-
-async def cmd_pairs_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Affiche la liste des paires analysées"""
-    pairs_per_row = 3
-    pairs_text = ""
-    
-    for i in range(0, len(ROTATION_PAIRS), pairs_per_row):
-        row = ROTATION_PAIRS[i:i+pairs_per_row]
-        pairs_text += " • " + " | ".join(row) + "\n"
-    
-    msg = (
-        f"📋 **LISTE DES PAIRES ANALYSÉES**\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"Source: config.py (variable d'environnement PAIRS)\n"
-        f"Total: {len(ROTATION_PAIRS)} paires\n\n"
-        f"{pairs_text}\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"🔄 Rotation: {ROTATION_CONFIG['pairs_per_batch']} paires/batch\n"
-        f"📦 Max: {ROTATION_CONFIG['max_batches_per_signal']} batches/signal\n"
-        f"🎯 Score minimum: {ROTATION_CONFIG['min_score_threshold']}\n"
-        f"⚡ Recherche itérative: {'ACTIVE' if ROTATION_CONFIG['enable_iterative_search'] else 'INACTIVE'}"
-    )
-    
-    await update.message.reply_text(msg)
-
 async def cmd_start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Démarre une nouvelle session de 8 signaux"""
+    """Démarre une nouvelle session"""
     user_id = update.effective_user.id
     
-    if user_id in active_sessions:
-        session = active_sessions[user_id]
+    session = session_manager.get_session(user_id)
+    if session and session['status'] == 'active':
+        next_num = session['next_signal_number']
         
-        if session['signal_count'] < SIGNALS_PER_SESSION:
-            next_num = session['signal_count'] + 1
-            
-            # 🔥 CORRECTION IMPORTANTE : LE BOUTON DOIT ÊTRE APRÈS LE TEXTE
-            # D'abord envoyer le texte de session déjà active
-            await update.message.reply_text(
-                f"⚠️ Session déjà active !\n\n"
-                f"📊 Progression: {session['signal_count']}/{SIGNALS_PER_SESSION}\n"
-                f"✅ Wins: {session['wins']}\n"
-                f"❌ Losses: {session['losses']}\n\n"
-                f"Continuer avec signal #{next_num} ⬇️"
-            )
-            
-            # 🔥 ENSUITE envoyer le bouton comme message séparé
-            keyboard = [[InlineKeyboardButton(
-                f"🎯 Générer Signal #{next_num}", 
-                callback_data=f"gen_signal_{user_id}"
-            )]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await update.message.reply_text(
-                "Cliquez pour continuer ⬇️",
-                reply_markup=reply_markup
-            )
-        else:
-            await update.message.reply_text(
-                f"⚠️ Session déjà terminée !\n\n"
-                f"📊 Résultat: {session['signal_count']}/{SIGNALS_PER_SESSION}\n"
-                f"✅ Wins: {session['wins']}\n"
-                f"❌ Losses: {session['losses']}\n\n"
-                f"Utilisez /endsession pour voir le résumé"
-            )
+        # D'ABORD LE TEXTE
+        await update.message.reply_text(
+            f"⚠️ Session déjà active !\n\n"
+            f"📊 Progression: {session['signal_count']}/{SIGNALS_PER_SESSION}\n"
+            f"✅ Wins: {session['wins']}\n"
+            f"❌ Losses: {session['losses']}\n\n"
+            f"Continuer avec signal #{next_num} ⬇️"
+        )
+        
+        # ENSUITE LE BOUTON (COMME DANS LE CODE PRÉCÉDENT)
+        keyboard = [[InlineKeyboardButton(
+            f"🎯 Générer Signal #{next_num}", 
+            callback_data=f"gen_signal_{user_id}"
+        )]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            "⬇️ Bouton de génération ⬇️",
+            reply_markup=reply_markup
+        )
         return
     
     # Créer nouvelle session
-    now_haiti = get_haiti_now()
-    active_sessions[user_id] = {
-        'start_time': now_haiti,
-        'signal_count': 0,
-        'wins': 0,
-        'losses': 0,
-        'pending': 0,
-        'signals': [],
-        'verification_tasks': [],  # 🔥 AJOUTÉ pour les tâches de vérification
-        'reminder_tasks': []
-    }
+    session = session_manager.create_session(user_id)
     
     is_weekend = otc_provider.is_weekend()
     mode_text = "🏖️ OTC (Crypto)" if is_weekend else "📈 Forex"
     
-    # 🔥 CORRECTION IMPORTANTE : D'ABORD LE TEXTE DE SESSION DÉMARRÉE
+    # D'ABORD LE TEXTE DE SESSION DÉMARRÉE
     await update.message.reply_text(
-        "🚀 **SESSION SAINT GRAAL 4.5 DÉMARRÉE**\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"📅 {now_haiti.strftime('%H:%M:%S')}\n"
+        f"🚀 **SESSION DÉMARRÉE**\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📅 {session['start_time'].strftime('%H:%M:%S')}\n"
         f"🌐 Mode: {mode_text}\n"
-        f"🔄 Rotation: {ROTATION_CONFIG['pairs_per_batch']} paires/batch\n"
-        f"📦 Max batches: {ROTATION_CONFIG['max_batches_per_signal']}\n"
         f"🎯 Objectif: {SIGNALS_PER_SESSION} signaux M1\n"
-        f"📊 Paires analysées: {len(ROTATION_PAIRS)} (config.py)\n\n"
-        f"Cliquez pour générer signal #1 ⬇️"
+        f"🔄 Bouton timeout: {BUTTON_TIMEOUT_MINUTES} minutes\n"
+        f"⚡ Bouton après bougie: ACTIVÉ\n\n"
+        f"Cliquez sur le bouton pour commencer ⬇️"
     )
     
-    # 🔥 ENSUITE LE BOUTON COMME MESSAGE SÉPARÉ (EXACTEMENT COMME DANS LE CODE DE RÉFÉRENCE)
+    # ENSUITE LE BOUTON (COMME DANS LE CODE PRÉCÉDENT)
     keyboard = [[InlineKeyboardButton(
         "🎯 Générer Signal #1", 
         callback_data=f"gen_signal_{user_id}"
     )]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await update.message.reply_text(
+    message = await update.message.reply_text(
         "⬇️ Bouton de génération ⬇️",
         reply_markup=reply_markup
     )
+    
+    if message:
+        session['active_buttons'] = [message.message_id]
 
 async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Callback pour générer un signal avec rotation itérative"""
+    """Callback pour générer un signal"""
     query = update.callback_query
     await query.answer()
     
     user_id = int(query.data.split('_')[2])
     
-    if user_id not in active_sessions:
-        await query.edit_message_text("❌ Session expirée\n\nUtilisez /startsession")
+    # Vérifier si la session est active
+    can_generate, reason = session_manager.can_generate_signal(user_id)
+    if not can_generate:
+        await query.edit_message_text(f"❌ {reason}\n\nUtilisez /startsession")
         return
     
-    session = active_sessions[user_id]
+    session = session_manager.get_session(user_id)
     
-    if session['signal_count'] >= SIGNALS_PER_SESSION:
-        await end_session_summary(user_id, context.application, query.message)
-        return
+    # Mettre à jour le message avec état
+    await query.edit_message_text(
+        f"🔄 **Génération du signal #{session['next_signal_number']}**\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"Analyse rotation itérative en cours...\n"
+        f"⏱️ Patientez quelques secondes..."
+    )
     
-    await query.edit_message_text("🔄 Analyse itérative multi-marchés en cours...")
-    
-    # 🔥 UTILISATION DE LA FONCTION AVEC ROTATION ITÉRATIVE
+    # Générer le signal - PAS DE FALLBACK
     signal_id = await generate_m1_signal_with_iterative_rotation(user_id, context.application)
     
     if signal_id:
-        session['signal_count'] += 1
-        session['pending'] += 1
-        session['signals'].append(signal_id)
+        # Mettre à jour la session
+        session_manager.update_signal_count(user_id)
+        session['pending_signals'] += 1
         
-        print(f"[SIGNAL] ✅ Signal #{signal_id} généré avec rotation itérative")
-        
+        # Récupérer les infos du signal
         with engine.connect() as conn:
             signal = conn.execute(
                 text("SELECT pair, direction, confidence, payload_json, ts_enter FROM signals WHERE id = :sid"),
@@ -1221,25 +1031,26 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
             
             if isinstance(ts_enter, str):
                 entry_time = datetime.fromisoformat(ts_enter.replace('Z', '+00:00')).astimezone(HAITI_TZ)
+                entry_time_utc = datetime.fromisoformat(ts_enter.replace('Z', '+00:00'))
             else:
                 entry_time = ts_enter.astimezone(HAITI_TZ)
-            
-            now_haiti = get_haiti_now()
+                entry_time_utc = ts_enter
             
             direction_text = "BUY ↗️" if direction == "CALL" else "SELL ↘️"
             entry_time_formatted = entry_time.strftime('%H:%M')
             
-            # Décode payload pour info rotation itérative
+            # Info rotation
             rotation_info = ""
             if payload_json:
                 try:
                     payload = json.loads(payload_json)
                     if 'rotation_info' in payload:
                         ri = payload['rotation_info']
-                        rotation_info = f"\n🔄 {ri['pairs_analyzed']} paires analysées ({ri.get('batches_analyzed', '?')} batches)"
+                        rotation_info = f"\n🔄 {ri['pairs_analyzed']} paires analysées"
                 except:
                     pass
             
+            # Envoyer le signal
             signal_msg = (
                 f"🎯 **SIGNAL #{session['signal_count']} - ROTATION ITÉRATIVE**\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -1248,31 +1059,39 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
                 f"⏰ Heure entrée: **{entry_time_formatted}**\n"
                 f"💪 Confiance: **{int(confidence*100)}%**\n"
                 f"{rotation_info}\n"
-                f"⏱️ Timeframe: 1 minute"
+                f"⏱️ Timeframe: 1 minute\n\n"
+                f"✅ Signal généré avec succès!"
             )
             
             try:
                 await context.application.bot.send_message(chat_id=user_id, text=signal_msg)
-                print(f"[SIGNAL] ✅ Signal #{signal_id} ENVOYÉ")
-                
-                # 🔥 PROGRAMMER L'ENVOI DU BOUTON APRÈS FIN DE BOUGIE
-                if isinstance(ts_enter, str):
-                    entry_time_utc = datetime.fromisoformat(ts_enter.replace('Z', '+00:00'))
-                else:
-                    entry_time_utc = ts_enter
-                
-                # Ajouter la tâche de vérification
-                button_task = asyncio.create_task(
-                    schedule_verification_button(signal_id, user_id, context.application, entry_time_utc)
-                )
-                session['verification_tasks'].append(button_task)
-                
+                print(f"[SIGNAL] ✅ Signal #{signal_id} envoyé")
             except Exception as e:
-                print(f"[SIGNAL] ❌ Erreur envoi signal: {e}")
+                print(f"[SIGNAL] ❌ Erreur envoi: {e}")
         
-        # 🔥 CORRECTION IMPORTANTE : D'ABORD LE TEXTE DE CONFIRMATION
+        # Nettoyer les anciens boutons
+        await cleanup_old_buttons(user_id, context.application)
+        
+        # Vérifier si la session est terminée
+        if session['signal_count'] >= SIGNALS_PER_SESSION:
+            await end_session_summary(user_id, context.application)
+            return
+        
+        # 🔥 PROGRAMMER LE BOUTON APRÈS LA BOUGIE (EXACTEMENT COMME DANS LE CODE PRÉCÉDENT)
+        if signal:
+            # Planifier l'envoi du bouton après la bougie
+            button_task = asyncio.create_task(
+                schedule_button_after_candle(signal_id, user_id, context.application, entry_time_utc)
+            )
+            
+            # Stocker la tâche dans la session
+            if 'button_tasks' not in session:
+                session['button_tasks'] = []
+            session['button_tasks'].append(button_task)
+        
+        # Message de confirmation (COMME DANS LE CODE PRÉCÉDENT)
         confirmation_msg = (
-            f"✅ **Signal #{session['signal_count']} généré avec rotation itérative!**\n"
+            f"✅ **Signal #{session['signal_count']} généré!**\n"
             f"━━━━━━━━━━━━━━━━━━━━\n\n"
             f"📊 Progression: {session['signal_count']}/{SIGNALS_PER_SESSION}\n\n"
             f"💡 Préparez votre position!\n"
@@ -1281,120 +1100,100 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
         
         await query.edit_message_text(confirmation_msg)
     else:
-        await query.edit_message_text(
-            "⚠️ Impossible de générer un signal\n\n"
-            "Erreur dans le système de rotation.\n"
-            "Réessayez dans 1 minute ou vérifiez /apistats"
+        # 🔥 AUCUN SIGNAL TROUVÉ - PAS DE FALLBACK
+        error_msg = (
+            f"❌ **Aucun signal valide trouvé**\n\n"
+            f"Le système de rotation n'a trouvé aucun signal satisfaisant "
+            f"après analyse de toutes les paires.\n\n"
+            f"📊 Paires analysées: {len(ROTATION_PAIRS)}\n"
+            f"🎯 Score minimum requis: {ROTATION_CONFIG['min_score_threshold']}\n\n"
+            f"🔄 Essayez à nouveau dans 1 minute."
         )
         
-        # 🔥 ENSUITE LE BOUTON DE RÉESSAI
-        keyboard = [[InlineKeyboardButton("🔄 Réessayer", callback_data=f"gen_signal_{user_id}")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.message.reply_text("Voulez-vous réessayer ?", reply_markup=reply_markup)
+        await query.edit_message_text(error_msg)
+        
+        # Recréer un bouton pour réessayer
+        new_message_id = await create_signal_button(user_id, context.application)
+        
+        if new_message_id:
+            if 'active_buttons' not in session:
+                session['active_buttons'] = []
+            session['active_buttons'].append(new_message_id)
 
 async def cmd_session_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Affiche l'état de la session"""
     user_id = update.effective_user.id
     
-    if user_id not in active_sessions:
+    session = session_manager.get_session(user_id)
+    if not session or session['status'] != 'active':
         await update.message.reply_text("ℹ️ Aucune session active\n\nUtilisez /startsession")
         return
     
-    session = active_sessions[user_id]
     duration = (get_haiti_now() - session['start_time']).total_seconds() / 60
     winrate = (session['wins'] / session['signal_count'] * 100) if session['signal_count'] > 0 else 0
     
     msg = (
-        "📊 **ÉTAT SESSION SAINT GRAAL**\n"
+        "📊 **ÉTAT SESSION**\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         f"⏱️ Durée: {duration:.1f} min\n"
         f"📈 Progression: {session['signal_count']}/{SIGNALS_PER_SESSION}\n\n"
         f"✅ Wins: {session['wins']}\n"
         f"❌ Losses: {session['losses']}\n"
-        f"⏳ Signaux en cours: {session['pending']}\n\n"
+        f"⏳ Signaux en cours: {session['pending_signals']}\n\n"
         f"📊 Win Rate: {winrate:.1f}%\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        f"🎯 Garantie: {SIGNALS_PER_SESSION - session['signal_count']} signaux restants\n"
+        f"🔄 Prochain signal: #{session['next_signal_number']}\n"
+        f"⏱️ Dernier signal: {session['last_signal_time'].strftime('%H:%M:%S') if session['last_signal_time'] else 'N/A'}\n\n"
+        f"⚡ **Bouton:**\n"
+        f"• Timeout: {BUTTON_TIMEOUT_MINUTES} minutes\n"
+        f"• Après bougie: ✅ ACTIVÉ\n"
+        f"• Boutons actifs: {len(session.get('active_buttons', []))}"
     )
     
     await update.message.reply_text(msg)
 
 async def cmd_end_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Termine la session active manuellement"""
+    """Termine la session"""
     user_id = update.effective_user.id
     
-    if user_id not in active_sessions:
+    session = session_manager.get_session(user_id)
+    if not session:
         await update.message.reply_text("ℹ️ Aucune session active")
         return
     
-    session = active_sessions[user_id]
-    
-    if 'reminder_tasks' in session:
-        for task in session['reminder_tasks']:
-            if not task.done():
-                try:
-                    task.cancel()
-                except:
-                    pass
-    
-    if 'verification_tasks' in session:
-        for task in session['verification_tasks']:
-            if not task.done():
-                try:
-                    task.cancel()
-                except:
-                    pass
-    
-    if session['pending'] > 0:
+    if session['pending_signals'] > 0:
         await update.message.reply_text(
-            f"⚠️ {session['pending']} signal(s) en cours\n\n"
-            f"Attendez la fin des bougies ou confirmez la fin avec /forceend"
+            f"⚠️ {session['pending_signals']} signal(s) en cours\n\n"
+            f"Attendez la fin des bouches ou utilisez /forceend"
         )
         return
     
+    session_manager.end_session(user_id)
     await end_session_summary(user_id, context.application)
-    await update.message.reply_text("✅ Session terminée !")
 
 async def cmd_force_end(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Force la fin de session même avec signaux en attente"""
+    """Force la fin de session"""
     user_id = update.effective_user.id
     
-    if user_id not in active_sessions:
+    session = session_manager.get_session(user_id)
+    if not session:
         await update.message.reply_text("ℹ️ Aucune session active")
         return
     
-    session = active_sessions[user_id]
-    
-    if 'verification_tasks' in session:
-        for task in session['verification_tasks']:
-            if not task.done():
-                try:
-                    task.cancel()
-                except:
-                    pass
-    
-    if 'reminder_tasks' in session:
-        for task in session['reminder_tasks']:
-            if not task.done():
-                try:
-                    task.cancel()
-                except:
-                    pass
-    
+    session_manager.end_session(user_id)
     await end_session_summary(user_id, context.application)
     await update.message.reply_text("✅ Session terminée (forcée) !")
 
-async def end_session_summary(user_id, app, message=None):
+async def end_session_summary(user_id, app):
     """Envoie le résumé de fin de session"""
-    if user_id not in active_sessions:
+    session = session_manager.get_session(user_id)
+    if not session:
         return
     
-    session = active_sessions[user_id]
     duration = (get_haiti_now() - session['start_time']).total_seconds() / 60
     winrate = (session['wins'] / session['signal_count'] * 100) if session['signal_count'] > 0 else 0
     
     summary = (
-        "🏁 **SESSION SAINT GRAAL TERMINÉE**\n"
+        "🏁 **SESSION TERMINÉE**\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         f"⏱️ Durée: {duration:.1f} min\n"
         f"📊 Signaux: {session['signal_count']}/{SIGNALS_PER_SESSION}\n\n"
@@ -1406,83 +1205,141 @@ async def end_session_summary(user_id, app, message=None):
         "Utilisez /startsession pour nouvelle session"
     )
     
-    keyboard = [[InlineKeyboardButton("🚀 Nouvelle Session", callback_data="new_session")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    if message:
-        await message.reply_text(summary, reply_markup=reply_markup)
-    else:
-        await app.bot.send_message(chat_id=user_id, text=summary, reply_markup=reply_markup)
-    
-    del active_sessions[user_id]
+    await app.bot.send_message(chat_id=user_id, text=summary)
 
-async def callback_new_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Callback pour démarrer nouvelle session"""
-    query = update.callback_query
-    await query.answer()
+async def cmd_rotation_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Affiche les statistiques de rotation"""
+    stats = api_manager.get_stats()
     
-    user_id = query.from_user.id
+    msg = (
+        f"🔄 **STATISTIQUES ROTATION**\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📊 Paires totales: {len(ROTATION_PAIRS)}\n"
+        f"🔄 Paires/batch: {ROTATION_CONFIG['pairs_per_batch']}\n"
+        f"📦 Max batches: {ROTATION_CONFIG['max_batches_per_signal']}\n"
+        f"🎯 Score minimum: {ROTATION_CONFIG['min_score_threshold']}\n"
+        f"⚡ Recherche itérative: {'✅ OUI' if ROTATION_CONFIG['enable_iterative_search'] else '❌ NON'}\n\n"
+        f"🌐 **API Stats:**\n"
+        f"• Appels aujourd'hui: {stats['daily_calls']}/{stats['max_daily']}\n"
+        f"• Appels dernière minute: {stats['recent_minute']}/{stats['max_minute']}\n"
+        f"• Appels dernière heure: {stats['recent_hour']}\n"
+        f"• Restant quotidien: {stats['daily_remaining']}\n"
+    )
     
-    await query.message.delete()
+    await update.message.reply_text(msg)
+
+async def cmd_button_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Affiche la configuration du bouton"""
+    msg = (
+        f"⚙️ **CONFIGURATION BOUTON**\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🔄 **Système de bouton après bougie:**\n"
+        f"• Apparaît après: Fin de bougie M1\n"
+        f"• Timeout: {BUTTON_TIMEOUT_MINUTES} minutes\n"
+        f"• Régénération auto: ✅ ACTIVÉE\n"
+        f"• Nettoyage auto: ✅ ACTIVÉ\n\n"
+        f"🎯 **Fonctionnement:**\n"
+        f"1. Signal généré → Envoyé immédiatement\n"
+        f"2. Bouton apparaît → Après fin bougie M1\n"
+        f"3. Se régénère → Après timeout\n"
+        f"4. Un seul bouton → Actif à la fois\n\n"
+        f"⚠️ **En cas de problème:**\n"
+        f"• Utilisez /startsession pour régénérer\n"
+        f"• Vérifiez /sessionstatus pour l'état\n"
+        f"• Contactez le support si problème persiste"
+    )
     
-    fake_message = query.message
-    fake_update = Update(update_id=0, message=fake_message)
-    fake_update.effective_user = query.from_user
-    
-    await cmd_start_session(fake_update, context)
+    await update.message.reply_text(msg)
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Affiche les statistiques globales"""
     try:
         with engine.connect() as conn:
-            total = conn.execute(text('SELECT COUNT(*) FROM signals WHERE timeframe = 1')).scalar()
-            wins = conn.execute(text("SELECT COUNT(*) FROM signals WHERE result='WIN' AND timeframe = 1")).scalar()
-            losses = conn.execute(text("SELECT COUNT(*) FROM signals WHERE result='LOSE' AND timeframe = 1")).scalar()
+            total = conn.execute(text('SELECT COUNT(*) FROM signals')).scalar()
+            wins = conn.execute(text("SELECT COUNT(*) FROM signals WHERE result='WIN'")).scalar()
+            losses = conn.execute(text("SELECT COUNT(*) FROM signals WHERE result='LOSE'")).scalar()
         
         verified = wins + losses
         winrate = (wins/verified*100) if verified > 0 else 0
         
-        # Stats rotation
         rotation_stats = api_manager.get_stats()
         
         msg = (
-            f"📊 **Statistiques Saint Graal 4.5**\n\n"
+            f"📊 **Statistiques Globales**\n\n"
             f"Total signaux: {total}\n"
             f"✅ Wins: {wins}\n"
             f"❌ Losses: {losses}\n"
             f"📈 Win rate: {winrate:.1f}%\n\n"
-            f"🔄 **Rotation Itérative:**\n"
-            f"• Paires analysées: {len(ROTATION_PAIRS)} (config.py)\n"
-            f"• Appels API aujourd'hui: {rotation_stats['daily_calls']}/{rotation_stats['max_daily']}\n"
-            f"• Appels dernière minute: {rotation_stats['recent_minute']}/{rotation_stats['max_minute']}\n"
-            f"• Signaux trackés: {rotation_stats['active_signals_tracking']}\n\n"
-            f"🎯 Garantie: 8 signaux/session"
+            f"🔄 **Rotation:**\n"
+            f"• Paires analysées: {len(ROTATION_PAIRS)}\n"
+            f"• Appels API: {rotation_stats['daily_calls']}/{rotation_stats['max_daily']}\n\n"
+            f"🎯 **Sessions actives:** {len(session_manager.active_sessions)}\n"
+            f"🔄 **Bouton après bougie:** ✅ ACTIVÉ"
         )
         
         await update.message.reply_text(msg)
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {e}")
 
-# ================= SERVEUR HTTP =================
+async def cmd_pairslist(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Affiche la liste des paires analysées"""
+    pairs_per_row = 3
+    pairs_text = ""
+    
+    for i in range(0, len(ROTATION_PAIRS), pairs_per_row):
+        row = ROTATION_PAIRS[i:i+pairs_per_row]
+        pairs_text += " • " + " | ".join(row) + "\n"
+    
+    msg = (
+        f"📋 **LISTE DES PAIRES ANALYSÉES**\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"Source: config.py\n"
+        f"Total: {len(ROTATION_PAIRS)} paires\n\n"
+        f"{pairs_text}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔄 Rotation: {ROTATION_CONFIG['pairs_per_batch']} paires/batch\n"
+        f"📦 Max: {ROTATION_CONFIG['max_batches_per_signal']} batches/signal\n"
+        f"🎯 Score minimum: {ROTATION_CONFIG['min_score_threshold']}"
+    )
+    
+    await update.message.reply_text(msg)
 
+async def cmd_apistats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Affiche les statistiques API détaillées"""
+    stats = api_manager.get_stats()
+    
+    msg = (
+        f"🌐 **STATISTIQUES API**\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📊 **Utilisation quotidienne:**\n"
+        f"• Appels: {stats['daily_calls']}/{stats['max_daily']}\n"
+        f"• Pourcentage: {(stats['daily_calls']/stats['max_daily']*100):.1f}%\n"
+        f"• Restant: {stats['daily_remaining']}\n\n"
+        f"⏱️ **Utilisation minute:**\n"
+        f"• Appels: {stats['recent_minute']}/{stats['max_minute']}\n"
+        f"• Pourcentage: {(stats['recent_minute']/stats['max_minute']*100):.1f}%\n"
+        f"• Disponible: {stats['calls_available_minute']}\n\n"
+        f"📈 **Utilisation heure:**\n"
+        f"• Appels dernière heure: {stats['recent_hour']}\n\n"
+        f"🎯 **Signaux trackés:** {stats['active_signals_tracking']}"
+    )
+    
+    await update.message.reply_text(msg)
+
+# ================= SERVEUR HTTP =================
 async def health_check(request):
-    """Endpoint de santé pour le serveur HTTP"""
+    """Endpoint de santé"""
     return web.json_response({
         'status': 'ok',
         'timestamp': get_haiti_now().isoformat(),
-        'forex_open': is_forex_open(),
-        'otc_active': otc_provider.is_weekend(),
-        'active_sessions': len(active_sessions),
+        'active_sessions': len(session_manager.active_sessions),
         'rotation_pairs': len(ROTATION_PAIRS),
-        'api_stats': api_manager.get_stats(),
-        'rotation_config': ROTATION_CONFIG,
-        'mode': 'OTC' if otc_provider.is_weekend() else 'Forex',
-        'strategy': 'Saint Graal 4.5 avec Rotation Itérative',
-        'signals_per_session': SIGNALS_PER_SESSION,
+        'button_timeout': BUTTON_TIMEOUT_MINUTES,
+        'button_after_candle': 'active'
     })
 
 async def start_http_server():
-    """Démarre le serveur HTTP pour les checks de santé"""
+    """Démarre le serveur HTTP"""
     app = web.Application()
     app.router.add_get('/health', health_check)
     app.router.add_get('/', health_check)
@@ -1498,22 +1355,19 @@ async def start_http_server():
     return runner
 
 # ================= POINT D'ENTRÉE =================
-
 async def main():
     print("\n" + "="*60)
-    print("🤖 BOT SAINT GRAAL 4.5 - ROTATION ITÉRATIVE MULTI-MARCHÉS")
-    print("🎯 8 SIGNAUX GARANTIS - ANALYSE ITÉRATIVE MULTI-PAIRES")
-    print("🔄 RECHERCHE ITÉRATIVE JUSQU'À TROUVER SIGNAL VALIDE")
+    print("🤖 BOT SAINT GRAAL 4.5 - ROTATION ITÉRATIVE")
+    print("🎯 8 SIGNAUX GARANTIS - BOUTON APRÈS BOUGIE")
+    print("🔄 BOUTON APPARAÎT APRÈS FIN BOUGIE M1")
     print("="*60)
     print(f"🎯 Stratégie: Saint Graal 4.5 avec Rotation Itérative")
-    print(f"📊 Paires analysées: {len(ROTATION_PAIRS)} (config.py)")
+    print(f"📊 Paires analysées: {len(ROTATION_PAIRS)}")
     print(f"🔄 Batch: {ROTATION_CONFIG['pairs_per_batch']} paires")
     print(f"📦 Max batches: {ROTATION_CONFIG['max_batches_per_signal']}")
     print(f"🎯 Score minimum: {ROTATION_CONFIG['min_score_threshold']}")
-    print(f"⚡ Recherche itérative: {ROTATION_CONFIG['enable_iterative_search']}")
-    print(f"🔄 Continue si pas de signal: {ROTATION_CONFIG['continue_if_no_signal']}")
-    print(f"🔧 Gestion limites API: Active avec tracking par signal")
-    print(f"🔄 Bouton après bougie: ACTIF (comme dans le code de référence)")
+    print(f"🔄 Bouton après bougie: ✅ ACTIVÉ")
+    print(f"⏱️ Bouton timeout: {BUTTON_TIMEOUT_MINUTES} minutes")
     print("="*60 + "\n")
 
     # Initialiser la base de données
@@ -1536,36 +1390,29 @@ async def main():
     
     # Commandes rotation
     app.add_handler(CommandHandler('rotationstats', cmd_rotation_stats))
-    app.add_handler(CommandHandler('rotationconfig', cmd_rotation_config))
-    app.add_handler(CommandHandler('apistats', cmd_api_stats))
-    app.add_handler(CommandHandler('pairslist', cmd_pairslist))
+    app.add_handler(CommandHandler('buttonconfig', cmd_button_config))
+    app.add_handler(CommandHandler('pairslist', cmd_pairslist))  # ✅ CORRIGÉ
+    app.add_handler(CommandHandler('apistats', cmd_apistats))    # ✅ CORRIGÉ
     
     # Callbacks
     app.add_handler(CallbackQueryHandler(callback_generate_signal, pattern=r'^gen_signal_'))
-    app.add_handler(CallbackQueryHandler(callback_new_session, pattern=r'^new_session$'))
-
+    
     await app.initialize()
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
 
     bot_info = await app.bot.get_me()
     print(f"✅ BOT ACTIF: @{bot_info.username}\n")
-    print(f"🔧 Mode actuel: {'OTC (Crypto)' if otc_provider.is_weekend() else 'Forex'}")
-    print(f"📊 Paires: {len(ROTATION_PAIRS)} depuis config.py")
-    print(f"🔄 Batch: {ROTATION_CONFIG['pairs_per_batch']} paires")
-    print(f"📦 Max batches: {ROTATION_CONFIG['max_batches_per_signal']}")
-    print(f"🎯 Score minimum: {ROTATION_CONFIG['min_score_threshold']}")
-    print(f"⚡ Recherche itérative: {'ACTIVE' if ROTATION_CONFIG['enable_iterative_search'] else 'INACTIVE'}")
-    print(f"🔄 Continue si pas de signal: {'OUI' if ROTATION_CONFIG['continue_if_no_signal'] else 'NON'}")
-    print(f"📈 Gestion limites API: Active avec tracking par signal")
-    print(f"🔄 Bouton après bougie: IMPLÉMENTÉ (comme dans le code de référence)")
-    print(f"⏰ Timing: Bouton apparaît immédiatement après fin de bougie M1")
+    print(f"🔧 Mode: {'OTC (Crypto)' if otc_provider.is_weekend() else 'Forex'}")
+    print(f"📊 Paires: {len(ROTATION_PAIRS)}")
+    print(f"🔄 Bouton après bougie: ✅ ACTIVÉ")
+    print(f"⏱️ Bouton timeout: {BUTTON_TIMEOUT_MINUTES} min")
 
     try:
         while True:
             await asyncio.sleep(1)
     except (KeyboardInterrupt, SystemExit):
-        print("\n🛑 Arrêt du Bot Saint Graal 4.5...")
+        print("\n🛑 Arrêt du bot...")
         await app.updater.stop()
         await app.stop()
         await app.shutdown()
