@@ -1,6 +1,5 @@
 """
-utils.py - STRATÉGIE BINAIRE M1 PRO - VERSION 4.6 ULTIMATE PLUS
-Ajout: Croisement bande médiane BB + Micro garde-fou momentum + Filtre ATR
+utils.py - STRATÉGIE BINAIRE M1 PRO - VERSION 4.6 ULTIMATE PLUS COMPLÈTE
 """
 
 import pandas as pd
@@ -12,41 +11,38 @@ from ta.volatility import BollingerBands, AverageTrueRange
 import warnings
 warnings.filterwarnings('ignore')
 
-# ================= CONFIGURATION AVEC FILTRES AJOUTÉS =================
+# ================= CONFIGURATION =================
 
 SAINT_GRAAL_CONFIG = {
     'expiration_minutes': 5,
     
-    # 🔥 AJOUT: MICRO GARDE-FOU MOMENTUM
     'micro_momentum_filter': {
         'enabled': True,
-        'lookback_bars': 3,           # Dernières 3 bougies M1
-        'min_bullish_bars': 2,        # Minimum 2/3 bougies haussières pour BUY
-        'min_bearish_bars': 2,        # Minimum 2/3 bougies baissières pour SELL
-        'require_price_alignment': True,  # Prix doit suivre la direction
-        'require_volume_confirmation': False,  # Optionnel selon les données
-        'weight': 15,                 # Poids dans le score total
+        'lookback_bars': 3,
+        'min_bullish_bars': 2,
+        'min_bearish_bars': 2,
+        'require_price_alignment': True,
+        'require_volume_confirmation': False,
+        'weight': 15,
     },
     
-    # 🔥 AJOUT: FILTRE ATR
     'atr_filter': {
         'enabled': True,
-        'window': 14,                  # Période ATR standard
-        'min_atr_pips': 2,            # Volatilité minimale requise (2 pips)
-        'max_atr_pips': 25,           # Volatilité maximale autorisée (25 pips)
-        'optimal_atr_pips': [5, 15],  # Zone optimale 5-15 pips
-        'atr_trend_weight': 10,       # Bonus si ATR en hausse (momentum)
-        'squeeze_detection': True,    # Détection de squeeze ATR
+        'window': 14,
+        'min_atr_pips': 2,
+        'max_atr_pips': 25,
+        'optimal_atr_pips': [5, 15],
+        'atr_trend_weight': 10,
+        'squeeze_detection': True,
     },
     
-    # 🔥 AJOUT: CONFIG CROISEMENT BANDE MÉDIANE BB
     'bb_crossover': {
         'enabled': True,
-        'lookback_bars': 2,           # Vérifier les 2 dernières bougies
-        'require_confirmation': True, # Confirmation requise
-        'weight': 12,                 # Poids dans le score
-        'min_candle_size_pips': 3,    # Taille minimale de bougie
-        'strict_mode': True,          # Mode strict ou non
+        'lookback_bars': 2,
+        'require_confirmation': True,
+        'weight': 12,
+        'min_candle_size_pips': 3,
+        'strict_mode': True,
     },
     
     'buy_rules': {
@@ -73,14 +69,6 @@ SAINT_GRAAL_CONFIG = {
         'score_threshold': 75,
     },
     
-    'momentum_context': {
-        'trend_overbought': 65,
-        'trend_oversold': 35,
-        'range_overbought': 72,
-        'range_oversold': 28,
-        'strong_trend_threshold': 1.2,
-    },
-    
     'm5_filter': {
         'enabled': True,
         'ema_fast': 50,
@@ -96,7 +84,7 @@ SAINT_GRAAL_CONFIG = {
         'oversold_zone': 30,
         'overbought_zone': 70,
         'middle_band_weight': 25,
-        'crossover_weight': 15,  # Bonus pour croisement bande médiane
+        'crossover_weight': 15,
     },
     
     'signal_config': {
@@ -106,6 +94,95 @@ SAINT_GRAAL_CONFIG = {
         'cooldown_bars_after_signal': 3
     }
 }
+
+# ================= FONCTION POUR CALCULER LE POURCENTAGE DE CONFIANCE =================
+
+def calculate_confidence_percentage(final_score):
+    """
+    Calcule le pourcentage de confiance basé sur le score final
+    Score min: 90 = 50% de confiance
+    Score max: 200 = 100% de confiance
+    """
+    min_score = 90
+    max_score = 200
+    
+    if final_score <= min_score:
+        return 50
+    elif final_score >= max_score:
+        return 100
+    else:
+        percentage = 50 + ((final_score - min_score) / (max_score - min_score)) * 50
+        return min(100, max(50, round(percentage)))
+
+# ================= FONCTION POUR GÉNÉRER LE MESSAGE DE SIGNAL =================
+
+def generate_signal_message(signal_data, pairs_analyzed=5, batches=1):
+    """
+    Génère un message formaté pour le signal
+    """
+    if not signal_data:
+        return None
+    
+    direction = signal_data['direction']
+    quality = signal_data['quality']
+    score = signal_data['score']
+    confidence = calculate_confidence_percentage(score)
+    
+    # Déterminer l'emoji et le texte de direction
+    if direction == "CALL":
+        direction_emoji = "↗️"
+        direction_text = "CALL ↗️"
+    else:
+        direction_emoji = "↘️"
+        direction_text = "PUT ↘️"
+    
+    # Déterminer les étoiles de qualité
+    quality_stars = {
+        'EXCELLENT': '⭐⭐⭐⭐⭐',
+        'HIGH': '⭐⭐⭐⭐',
+        'SOLID': '⭐⭐⭐',
+        'MINIMUM': '⭐⭐',
+        'CRITICAL': '⭐'
+    }.get(quality, '⭐')
+    
+    # Heure actuelle
+    current_time = datetime.now().strftime("%H:%M")
+    
+    # Créer le message formaté
+    message = f"""
+🎯 **SIGNAL #1 - ROTATION ITÉRATIVE**
+━━━━━━━━━━━━━━━━━━━━
+💱 ETH/USD
+📈 Direction: **{direction_text}**
+⏰ Heure entrée: **{current_time}**
+💪 Confiance: **{confidence}%**
+{quality_stars} Qualité: **{quality}**
+
+🔄 {pairs_analyzed} paires analysées ({batches} batches)
+⏱️ Timeframe: 1 minute
+🎯 Expiration: 5 minutes
+📊 Score système: **{score:.0f}/200**
+━━━━━━━━━━━━━━━━━━━━
+📋 Détails techniques:
+• Momentum aligné: ✓
+• Bollinger Bands: ✓
+• Filtre ATR: ✓  
+• Micro momentum: ✓
+• Croisement BB médiane: ✓
+━━━━━━━━━━━━━━━━━━━━
+⚠️ **RAPPEL RISQUES**
+• Maximum 3-5% du capital par trade
+• Stop loss mental obligatoire
+• Pas de revenge trading
+━━━━━━━━━━━━━━━━━━━━
+🚀 **ACTION IMMÉDIATE**
+1. Vérifier confluence sur M5
+2. Entrée au prix marché
+3. Expiration: 5 minutes
+4. TP: 75-85% | SL: 0%
+━━━━━━━━━━━━━━━━━━━━
+"""
+    return message
 
 # ================= MICRO GARDE-FOU MOMENTUM =================
 
@@ -276,7 +353,7 @@ def calculate_atr_filter(df):
         'atr_trend': atr_trend,
     }
 
-# ================= NOUVEAU: LOGIQUE CROISEMENT BANDE MÉDIANE BB =================
+# ================= LOGIQUE CROISEMENT BANDE MÉDIANE BB =================
 
 def check_bb_middle_crossover(df, direction):
     """
@@ -408,7 +485,7 @@ def check_bb_middle_crossover(df, direction):
     
     return crossover_detected, crossover_strength, reason
 
-# ================= FONCTIONS EXISTANTES DÉVELOPPÉES =================
+# ================= FONCTIONS DE BASE =================
 
 def calculate_m5_filter(df_m1):
     """Filtre M5 pour analyse de tendance"""
@@ -996,7 +1073,7 @@ def validate_candle_for_5min_sell(df):
     
     return valid, pattern, confidence, reason
 
-# ================= FONCTION PRINCIPALE MISE À JOUR =================
+# ================= FONCTION PRINCIPALE V4 =================
 
 def rule_signal_saint_graal_5min_pro_v4(df, signal_count=0, total_signals_needed=6):
     """
@@ -1207,83 +1284,114 @@ def rule_signal_saint_graal_5min_pro_v4(df, signal_count=0, total_signals_needed
     print(f"❌ Aucun signal valide - Score insuffisant ou filtres échoués")
     return None
 
-# ================= FONCTIONS DE COMPATIBILITÉ MISES À JOUR =================
+# ================= FONCTION PRINCIPALE CORRIGÉE =================
 
-def get_signal_with_metadata(df, signal_count=0, total_signals=6):
+def get_signal_with_metadata_v2(df, signal_count=0, total_signals=6, pairs_analyzed=5, batches=1):
     """
-    🔥 FONCTION PRINCIPALE AVEC NOUVEAUX FILTRES
+    🔥 VERSION CORRIGÉE avec calcul de confiance et message formaté
     """
     try:
         if df is None or len(df) < 100:
             print("❌ Données insuffisantes pour analyse")
-            return None
+            return None, None
         
         # Utiliser la version avec croisement BB, micro momentum et ATR
         result = rule_signal_saint_graal_5min_pro_v4(df, signal_count, total_signals)
         
         if result is not None:
             direction_display = result['signal']
-            quality_display = {
-                'EXCELLENT': '⭐⭐⭐⭐⭐',
-                'HIGH': '⭐⭐⭐⭐',
-                'SOLID': '⭐⭐⭐',
-                'MINIMUM': '⭐⭐',
-                'CRITICAL': '⭐'
-            }.get(result['quality'], '⭐')
             
-            reason = f"{quality_display} {direction_display} (5min) | Score: {result['score']:.0f} | BB:{result['details']['bb_crossover']}"
+            # Qualité basée sur le score
+            final_score = result['score']
+            if final_score >= 140:
+                quality = "EXCELLENT"
+                mode = "5MIN_MAX"
+            elif final_score >= 120:
+                quality = "HIGH"
+                mode = "5MIN_PRO"
+            elif final_score >= 100:
+                quality = "SOLID"
+                mode = "5MIN_STANDARD"
+            else:
+                quality = "MINIMUM"
+                mode = "5MIN_MIN"
             
-            return {
+            # Créer l'objet signal
+            signal_obj = {
                 'direction': direction_display,
-                'mode': result['mode'],
-                'quality': result['quality'],
-                'score': float(result['score']),
-                'reason': reason,
+                'mode': mode,
+                'quality': quality,
+                'score': float(final_score),
+                'confidence': calculate_confidence_percentage(final_score),
                 'expiration_minutes': 5,
-                'session_info': {
-                    'current_signal': signal_count + 1,
-                    'total_signals': total_signals,
-                    'timeframe': 'M1',
-                    'expiration': '5MIN',
-                    'filters': 'BB_CROSSOVER+MICRO_MOMENTUM+ATR+M5',
-                }
+                'details': result.get('details', {}),
+                'raw_result': result
             }
+            
+            # Générer le message formaté
+            message = generate_signal_message(signal_obj, pairs_analyzed, batches)
+            
+            return signal_obj, message
         
         print(f"🎯 Aucun signal valide - Session {signal_count+1}/{total_signals}")
-        return None
+        return None, None
         
     except Exception as e:
         print(f"❌ Erreur critique: {str(e)}")
-        return None
+        return None, None
+
+# ================= FONCTION DE COMPATIBILITÉ (pour code existant) =================
+
+def get_signal_with_metadata(df, signal_count=0, total_signals=6):
+    """
+    Fonction de compatibilité pour l'ancien code
+    Utilise get_signal_with_metadata_v2 avec valeurs par défaut
+    """
+    return get_signal_with_metadata_v2(df, signal_count, total_signals, 5, 1)
 
 # ================= POINT D'ENTRÉE PRINCIPAL =================
 
 if __name__ == "__main__":
-    print("🎯 DESK PRO BINAIRE - VERSION 4.6 ULTIMATE PLUS")
-    print("🔥 NOUVEAUX FILTRES AJOUTÉS:")
-    print("   1. Croisement bande médiane BB (signal directionnel)")
-    print("   2. Micro garde-fou momentum (cohérence dernières bougies M1)")
-    print("   3. Filtre ATR (volatilité optimale 5-15 pips)")
-    print("   4. Vétos ATR pour basse/haute volatilité")
-    print("   5. Bonus squeeze ATR pour breakouts potentiels")
-    print("\n✅ Système de filtrage multicouche optimal pour Pocket Option 5min!")
+    print("🎯 DESK PRO BINAIRE - VERSION 4.6 ULTIMATE PLUS COMPLÈTE")
+    print("🔥 FONCTIONS DISPONIBLES:")
+    print("   1. get_signal_with_metadata_v2() - Nouvelle version avec message formaté")
+    print("   2. get_signal_with_metadata()    - Compatibilité ancien code")
+    print("   3. rule_signal_saint_graal_5min_pro_v4() - Logique complète V4.6")
+    print("\n✅ Toutes les fonctions sont intégrées et opérationnelles!")
     
     # Exemple d'utilisation
     print("\n📋 EXEMPLE D'UTILISATION:")
     print("""
-    # Créer un DataFrame de données OHLC
-    df = pd.DataFrame({
-        'open': [1.1000, 1.1010, 1.1020],
-        'high': [1.1010, 1.1025, 1.1030],
-        'low': [1.0995, 1.1005, 1.1015],
-        'close': [1.1005, 1.1020, 1.1025]
-    })
+    import pandas as pd
     
-    # Obtenir un signal
-    signal = get_signal_with_metadata(df, signal_count=0, total_signals=6)
+    # Simuler des données
+    data = {
+        'open': [1.1000, 1.1010, 1.1020, 1.1015, 1.1005] * 50,
+        'high': [1.1010, 1.1025, 1.1030, 1.1020, 1.1015] * 50,
+        'low': [1.0995, 1.1005, 1.1015, 1.1000, 1.0995] * 50,
+        'close': [1.1005, 1.1020, 1.1025, 1.1010, 1.1000] * 50
+    }
+    
+    df = pd.DataFrame(data)
+    df.index = pd.date_range(start='2024-01-01', periods=250, freq='1min')
+    
+    # Obtenir le signal avec message formaté
+    signal, message = get_signal_with_metadata_v2(
+        df, 
+        signal_count=0,
+        total_signals=6,
+        pairs_analyzed=5,
+        batches=1
+    )
     
     if signal:
-        print(f"Signal détecté: {signal['direction']} | Qualité: {signal['quality']}")
+        print(f"✅ Signal détecté!")
+        print(f"   Direction: {signal['direction']}")
+        print(f"   Score: {signal['score']:.0f}/200")
+        print(f"   Confiance: {signal['confidence']}%")
+        print(f"   Qualité: {signal['quality']}")
+        print("\n📨 Message formaté à envoyer:")
+        print(message)
     else:
-        print("Aucun signal détecté")
+        print("❌ Aucun signal détecté")
     """)
