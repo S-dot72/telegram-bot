@@ -1,1415 +1,1070 @@
 """
-signal_bot.py - Bot de trading M1 - Version Saint Graal 4.5
-Analyse multi-marchés par rotation itérative avec limites API
+utils.py - STRATÉGIE BINAIRE M1 PRO - VERSION 4.5 ULTIMATE PLUS
+Ajout: Micro garde-fou momentum + Filtre ATR
 """
 
-import os, json, asyncio, random, traceback, time
-import logging
-from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
-import requests
 import pandas as pd
 import numpy as np
-from sqlalchemy import create_engine, text
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
-from aiohttp import web
+from datetime import datetime, timedelta, timezone
+from ta.trend import EMAIndicator, MACD, ADXIndicator
+from ta.momentum import RSIIndicator, StochasticOscillator
+from ta.volatility import BollingerBands, AverageTrueRange
+import warnings
+warnings.filterwarnings('ignore')
 
-# DÉSACTIVER LES LOGS HTTP VERBOSE
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("httpcore").setLevel(logging.WARNING)
+# ================= CONFIGURATION AVEC FILTRES AJOUTÉS =================
 
-# Import du vérificateur externe
-try:
-    from auto_verifier import AutoResultVerifier
-    EXTERNAL_VERIFIER_AVAILABLE = True
-except ImportError:
-    EXTERNAL_VERIFIER_AVAILABLE = False
-    print("⚠️ Vérificateur externe non disponible")
-
-from config import *
-# CORRECTION DES IMPORTS - Utiliser uniquement la fonction disponible
-try:
-    from utils import get_signal_with_metadata
-    UTILS_AVAILABLE = True
-    print("✅ Utils importé avec succès - Fonction: get_signal_with_metadata")
-except ImportError as e:
-    print(f"❌ ERREUR CRITIQUE: Impossible d'importer get_signal_with_metadata depuis utils.py")
-    print(f"   Détails: {e}")
-    print("   Vérifiez que utils.py contient bien cette fonction")
-    exit(1)
-
-# ================= LISTE DES PAIRES DEPUIS CONFIG.PY =================
-
-# Utilise directement PAIRS de config.py
-ROTATION_PAIRS = PAIRS  # 🔥 DIRECTEMENT DE CONFIG.PY
-print(f"📊 Chargement de {len(ROTATION_PAIRS)} paires depuis config.py")
-
-# Configuration rotation itérative
-ROTATION_CONFIG = {
-    'pairs_per_batch': 4,               # 4 paires analysées par batch
-    'max_batches_per_signal': 3,        # Maximum 3 batches (12 paires max)
-    'min_data_points': 100,             # Minimum 100 bougies M1
-    'api_cooldown_seconds': 2,          # 2 secondes entre chaque appel API
-    'batch_cooldown_seconds': 1,        # 1 seconde entre chaque batch
-    'min_score_threshold': 85,          # Score minimum pour accepter un signal
-    'max_api_calls_per_signal': 12,     # Maximum 12 appels API par signal
-    'enable_iterative_search': True,    # 🔥 NOUVEAU: Recherche itérative
-    'continue_if_no_signal': True,      # 🔥 Continuer avec batch suivant si pas de signal
-    'rotation_strategy': 'ITERATIVE',   # Stratégie: itérative
+SAINT_GRAAL_CONFIG = {
+    'expiration_minutes': 5,
+    
+    # 🔥 AJOUT: MICRO GARDE-FOU MOMENTUM
+    'micro_momentum_filter': {
+        'enabled': True,
+        'lookback_bars': 3,           # Dernières 3 bougies M1
+        'min_bullish_bars': 2,        # Minimum 2/3 bougies haussières pour BUY
+        'min_bearish_bars': 2,        # Minimum 2/3 bougies baissières pour SELL
+        'require_price_alignment': True,  # Prix doit suivre la direction
+        'require_volume_confirmation': False,  # Optionnel selon les données
+        'weight': 15,                 # Poids dans le score total
+    },
+    
+    # 🔥 AJOUT: FILTRE ATR
+    'atr_filter': {
+        'enabled': True,
+        'window': 14,                  # Période ATR standard
+        'min_atr_pips': 2,            # Volatilité minimale requise (2 pips)
+        'max_atr_pips': 25,           # Volatilité maximale autorisée (25 pips)
+        'optimal_atr_pips': [5, 15],  # Zone optimale 5-15 pips
+        'atr_trend_weight': 10,       # Bonus si ATR en hausse (momentum)
+        'squeeze_detection': True,    # Détection de squeeze ATR
+    },
+    
+    'buy_rules': {
+        'stoch_period': 7,
+        'stoch_smooth': 3,
+        'rsi_max_for_buy': 45,
+        'rsi_oversold': 32,
+        'require_swing_confirmation': True,
+        'min_signal_duration_bars': 2,
+        'bb_confirmation': True,
+        'score_threshold': 70,
+    },
+    
+    'sell_rules': {
+        'stoch_period': 9,
+        'stoch_smooth': 3,
+        'rsi_min_for_sell': 60,
+        'stoch_min_overbought': 68,
+        'require_swing_break': True,
+        'max_swing_distance_pips': 6,
+        'momentum_gate_diff': 12,
+        'min_signal_duration_bars': 3,
+        'bb_confirmation': True,
+        'score_threshold': 75,
+    },
+    
+    'momentum_context': {
+        'trend_overbought': 65,
+        'trend_oversold': 35,
+        'range_overbought': 72,
+        'range_oversold': 28,
+        'strong_trend_threshold': 1.2,
+    },
+    
+    'm5_filter': {
+        'enabled': True,
+        'ema_fast': 50,
+        'ema_slow': 200,
+        'min_required_m5_bars': 50,
+        'weight': 20,
+        'strict_mode': True,
+    },
+    
+    'bollinger_config': {
+        'window': 20,
+        'window_dev': 2,
+        'oversold_zone': 30,
+        'overbought_zone': 70,
+        'middle_band_weight': 25,
+    },
+    
+    'signal_config': {
+        'require_m5_alignment': True,
+        'min_quality_score': 90,
+        'max_signals_per_session': 6,
+        'cooldown_bars_after_signal': 3
+    }
 }
 
-# ================= FONCTIONS HELPER =================
+# ================= MICRO GARDE-FOU MOMENTUM =================
 
-def safe_strftime(timestamp, fmt='%H:%M:%S'):
-    """Convertit un timestamp en string formatée de manière sécurisée"""
-    if not timestamp:
-        return 'N/A'
+def check_micro_momentum(df, direction, lookback=3):
+    """
+    🔥 MICRO GARDE-FOU MOMENTUM
+    Vérifie la cohérence des dernières bougies M1 avec la direction
+    """
+    if len(df) < lookback + 2:
+        return False, 0, "Données insuffisantes pour micro momentum"
     
-    if isinstance(timestamp, datetime):
-        return timestamp.strftime(fmt)
+    recent = df.tail(lookback).copy()
+    closes = recent['close'].values
+    opens = recent['open'].values
+    highs = recent['high'].values
+    lows = recent['low'].values
     
-    try:
-        if isinstance(timestamp, str):
-            ts_clean = timestamp.replace('Z', '').replace('+00:00', '').split('.')[0]
-            try:
-                dt = datetime.fromisoformat(ts_clean)
-            except:
-                try:
-                    dt = datetime.strptime(ts_clean, '%Y-%m-%d %H:%M:%S')
-                except:
-                    try:
-                        dt = datetime.strptime(ts_clean, '%Y-%m-%d %H:%M')
-                    except:
-                        return str(timestamp)[:8]
-            
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            
-            return dt.strftime(fmt)
-    except Exception as e:
-        print(f"[DEBUG] Erreur format timestamp: {e}")
+    bullish_count = 0
+    bearish_count = 0
+    price_alignment = 0
     
-    return str(timestamp)[:8]
-
-# ================= GESTION API LIMITS AMÉLIORÉE =================
-
-class APILimitManager:
-    """Gestionnaire des limites d'API avec tracking par signal"""
+    # Analyse des dernières bougies
+    for i in range(len(recent)):
+        # Bougie haussière
+        if closes[i] > opens[i]:
+            bullish_count += 1
+        # Bougie baissière
+        elif closes[i] < opens[i]:
+            bearish_count += 1
+        
+        # Alignement des prix (tendance micro)
+        if i > 0:
+            if closes[i] > closes[i-1]:
+                price_alignment += 1
+            elif closes[i] < closes[i-1]:
+                price_alignment -= 1
     
-    def __init__(self):
-        self.api_calls = []
-        self.daily_calls = 0
-        self.signal_calls = {}  # 🔥 Tracking des appels par signal
-        self.max_calls_per_minute = 30  # Limite TwelveData
-        self.max_calls_per_day = 800    # Limite quotidienne
-        self.daily_reset_time = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    # 🔥 LOGIQUE DE CONFIRMATION MICRO
+    if direction == "BUY":
+        min_bullish = SAINT_GRAAL_CONFIG['micro_momentum_filter']['min_bullish_bars']
         
-    def can_make_call(self, signal_id=None):
-        """Vérifie si un nouvel appel API est possible"""
-        now = datetime.now()
+        # Vérification 1: Nombre de bougies haussières
+        if bullish_count < min_bullish:
+            return False, -20, f"Seulement {bullish_count}/{lookback} bougies haussières"
         
-        # Vérifier réinitialisation quotidienne
-        if now.date() > self.daily_reset_time.date():
-            self.daily_calls = 0
-            self.daily_reset_time = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        # Vérification 2: Alignement des prix
+        if (SAINT_GRAAL_CONFIG['micro_momentum_filter']['require_price_alignment'] and 
+            price_alignment < 1):
+            return False, -15, f"Alignement prix faible: {price_alignment}"
         
-        # Vérifier limite minute
-        minute_ago = now - timedelta(minutes=1)
-        recent_calls = [t for t in self.api_calls if t > minute_ago]
-        
-        if len(recent_calls) >= self.max_calls_per_minute:
-            return False, f"Limite minute atteinte: {len(recent_calls)}/{self.max_calls_per_minute}"
-        
-        # Vérifier limite quotidienne
-        if self.daily_calls >= self.max_calls_per_day:
-            return False, f"Limite quotidienne atteinte: {self.daily_calls}/{self.max_calls_per_day}"
-        
-        # Vérifier limite par signal (si spécifié)
-        if signal_id and signal_id in self.signal_calls:
-            if self.signal_calls[signal_id] >= ROTATION_CONFIG['max_api_calls_per_signal']:
-                return False, f"Limite signal atteinte: {self.signal_calls[signal_id]}/{ROTATION_CONFIG['max_api_calls_per_signal']}"
-        
-        return True, "OK"
-    
-    def record_call(self, signal_id=None):
-        """Enregistre un appel API"""
-        now = datetime.now()
-        self.api_calls.append(now)
-        self.daily_calls += 1
-        
-        # Tracking par signal
-        if signal_id:
-            if signal_id not in self.signal_calls:
-                self.signal_calls[signal_id] = 0
-            self.signal_calls[signal_id] += 1
-        
-        # Nettoyer les appels anciens (plus de 2 heures)
-        two_hours_ago = now - timedelta(hours=2)
-        self.api_calls = [t for t in self.api_calls if t > two_hours_ago]
-        
-        # Nettoyer les signaux anciens (plus de 1 heure)
-        one_hour_ago = now - timedelta(hours=1)
-        self.signal_calls = {k: v for k, v in self.signal_calls.items() 
-                           if self.get_signal_time(k) > one_hour_ago}
-    
-    def get_signal_time(self, signal_id):
-        """Temps du premier appel pour un signal"""
-        # Simple approximation
-        return datetime.now() - timedelta(minutes=5)
-    
-    def get_stats(self):
-        """Retourne les statistiques d'utilisation"""
-        now = datetime.now()
-        minute_ago = now - timedelta(minutes=1)
-        hour_ago = now - timedelta(hours=1)
-        
-        recent_minute = len([t for t in self.api_calls if t > minute_ago])
-        recent_hour = len([t for t in self.api_calls if t > hour_ago])
-        
-        return {
-            'daily_calls': self.daily_calls,
-            'max_daily': self.max_calls_per_day,
-            'recent_minute': recent_minute,
-            'max_minute': self.max_calls_per_minute,
-            'recent_hour': recent_hour,
-            'calls_available_minute': max(0, self.max_calls_per_minute - recent_minute),
-            'daily_remaining': max(0, self.max_calls_per_day - self.daily_calls),
-            'active_signals_tracking': len(self.signal_calls)
-        }
-
-# ================= CLASSES MINIMALES =================
-
-class MLSignalPredictor:
-    def __init__(self):
-        self.total_predictions = 0
-        self.correct_predictions = 0
-    
-    def predict_signal(self, df, direction):
-        """Prédit un signal avec ML"""
-        self.total_predictions += 1
-        
-        confidence = random.uniform(0.65, 0.95)
-        
-        if random.random() < 0.15:
-            predicted_direction = "CALL" if direction == "PUT" else "PUT"
-            confidence = confidence * 0.8
+        # Vérification 3: Momentum des hauts
+        highs_increasing = sum(1 for i in range(1, len(highs)) if highs[i] > highs[i-1])
+        if highs_increasing >= 2:
+            micro_score = SAINT_GRAAL_CONFIG['micro_momentum_filter']['weight']
+            return True, micro_score, f"Micro momentum BUY: {bullish_count}/{lookback} haussier, prix alignés"
         else:
-            predicted_direction = direction
-            self.correct_predictions += 1
+            return True, 8, f"Micro momentum BUY faible: {bullish_count}/{lookback} haussier"
+    
+    elif direction == "SELL":
+        min_bearish = SAINT_GRAAL_CONFIG['micro_momentum_filter']['min_bearish_bars']
         
-        return predicted_direction, confidence
+        if bearish_count < min_bearish:
+            return False, -20, f"Seulement {bearish_count}/{lookback} bougies baissières"
+        
+        if (SAINT_GRAAL_CONFIG['micro_momentum_filter']['require_price_alignment'] and 
+            price_alignment > -1):
+            return False, -15, f"Alignement prix faible: {price_alignment}"
+        
+        # Momentum des bas
+        lows_decreasing = sum(1 for i in range(1, len(lows)) if lows[i] < lows[i-1])
+        if lows_decreasing >= 2:
+            micro_score = SAINT_GRAAL_CONFIG['micro_momentum_filter']['weight']
+            return True, micro_score, f"Micro momentum SELL: {bearish_count}/{lookback} baissier, prix alignés"
+        else:
+            return True, 8, f"Micro momentum SELL faible: {bearish_count}/{lookback} baissier"
     
-    def get_stats(self):
-        """Retourne les statistiques ML"""
-        accuracy = self.correct_predictions / self.total_predictions if self.total_predictions > 0 else 0
-        return {
-            'model_trained': 'Oui' if self.total_predictions > 0 else 'Non',
-            'total_predictions': self.total_predictions,
-            'correct_predictions': self.correct_predictions,
-            'accuracy': accuracy
-        }
-    
-    async def retrain_model(self):
-        """Réentraîne le modèle ML"""
-        print("🤖 Réentraînement du modèle ML...")
-        await asyncio.sleep(2)
-        return True
+    return False, 0, "Direction non reconnue"
 
-class OTCDataProvider:
-    def __init__(self, api_key):
-        self.api_key = api_key
-    
-    def is_weekend(self):
-        """Détermine si c'est le week-end"""
-        now_utc = datetime.now(timezone.utc)
-        weekday = now_utc.weekday()
-        hour = now_utc.hour
-        return weekday >= 5 or (weekday == 4 and hour >= 22)
-    
-    def get_status(self):
-        """Retourne le statut OTC"""
-        return {
-            'is_weekend': self.is_weekend(),
-            'available_pairs': ['BTC/USD', 'ETH/USD', 'TRX/USD', 'LTC/USD'],
-            'active_apis': 2
-        }
+# ================= FILTRE ATR =================
 
-# ================= CONFIGURATION =================
-HAITI_TZ = ZoneInfo("America/Port-au-Prince")
-TIMEFRAME_M1 = "1min"
-SIGNALS_PER_SESSION = 8
-CONFIDENCE_THRESHOLD = 0.65
-
-# Initialisation des composants
-engine = create_engine(DB_URL, connect_args={'check_same_thread': False})
-ml_predictor = MLSignalPredictor()
-otc_provider = OTCDataProvider(TWELVEDATA_API_KEY)
-api_manager = APILimitManager()
-
-# Initialisation du vérificateur externe
-if EXTERNAL_VERIFIER_AVAILABLE:
-    verifier = AutoResultVerifier(engine, TWELVEDATA_API_KEY, otc_provider=otc_provider)
-    print("✅ Vérificateur externe initialisé avec otc_provider")
-else:
-    verifier = None
-    print("⚠️ Vérificateur externe non disponible")
-
-# Variables globales
-active_sessions = {}
-pending_signal_tasks = {}
-signal_message_ids = {}
-TWELVE_TS_URL = 'https://api.twelvedata.com/time_series'
-ohlc_cache = {}
-last_error_logs = []
-current_signal_id = 0  # 🔥 Pour tracking des appels API par signal
-
-# ================= FONCTIONS UTILITAIRES =================
-
-def add_error_log(message):
-    """Ajoute un message d'erreur à la liste des logs"""
-    global last_error_logs
-    timestamp = datetime.now().strftime('%H:%M:%S')
-    log_entry = f"{timestamp} - {message}"
-    print(log_entry)
-    last_error_logs.append(log_entry)
-    if len(last_error_logs) > 20:
-        last_error_logs.pop(0)
-
-def get_haiti_now():
-    return datetime.now(HAITI_TZ)
-
-def get_utc_now():
-    return datetime.now(timezone.utc)
-
-def is_forex_open():
-    """Vérifie si marché Forex est ouvert"""
-    now_utc = get_utc_now()
-    weekday = now_utc.weekday()
-    hour = now_utc.hour
-    
-    if weekday == 5:  # Samedi
-        return False
-    if weekday == 6 and hour < 22:  # Dimanche avant 22h UTC
-        return False
-    if weekday == 4 and hour >= 22:  # Vendredi après 22h UTC
-        return False
-    
-    return True
-
-def get_current_pair(pair):
-    """Retourne la paire à utiliser (Forex ou Crypto) en fonction du jour"""
-    if otc_provider.is_weekend():
-        # Mapping pour toutes les paires de config.py
-        forex_to_crypto = {
-            'EUR/USD': 'BTC/USD',
-            'GBP/USD': 'ETH/USD',
-            'USD/JPY': 'TRX/USD',
-            'AUD/USD': 'LTC/USD',
-            'BTC/USD': 'BTC/USD',
-            'ETH/USD': 'ETH/USD',
-            'USD/CAD': 'BTC/USD',
-            'EUR/RUB': 'ETH/USD',
-            'USD/CLP': 'TRX/USD',
-            'AUD/CAD': 'LTC/USD',
-            'AUD/NZD': 'BTC/USD',
-            'CAD/CHF': 'ETH/USD',
-            'EUR/CHF': 'TRX/USD',
-            'EUR/GBP': 'LTC/USD',
-            'USD/THB': 'BTC/USD',
-            'USD/COP': 'ETH/USD',
-            'USD/EGP': 'TRX/USD',
-            'AED/CNY': 'LTC/USD',
-            'QAR/CNY': 'BTC/USD'
-        }
-        # Ajout des paires manquantes avec mapping par défaut
-        return forex_to_crypto.get(pair, 'BTC/USD')
-    return pair
-
-# ================= GESTION DONNÉES AVEC LIMITES API =================
-
-def fetch_ohlc_with_limits(pair, interval, outputsize=300, signal_id=None):
+def calculate_atr_filter(df):
     """
-    Récupération données avec gestion des limites API et tracking par signal
+    🔥 FILTRE ATR - Analyse de la volatilité
     """
-    # Vérifier les limites API avec tracking par signal
-    can_call, reason = api_manager.can_make_call(signal_id)
-    if not can_call:
-        raise RuntimeError(f"Limite API atteinte: {reason}")
+    if len(df) < 20:
+        return {
+            'enabled': False,
+            'atr_value': 0,
+            'atr_pips': 0,
+            'signal': 'NO_DATA',
+            'score': 0,
+            'reason': 'Données insuffisantes pour ATR',
+            'is_squeeze': False,
+            'atr_trend': 'NEUTRAL',
+        }
     
-    # Enregistrer l'appel avec tracking par signal
-    api_manager.record_call(signal_id)
+    # Calcul ATR
+    atr_indicator = AverageTrueRange(
+        high=df['high'],
+        low=df['low'],
+        close=df['close'],
+        window=SAINT_GRAAL_CONFIG['atr_filter']['window']
+    )
     
-    # Mode normal
-    params = {
-        'symbol': pair, 
-        'interval': interval, 
-        'outputsize': outputsize,
-        'apikey': TWELVEDATA_API_KEY, 
-        'format': 'JSON'
+    atr_values = atr_indicator.average_true_range()
+    current_atr = float(atr_values.iloc[-1])
+    atr_pips = current_atr / 0.0001  # Conversion en pips
+    
+    # ATR précédent pour tendance
+    if len(atr_values) > 1:
+        prev_atr = float(atr_values.iloc[-2])
+        atr_trend = "RISING" if current_atr > prev_atr else "FALLING"
+    else:
+        atr_trend = "NEUTRAL"
+    
+    # Détection squeeze (volatilité très basse)
+    avg_atr = atr_values.tail(50).mean() if len(atr_values) >= 50 else current_atr
+    is_squeeze = current_atr < avg_atr * 0.6
+    
+    # Évaluation ATR
+    min_atr = SAINT_GRAAL_CONFIG['atr_filter']['min_atr_pips']
+    max_atr = SAINT_GRAAL_CONFIG['atr_filter']['max_atr_pips']
+    optimal_range = SAINT_GRAAL_CONFIG['atr_filter']['optimal_atr_pips']
+    
+    score = 0
+    signal = "NEUTRAL"
+    reason = ""
+    
+    if atr_pips < min_atr:
+        signal = "AVOID_LOW_VOL"
+        score = -25
+        reason = f"ATR trop bas: {atr_pips:.1f} pips < {min_atr} pips"
+    
+    elif atr_pips > max_atr:
+        signal = "AVOID_HIGH_VOL"
+        score = -20
+        reason = f"ATR trop haut: {atr_pips:.1f} pips > {max_atr} pips"
+    
+    elif optimal_range[0] <= atr_pips <= optimal_range[1]:
+        signal = "OPTIMAL_VOL"
+        score = 15
+        reason = f"ATR optimal: {atr_pips:.1f} pips"
+        
+        # Bonus si ATR en hausse (momentum)
+        if atr_trend == "RISING":
+            score += SAINT_GRAAL_CONFIG['atr_filter']['atr_trend_weight']
+            reason += f" (hausse, momentum favorable)"
+    
+    else:
+        signal = "ACCEPTABLE_VOL"
+        score = 5
+        reason = f"ATR acceptable: {atr_pips:.1f} pips"
+    
+    # Bonus squeeze pour breakout potentiel
+    if (is_squeeze and SAINT_GRAAL_CONFIG['atr_filter']['squeeze_detection'] and
+        signal not in ["AVOID_LOW_VOL", "AVOID_HIGH_VOL"]):
+        score += 5
+        reason += " [SQUEEZE détecté]"
+    
+    return {
+        'enabled': True,
+        'atr_value': current_atr,
+        'atr_pips': atr_pips,
+        'signal': signal,
+        'score': score,
+        'reason': reason,
+        'is_squeeze': is_squeeze,
+        'atr_trend': atr_trend,
     }
-    
-    try:
-        r = requests.get(TWELVE_TS_URL, params=params, timeout=10)
-        r.raise_for_status()
-        j = r.json()
-        
-        if 'code' in j and j['code'] == 429:
-            raise RuntimeError(f"Limite API TwelveData atteinte")
-        
-        if 'values' not in j:
-            raise RuntimeError(f"TwelveData error: {j}")
-        
-        df = pd.DataFrame(j['values'])[::-1].reset_index(drop=True)
-        
-        for col in ['open','high','low','close']:
-            if col in df.columns:
-                df[col] = df[col].astype(float)
-        
-        if 'volume' in df.columns:
-            df['volume'] = df['volume'].astype(float)
-        
-        df.index = pd.to_datetime(df['datetime'])
-        
-        return df
-    except Exception as e:
-        add_error_log(f"Erreur fetch_ohlc_with_limits: {e}")
-        raise RuntimeError(f"Erreur API: {e}")
 
-def get_cached_ohlc(pair, interval, outputsize=300, signal_id=None):
-    """Récupère les données OHLC depuis le cache ou les APIs"""
-    current_pair = get_current_pair(pair)
-    cache_key = f"{current_pair}_{interval}"
+# ================= FONCTIONS EXISTANTES DÉVELOPPÉES =================
+
+def calculate_m5_filter(df_m1):
+    """Filtre M5 pour analyse de tendance"""
+    if len(df_m1) < 300:  # Au moins 300 bougies M1 pour avoir des données M5 fiables
+        return {
+            'trend': 'NEUTRAL',
+            'score': 0,
+            'reason': 'Données M5 insuffisantes',
+            'ema_fast': None,
+            'ema_slow': None
+        }
     
-    current_time = get_utc_now()
+    # Resample en M5
+    df_m5 = df_m1.resample('5T').agg({
+        'open': 'first',
+        'high': 'max',
+        'low': 'min',
+        'close': 'last',
+        'volume': 'sum' if 'volume' in df_m1.columns else 'sum'
+    }).dropna()
     
-    if cache_key in ohlc_cache:
-        cached_data, cached_time = ohlc_cache[cache_key]
-        if (current_time - cached_time).total_seconds() < 30:
-            return cached_data
+    if len(df_m5) < SAINT_GRAAL_CONFIG['m5_filter']['min_required_m5_bars']:
+        return {
+            'trend': 'NEUTRAL',
+            'score': 0,
+            'reason': 'Bougies M5 insuffisantes après resample',
+            'ema_fast': None,
+            'ema_slow': None
+        }
     
-    try:
-        df = fetch_ohlc_with_limits(current_pair, interval, outputsize, signal_id)
-        ohlc_cache[cache_key] = (df, current_time)
+    # Calcul des EMAs M5
+    ema_fast = EMAIndicator(
+        close=df_m5['close'],
+        window=SAINT_GRAAL_CONFIG['m5_filter']['ema_fast']
+    ).ema_indicator()
+    
+    ema_slow = EMAIndicator(
+        close=df_m5['close'],
+        window=SAINT_GRAAL_CONFIG['m5_filter']['ema_slow']
+    ).ema_indicator()
+    
+    current_ema_fast = float(ema_fast.iloc[-1])
+    current_ema_slow = float(ema_slow.iloc[-1])
+    
+    # Détermination de la tendance
+    price = float(df_m5.iloc[-1]['close'])
+    
+    # Logique de tendance M5
+    if current_ema_fast > current_ema_slow * 1.002:  # 0.2% de marge
+        trend = "BULLISH"
+        score = SAINT_GRAAL_CONFIG['m5_filter']['weight']
+        reason = f"M5 BULLISH (EMA{SAINT_GRAAL_CONFIG['m5_filter']['ema_fast']}>{SAINT_GRAAL_CONFIG['m5_filter']['ema_slow']})"
         
-        if df is not None and len(df) > 0:
-            print(f"✅ Données chargées: {len(df)} bougies pour {current_pair}")
+        # Bonus si prix au-dessus des deux EMAs
+        if price > current_ema_fast:
+            score += 5
+            reason += " - Prix > EMA rapide"
+    
+    elif current_ema_slow > current_ema_fast * 1.002:
+        trend = "BEARISH"
+        score = SAINT_GRAAL_CONFIG['m5_filter']['weight']
+        reason = f"M5 BEARISH (EMA{SAINT_GRAAL_CONFIG['m5_filter']['ema_slow']}>{SAINT_GRAAL_CONFIG['m5_filter']['ema_fast']})"
+        
+        # Bonus si prix en-dessous des deux EMAs
+        if price < current_ema_fast:
+            score += 5
+            reason += " - Prix < EMA rapide"
+    
+    else:
+        trend = "NEUTRAL"
+        score = 0
+        reason = "M5 NEUTRAL (EMAs alignées)"
+    
+    return {
+        'trend': trend,
+        'score': score,
+        'reason': reason,
+        'ema_fast': current_ema_fast,
+        'ema_slow': current_ema_slow
+    }
+
+def analyze_market_structure(df, lookback=20):
+    """Analyse la structure du marché (tendances, supports, résistances)"""
+    if len(df) < lookback:
+        return "NEUTRAL", 0
+    
+    recent_data = df.tail(lookback).copy()
+    
+    # Calcul des pivots (highs et lows)
+    highs = recent_data['high'].values
+    lows = recent_data['low'].values
+    
+    # Identification des swings
+    swing_highs = []
+    swing_lows = []
+    
+    for i in range(2, len(highs)-2):
+        if highs[i] > highs[i-1] and highs[i] > highs[i-2] and highs[i] > highs[i+1] and highs[i] > highs[i+2]:
+            swing_highs.append(highs[i])
+        if lows[i] < lows[i-1] and lows[i] < lows[i-2] and lows[i] < lows[i+1] and lows[i] < lows[i+2]:
+            swing_lows.append(lows[i])
+    
+    # Analyse de tendance
+    if len(swing_highs) >= 2 and len(swing_lows) >= 2:
+        last_2_highs = sorted(swing_highs)[-2:]
+        last_2_lows = sorted(swing_lows)[-2:]
+        
+        # Tendance haussière: highs et lows croissants
+        if last_2_highs[-1] > last_2_highs[-2] and last_2_lows[-1] > last_2_lows[-2]:
+            # Calcul de la force (pourcentage de hausse)
+            trend_strength = ((last_2_highs[-1] - last_2_highs[-2]) / last_2_highs[-2] * 100 + 
+                            (last_2_lows[-1] - last_2_lows[-2]) / last_2_lows[-2] * 100) / 2
+            return "UPTREND", trend_strength
+        
+        # Tendance baissière: highs et lows décroissants
+        elif last_2_highs[-1] < last_2_highs[-2] and last_2_lows[-1] < last_2_lows[-2]:
+            trend_strength = ((last_2_highs[-2] - last_2_highs[-1]) / last_2_highs[-2] * 100 + 
+                            (last_2_lows[-2] - last_2_lows[-1]) / last_2_lows[-2] * 100) / 2
+            return "DOWNTREND", trend_strength
+    
+    # Range ou neutre
+    avg_range = (recent_data['high'].max() - recent_data['low'].min()) / recent_data['close'].mean() * 100
+    
+    if avg_range < 0.1:  # 0.1% de range
+        return "CONSOLIDATION", avg_range
+    else:
+        return "NEUTRAL", avg_range
+
+def analyze_momentum_asymmetric_optimized(df):
+    """Analyse de momentum avec paramètres asymétriques pour BUY/SELL"""
+    if len(df) < 50:
+        return {
+            'rsi': 50,
+            'stoch_k_fast': 50,
+            'stoch_d_fast': 50,
+            'stoch_k_slow': 50,
+            'stoch_d_slow': 50,
+            'buy_score': 0,
+            'sell_score': 0,
+            'dominant': 'NEUTRAL',
+            'momentum_gate_passed': False
+        }
+    
+    # RSI standard
+    rsi = RSIIndicator(close=df['close'], window=14).rsi()
+    current_rsi = float(rsi.iloc[-1])
+    
+    # Stochastique rapide (pour BUY)
+    stoch_fast = StochasticOscillator(
+        high=df['high'],
+        low=df['low'],
+        close=df['close'],
+        window=SAINT_GRAAL_CONFIG['buy_rules']['stoch_period'],
+        smooth_window=SAINT_GRAAL_CONFIG['buy_rules']['stoch_smooth']
+    )
+    stoch_k_fast = stoch_fast.stoch()
+    stoch_d_fast = stoch_fast.stoch_signal()
+    
+    current_stoch_k_fast = float(stoch_k_fast.iloc[-1])
+    current_stoch_d_fast = float(stoch_d_fast.iloc[-1])
+    
+    # Stochastique lent (pour SELL)
+    stoch_slow = StochasticOscillator(
+        high=df['high'],
+        low=df['low'],
+        close=df['close'],
+        window=SAINT_GRAAL_CONFIG['sell_rules']['stoch_period'],
+        smooth_window=SAINT_GRAAL_CONFIG['sell_rules']['stoch_smooth']
+    )
+    stoch_k_slow = stoch_slow.stoch()
+    stoch_d_slow = stoch_slow.stoch_signal()
+    
+    current_stoch_k_slow = float(stoch_k_slow.iloc[-1])
+    current_stoch_d_slow = float(stoch_d_slow.iloc[-1])
+    
+    # Calcul des scores
+    buy_score = 0
+    sell_score = 0
+    
+    # Logique BUY
+    if current_rsi < SAINT_GRAAL_CONFIG['buy_rules']['rsi_max_for_buy']:
+        buy_score += 25
+        
+        if current_rsi < SAINT_GRAAL_CONFIG['buy_rules']['rsi_oversold']:
+            buy_score += 15
+            buy_score += (SAINT_GRAAL_CONFIG['buy_rules']['rsi_oversold'] - current_rsi) * 2
+    
+    if current_stoch_k_fast < 20 and current_stoch_d_fast < 20:
+        buy_score += 20
+    elif current_stoch_k_fast < 30 and current_stoch_d_fast < 30:
+        buy_score += 15
+    
+    # Logique SELL
+    if current_rsi > SAINT_GRAAL_CONFIG['sell_rules']['rsi_min_for_sell']:
+        sell_score += 25
+        
+        if current_rsi > 70:
+            sell_score += 15
+            sell_score += (current_rsi - 70) * 2
+    
+    if current_stoch_k_slow > SAINT_GRAAL_CONFIG['sell_rules']['stoch_min_overbought']:
+        sell_score += 20
+    elif current_stoch_k_slow > 75:
+        sell_score += 25
+    
+    # Momentum gate (différence entre K et D)
+    momentum_gate_diff_buy = abs(current_stoch_k_fast - current_stoch_d_fast)
+    momentum_gate_diff_sell = abs(current_stoch_k_slow - current_stoch_d_slow)
+    
+    momentum_gate_passed = (
+        (buy_score > 0 and momentum_gate_diff_buy >= SAINT_GRAAL_CONFIG['sell_rules']['momentum_gate_diff']) or
+        (sell_score > 0 and momentum_gate_diff_sell >= SAINT_GRAAL_CONFIG['sell_rules']['momentum_gate_diff'])
+    )
+    
+    # Détermination du momentum dominant
+    dominant = "NEUTRAL"
+    if buy_score > sell_score + 10:
+        dominant = "BUY"
+    elif sell_score > buy_score + 15:  # Plus strict pour SELL
+        dominant = "SELL"
+    
+    return {
+        'rsi': current_rsi,
+        'stoch_k_fast': current_stoch_k_fast,
+        'stoch_d_fast': current_stoch_d_fast,
+        'stoch_k_slow': current_stoch_k_slow,
+        'stoch_d_slow': current_stoch_d_slow,
+        'buy_score': buy_score,
+        'sell_score': sell_score,
+        'dominant': dominant,
+        'momentum_gate_passed': momentum_gate_passed
+    }
+
+def calculate_bollinger_signals(df):
+    """Calcule les signaux des Bandes de Bollinger"""
+    if len(df) < SAINT_GRAAL_CONFIG['bollinger_config']['window'] + 10:
+        return {
+            'bb_position': 50,
+            'bb_signal': 'NO_DATA',
+            'bb_width': 0,
+            'bb_squeeze': False,
+            'bb_upper': 0,
+            'bb_lower': 0,
+            'bb_middle': 0
+        }
+    
+    bb = BollingerBands(
+        close=df['close'],
+        window=SAINT_GRAAL_CONFIG['bollinger_config']['window'],
+        window_dev=SAINT_GRAAL_CONFIG['bollinger_config']['window_dev']
+    )
+    
+    bb_upper = bb.bollinger_hband()
+    bb_lower = bb.bollinger_lband()
+    bb_middle = bb.bollinger_mavg()
+    bb_width = bb.bollinger_wband()
+    
+    current_price = float(df.iloc[-1]['close'])
+    current_upper = float(bb_upper.iloc[-1])
+    current_lower = float(bb_lower.iloc[-1])
+    current_middle = float(bb_middle.iloc[-1])
+    
+    # Position en pourcentage (0 = bas de bande, 100 = haut de bande)
+    if current_upper != current_lower:
+        bb_position = ((current_price - current_lower) / (current_upper - current_lower)) * 100
+    else:
+        bb_position = 50
+    
+    # Détection squeeze (volatilité faible)
+    avg_width = bb_width.tail(20).mean()
+    current_width = float(bb_width.iloc[-1])
+    bb_squeeze = current_width < avg_width * 0.7
+    
+    # Détermination du signal
+    bb_signal = "NEUTRAL"
+    
+    if bb_position < SAINT_GRAAL_CONFIG['bollinger_config']['oversold_zone']:
+        bb_signal = "OVERSOLD"
+    elif bb_position > SAINT_GRAAL_CONFIG['bollinger_config']['overbought_zone']:
+        bb_signal = "OVERBOUGHT"
+    elif abs(current_price - current_middle) / current_middle * 100 < 0.1:
+        bb_signal = "MIDDLE_BAND"
+    
+    return {
+        'bb_position': bb_position,
+        'bb_signal': bb_signal,
+        'bb_width': current_width,
+        'bb_squeeze': bb_squeeze,
+        'bb_upper': current_upper,
+        'bb_lower': current_lower,
+        'bb_middle': current_middle
+    }
+
+def get_bb_confirmation_score(bb_signal, direction, stochastic_value):
+    """Calcule le score de confirmation Bollinger Bands"""
+    score = 0
+    reason = ""
+    
+    if direction == "BUY":
+        # Score de position
+        if bb_signal['bb_position'] < 30:
+            score += 35
+            reason += "BB OVERSOLD"
+        elif bb_signal['bb_position'] < 40:
+            score += 25
+            reason += "BB Près du bas"
+        elif bb_signal['bb_position'] < 50:
+            score += 15
+            reason += "BB Zone neutre basse"
+        
+        # Bonus squeeze pour rebond potentiel
+        if bb_signal['bb_squeeze']:
+            score += 10
+            reason += " + SQUEEZE"
+        
+        # Alignement avec stochastique
+        if stochastic_value < 30:
+            score += 20
+            reason += " + Stoch OVERSOLD"
+        elif stochastic_value < 40:
+            score += 10
+            reason += " + Stoch Bas"
+    
+    elif direction == "SELL":
+        # Score de position
+        if bb_signal['bb_position'] > 70:
+            score += 35
+            reason += "BB OVERBOUGHT"
+        elif bb_signal['bb_position'] > 60:
+            score += 25
+            reason += "BB Près du haut"
+        elif bb_signal['bb_position'] > 50:
+            score += 15
+            reason += "BB Zone neutre haute"
+        
+        # Bonus squeeze
+        if bb_signal['bb_squeeze']:
+            score += 10
+            reason += " + SQUEEZE"
+        
+        # Alignement avec stochastique
+        if stochastic_value > 70:
+            score += 20
+            reason += " + Stoch OVERBOUGHT"
+        elif stochastic_value > 60:
+            score += 10
+            reason += " + Stoch Haut"
+    
+    # Bonus si prix proche de la bande
+    current_diff_to_band = 0
+    if direction == "BUY":
+        current_diff_to_band = abs(bb_signal['bb_lower'] - bb_signal['bb_middle'])
+    else:
+        current_diff_to_band = abs(bb_signal['bb_upper'] - bb_signal['bb_middle'])
+    
+    if current_diff_to_band > 0:
+        band_proximity = min(100, (current_diff_to_band / bb_signal['bb_middle'] * 10000))
+        if band_proximity < 15:  # Moins de 0.15% de la bande
+            score += 15
+            reason += " + Proche bande"
+    
+    return min(score, 70), reason
+
+def check_m5_alignment(m5_filter, direction):
+    """Vérifie l'alignement avec la tendance M5"""
+    if m5_filter['trend'] == 'NEUTRAL':
+        return True, "M5 Neutre (pas de conflit)", 5
+    
+    if direction == "BUY":
+        if m5_filter['trend'] == "BULLISH":
+            return True, "M5 aligné BULLISH", 15
+        elif m5_filter['trend'] == "BEARISH":
+            return False, "M5 en conflit BEARISH", -20
         else:
-            print(f"⚠️ Données vides pour {current_pair}")
-            
-        return df
-    except RuntimeError as e:
-        add_error_log(f"Cache OHLC: {e}")
+            return True, "M5 Neutre", 5
+    
+    elif direction == "SELL":
+        if m5_filter['trend'] == "BEARISH":
+            return True, "M5 aligné BEARISH", 15
+        elif m5_filter['trend'] == "BULLISH":
+            return False, "M5 en conflit BULLISH", -20
+        else:
+            return True, "M5 Neutre", 5
+    
+    return False, "Direction inconnue", 0
+
+def validate_candle_for_5min_buy(df):
+    """Valide la configuration de bougie pour un signal BUY"""
+    if len(df) < 3:
+        return False, "NO_DATA", 0, "Données insuffisantes"
+    
+    current = df.iloc[-1]
+    prev = df.iloc[-2]
+    prev2 = df.iloc[-3]
+    
+    current_close = float(current['close'])
+    current_open = float(current['open'])
+    prev_close = float(prev['close'])
+    prev_open = float(prev['open'])
+    
+    # Bougie haussière
+    is_bullish = current_close > current_open
+    
+    # Taille de la bougie (en pips)
+    candle_size = abs(current_close - current_open) / 0.0001
+    
+    # Volume (si disponible)
+    volume_ok = True
+    if 'volume' in df.columns:
+        current_volume = float(current['volume']) if pd.notnull(current['volume']) else 0
+        avg_volume = df['volume'].tail(20).mean()
+        volume_ok = current_volume > avg_volume * 0.7
+    
+    # Configuration de bougie optimale
+    pattern = "NORMAL"
+    confidence = 40  # Base
+    
+    # Bougie haussière forte
+    if is_bullish and candle_size > 5:  # Plus de 5 pips
+        confidence += 20
+        pattern = "BULLISH_STRONG"
+    
+    # Hammer ou inverted hammer
+    lower_shadow = min(current_open, current_close) - float(current['low'])
+    upper_shadow = float(current['high']) - max(current_open, current_close)
+    
+    if lower_shadow > candle_size * 2 and candle_size < lower_shadow * 0.3:
+        confidence += 25
+        pattern = "HAMMER"
+    
+    # Engulfing haussier
+    if (is_bullish and not (prev_close > prev_open) and 
+        current_close > prev_open and current_open < prev_close):
+        confidence += 30
+        pattern = "BULLISH_ENGULFING"
+    
+    # Morning star pattern (simplifié)
+    if (prev2['close'] < prev2['open'] and  # Bougie baissière
+        abs(prev_close - prev_open) < candle_size * 0.3 and  # Doji ou petite bougie
+        is_bullish and current_close > prev2['close']):
+        confidence += 35
+        pattern = "MORNING_STAR"
+    
+    # Vérifications finales
+    if not volume_ok:
+        confidence -= 10
+    
+    # Vérifier qu'on n'achète pas au sommet
+    if current_close > df['close'].tail(20).max():
+        confidence -= 15
+    
+    valid = confidence >= 50
+    
+    reason = f"{pattern} (Conf: {confidence}%)" if valid else f"Configuration faible: {pattern}"
+    
+    return valid, pattern, confidence, reason
+
+def validate_candle_for_5min_sell(df):
+    """Valide la configuration de bougie pour un signal SELL"""
+    if len(df) < 3:
+        return False, "NO_DATA", 0, "Données insuffisantes"
+    
+    current = df.iloc[-1]
+    prev = df.iloc[-2]
+    prev2 = df.iloc[-3]
+    
+    current_close = float(current['close'])
+    current_open = float(current['open'])
+    prev_close = float(prev['close'])
+    prev_open = float(prev['open'])
+    
+    # Bougie baissière
+    is_bearish = current_close < current_open
+    
+    # Taille de la bougie
+    candle_size = abs(current_close - current_open) / 0.0001
+    
+    # Volume
+    volume_ok = True
+    if 'volume' in df.columns:
+        current_volume = float(current['volume']) if pd.notnull(current['volume']) else 0
+        avg_volume = df['volume'].tail(20).mean()
+        volume_ok = current_volume > avg_volume * 0.7
+    
+    # Configuration de bougie
+    pattern = "NORMAL"
+    confidence = 40
+    
+    # Bougie baissière forte
+    if is_bearish and candle_size > 5:
+        confidence += 20
+        pattern = "BEARISH_STRONG"
+    
+    # Shooting star ou hanging man
+    upper_shadow = float(current['high']) - max(current_open, current_close)
+    lower_shadow = min(current_open, current_close) - float(current['low'])
+    
+    if upper_shadow > candle_size * 2 and candle_size < upper_shadow * 0.3:
+        confidence += 25
+        pattern = "SHOOTING_STAR"
+    
+    # Engulfing baissier
+    if (is_bearish and not (prev_close < prev_open) and 
+        current_close < prev_open and current_open > prev_close):
+        confidence += 30
+        pattern = "BEARISH_ENGULFING"
+    
+    # Evening star pattern (simplifié)
+    if (prev2['close'] > prev2['open'] and  # Bougie haussière
+        abs(prev_close - prev_open) < candle_size * 0.3 and  # Doji ou petite bougie
+        is_bearish and current_close < prev2['close']):
+        confidence += 35
+        pattern = "EVENING_STAR"
+    
+    # Vérifications finales
+    if not volume_ok:
+        confidence -= 10
+    
+    # Vérifier qu'on ne vend pas au plus bas
+    if current_close < df['close'].tail(20).min():
+        confidence -= 15
+    
+    valid = confidence >= 50
+    
+    reason = f"{pattern} (Conf: {confidence}%)" if valid else f"Configuration faible: {pattern}"
+    
+    return valid, pattern, confidence, reason
+
+# ================= FONCTION PRINCIPALE MISE À JOUR =================
+
+def rule_signal_saint_graal_5min_pro_v3(df, signal_count=0, total_signals_needed=6):
+    """
+    🔥 VERSION 4.5 : AVEC MICRO MOMENTUM + FILTRE ATR
+    """
+    print(f"\n{'='*70}")
+    print(f"🎯 BINAIRE 5 MIN V4.5 - Signal #{signal_count+1}/{total_signals_needed}")
+    print(f"{'='*70}")
+    
+    if len(df) < 100:
+        print(f"❌ Données insuffisantes: {len(df)} < 100")
         return None
-    except Exception as e:
-        add_error_log(f"Erreur get_cached_ohlc: {e}")
-        return None
-
-# ================= ANALYSE MULTI-MARCHÉS ITÉRATIVE =================
-
-async def analyze_multiple_markets_iterative(user_id, session_count, signal_id=None):
-    """
-    🔥 NOUVEAU: Analyse itérative de plusieurs marchés
-    Analyse par batches jusqu'à trouver un signal valide ou épuiser les limites
-    """
-    print(f"\n[ROTATION] 🔄 Analyse itérative pour signal #{session_count}")
-    print(f"[ROTATION] 📊 Total paires disponibles: {len(ROTATION_PAIRS)}")
     
-    # Mélanger les paires pour rotation aléatoire
-    shuffled_pairs = ROTATION_PAIRS.copy()
-    random.shuffle(shuffled_pairs)
+    current_price = float(df.iloc[-1]['close'])
     
-    best_signal = None
-    best_score = 0
-    total_analyzed = 0
-    batch_count = 0
+    # ===== 1. FILTRE M5 =====
+    m5_filter = calculate_m5_filter(df)
+    print(f"📈 Filtre M5: {m5_filter['reason']}")
     
-    # 🔥 ANALYSE PAR BATCHES ITÉRATIFS
-    for batch_start in range(0, len(shuffled_pairs), ROTATION_CONFIG['pairs_per_batch']):
-        batch_count += 1
+    # ===== 2. ANALYSE STRUCTURE =====
+    structure, trend_strength = analyze_market_structure(df)
+    print(f"🏗️  Structure: {structure} | Force: {trend_strength:.1f}%")
+    
+    # ===== 3. MOMENTUM =====
+    momentum = analyze_momentum_asymmetric_optimized(df)
+    print(f"⚡ Momentum: RSI {momentum['rsi']:.1f} | StochF {momentum['stoch_k_fast']:.1f} | StochS {momentum['stoch_k_slow']:.1f}")
+    
+    # ===== 4. BOLLINGER BANDS =====
+    bb_signal = calculate_bollinger_signals(df)
+    print(f"📊 BB: Position {bb_signal['bb_position']:.1f}% | Signal: {bb_signal['bb_signal']}")
+    
+    # ===== 5. 🔥 NOUVEAU: FILTRE ATR =====
+    atr_filter = calculate_atr_filter(df)
+    print(f"📏 ATR: {atr_filter['reason']}")
+    
+    # ===== 6. LOGIQUE ZIGZAG-BB-STOCHASTIC =====
+    bb_buy_score, bb_buy_reason = get_bb_confirmation_score(
+        bb_signal, "BUY", momentum['stoch_k_fast']
+    )
+    
+    bb_sell_score, bb_sell_reason = get_bb_confirmation_score(
+        bb_signal, "SELL", momentum['stoch_k_slow']
+    )
+    
+    print(f"✅ BB Confirmation: BUY {bb_buy_score}/70 | SELL {bb_sell_score}/70")
+    
+    # ===== 7. CALCUL SCORES COMPLETS =====
+    sell_score_total = 0
+    buy_score_total = 0
+    sell_details = []
+    buy_details = []
+    
+    # Score momentum
+    sell_score_total += momentum['sell_score']
+    buy_score_total += momentum['buy_score']
+    
+    # Score Bollinger
+    sell_score_total += bb_sell_score
+    buy_score_total += bb_buy_score
+    
+    # Score ATR (ajouté)
+    if atr_filter['enabled']:
+        # ATR affecte les deux côtés équitablement
+        buy_score_total += atr_filter['score']
+        sell_score_total += atr_filter['score']
+        print(f"📏 Score ATR ajouté: {atr_filter['score']} points")
+    
+    # Filtre M5
+    if SAINT_GRAAL_CONFIG['m5_filter']['strict_mode']:
+        if m5_filter['trend'] == "BULLISH":
+            buy_score_total += m5_filter['score']
+            buy_details.append(f"Tendance M5: {m5_filter['trend']}")
+        elif m5_filter['trend'] == "BEARISH":
+            buy_score_total -= 10
         
-        # Vérifier si on a atteint le maximum de batches
-        if batch_count > ROTATION_CONFIG['max_batches_per_signal']:
-            print(f"[ROTATION] ⏹️ Maximum de batches atteint ({ROTATION_CONFIG['max_batches_per_signal']})")
-            break
+        if m5_filter['trend'] == "BEARISH":
+            sell_score_total += m5_filter['score']
+            sell_details.append(f"Tendance M5: {m5_filter['trend']}")
+        elif m5_filter['trend'] == "BULLISH":
+            sell_score_total -= 10
+    
+    # Bonus structure
+    if structure == "DOWNTREND" and momentum['dominant'] == "SELL":
+        sell_score_total += 15
+        sell_details.append("Tendance alignée")
+    
+    if structure == "UPTREND" and momentum['dominant'] == "BUY":
+        buy_score_total += 15
+        buy_details.append("Tendance alignée")
+    
+    print(f"🎯 Scores avant micro: SELL {sell_score_total}/200 - BUY {buy_score_total}/200")
+    
+    # ===== 8. DÉCISION AVEC NOUVEAUX FILTRES =====
+    direction = None
+    final_score = 0
+    decision_details = []
+    
+    # 🔥 DÉCISION BUY
+    if (buy_score_total >= 70 and momentum['momentum_gate_passed']):
         
-        batch_pairs = shuffled_pairs[batch_start:batch_start + ROTATION_CONFIG['pairs_per_batch']]
+        # 🔥 NOUVEAU: Vérification micro momentum
+        micro_valid, micro_score, micro_reason = check_micro_momentum(df, "BUY")
         
-        print(f"\n[ROTATION] 📦 Batch #{batch_count}: analyse {len(batch_pairs)} paires")
-        
-        batch_best_signal = None
-        batch_best_score = 0
-        
-        # Analyser chaque paire du batch
-        for pair in batch_pairs:
-            total_analyzed += 1
+        if not micro_valid:
+            print(f"❌ Micro momentum BUY échoué: {micro_reason}")
+        else:
+            # Vérification alignement M5
+            m5_aligned, m5_reason, m5_bonus = check_m5_alignment(m5_filter, "BUY")
             
-            try:
-                # Vérifier les limites API avant chaque appel
-                can_call, reason = api_manager.can_make_call(signal_id)
-                if not can_call:
-                    print(f"[ROTATION] ⏸️ Limite API atteinte: {reason}")
-                    break  # Arrêter ce batch si limite atteinte
+            if m5_aligned or not SAINT_GRAAL_CONFIG['signal_config']['require_m5_alignment']:
+                # Validation bougie
+                candle_valid, pattern, pattern_conf, candle_reason = validate_candle_for_5min_buy(df)
                 
-                print(f"[ROTATION] 📊 Analyse {pair} ({total_analyzed}ème)")
-                
-                # Récupérer données avec tracking du signal
-                df = get_cached_ohlc(pair, TIMEFRAME_M1, outputsize=400, signal_id=signal_id)
-                
-                if df is None or len(df) < ROTATION_CONFIG['min_data_points']:
-                    print(f"[ROTATION] ❌ {pair}: données insuffisantes")
-                    continue
-                
-                # 🔥 UTILISATION DE LA FONCTION PRINCIPALE
-                signal_data = get_signal_with_metadata(
-                    df, 
-                    signal_count=session_count-1,
-                    total_signals=SIGNALS_PER_SESSION
-                )
-                
-                if signal_data is None:
-                    print(f"[ROTATION] ❌ {pair}: aucun signal")
-                    continue
-                
-                # Vérifier score minimum
-                current_score = signal_data.get('score', 0)
-                print(f"[ROTATION] ✅ {pair}: Score {current_score:.1f}")
-                
-                # Mettre à jour le meilleur signal du batch
-                if current_score > batch_best_score:
-                    batch_best_score = current_score
-                    batch_best_signal = {
-                        **signal_data,
-                        'pair': pair,
-                        'original_pair': pair,
-                        'actual_pair': get_current_pair(pair),
-                        'batch': batch_count,
-                        'position_in_batch': batch_pairs.index(pair) + 1
-                    }
-                
-                # 🔥 SI SCORE EXCELLENT, ARRÊTER IMMÉDIATEMENT
-                if current_score >= 95:
-                    print(f"[ROTATION] 🎯 Signal excellent trouvé sur {pair} (Score: {current_score:.1f})")
-                    best_signal = {
-                        **signal_data,
-                        'pair': pair,
-                        'original_pair': pair,
-                        'actual_pair': get_current_pair(pair),
-                        'batch': batch_count,
-                        'position_in_batch': batch_pairs.index(pair) + 1
-                    }
-                    best_score = current_score
-                    
-                    # Statistiques finales
-                    print(f"[ROTATION] 📊 Analyse terminée: {total_analyzed} paires analysées, {batch_count} batches")
-                    return best_signal, total_analyzed, batch_count
-                
-                # Respecter cooldown entre paires
-                await asyncio.sleep(ROTATION_CONFIG['api_cooldown_seconds'])
-                
-            except Exception as e:
-                print(f"[ROTATION] ❌ Erreur sur {pair}: {str(e)[:100]}")
-                continue
-        
-        # 🔥 APRÈS CHAQUE BATCH: vérifier si on a un signal acceptable
-        if batch_best_signal and batch_best_score >= ROTATION_CONFIG['min_score_threshold']:
-            print(f"[ROTATION] 🎯 Signal acceptable trouvé dans batch #{batch_count} (Score: {batch_best_score:.1f})")
-            best_signal = batch_best_signal
-            best_score = batch_best_score
-            break  # Arrêter la recherche itérative
-        
-        # 🔥 SI PAS DE SIGNAL DANS CE BATCH, CONTINUER AU SUIVANT
-        print(f"[ROTATION] ⚠️ Aucun signal valide dans batch #{batch_count}, score max: {batch_best_score:.1f}")
-        
-        # Vérifier si on doit continuer
-        if not ROTATION_CONFIG['continue_if_no_signal']:
-            print(f"[ROTATION] ⏹️ Configuration: ne pas continuer sans signal")
-            break
-        
-        # Cooldown entre batches
-        await asyncio.sleep(ROTATION_CONFIG['batch_cooldown_seconds'])
+                if candle_valid:
+                    direction = "BUY"
+                    final_score = buy_score_total + pattern_conf + m5_bonus + micro_score
+                    decision_details.append(f"BUY validé: {pattern} ({pattern_conf}%)")
+                    decision_details.append(f"Micro: {micro_reason}")
+                    decision_details.append(m5_reason)
+            else:
+                print(f"❌ BUY rejeté: {m5_reason}")
     
-    # 🔥 RÉSULTAT FINAL
-    if best_signal and best_score >= ROTATION_CONFIG['min_score_threshold']:
-        print(f"[ROTATION] ✅ Meilleur signal: {best_signal['pair']} (Score: {best_score:.1f})")
-        print(f"[ROTATION] 📊 Analyse totale: {total_analyzed} paires, {batch_count} batches")
-        return best_signal, total_analyzed, batch_count
-    
-    print(f"[ROTATION] ❌ Aucun signal valide après {total_analyzed} paires analysées")
-    return None, total_analyzed, batch_count
-
-# ================= FONCTIONS DE BASE =================
-
-def persist_signal(payload):
-    """Persiste un signal en base de données"""
-    q = text("""INSERT INTO signals (pair,direction,reason,ts_enter,ts_send,confidence,payload_json,max_gales,timeframe)
-    VALUES (:pair,:direction,:reason,:ts_enter,:ts_send,:confidence,:payload_json,:max_gales,:timeframe)""")
-    with engine.begin() as conn:
-        result = conn.execute(q, payload)
-    return result.lastrowid
-
-def fix_database_structure():
-    """Corrige la structure de la base de données avec colonnes de prix"""
-    try:
-        with engine.begin() as conn:
-            result = conn.execute(text("PRAGMA table_info(signals)")).fetchall()
-            existing_cols = {row[1] for row in result}
-            
-            required_columns = {
-                'ts_exit': 'DATETIME',
-                'entry_price': 'REAL DEFAULT 0',
-                'exit_price': 'REAL DEFAULT 0',
-                'pips': 'REAL DEFAULT 0',
-                'result': 'TEXT',
-                'max_gales': 'INTEGER DEFAULT 0',
-                'timeframe': 'INTEGER DEFAULT 1',
-                'ts_send': 'DATETIME',
-                'reason': 'TEXT',
-                'confidence': 'REAL',
-                'kill_zone': 'TEXT',
-                'gale_level': 'INTEGER DEFAULT 0',
-                'verification_method': 'TEXT'
-            }
-            
-            for col, col_type in required_columns.items():
-                if col not in existing_cols:
-                    try:
-                        conn.execute(text(f"ALTER TABLE signals ADD COLUMN {col} {col_type}"))
-                    except:
-                        pass
-            
-    except Exception as e:
-        print(f"❌ Erreur correction DB: {e}")
-
-def ensure_db():
-    """Initialise la base de données"""
-    try:
-        with engine.begin() as conn:
-            conn.execute(text("""
-                CREATE TABLE IF NOT EXISTS signals (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    pair TEXT NOT NULL,
-                    direction TEXT NOT NULL,
-                    reason TEXT,
-                    ts_enter DATETIME NOT NULL,
-                    ts_send DATETIME,
-                    ts_exit DATETIME,
-                    entry_price REAL DEFAULT 0,
-                    exit_price REAL DEFAULT 0,
-                    pips REAL DEFAULT 0,
-                    result TEXT,
-                    confidence REAL,
-                    payload_json TEXT,
-                    max_gales INTEGER DEFAULT 0,
-                    timeframe INTEGER DEFAULT 1,
-                    kill_zone TEXT,
-                    gale_level INTEGER DEFAULT 0,
-                    verification_method TEXT,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            """))
-            
-            conn.execute(text("""
-                CREATE TABLE IF NOT EXISTS subscribers (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER UNIQUE NOT NULL,
-                    username TEXT,
-                    subscribed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    last_active DATETIME
-                )
-            """))
+    # 🔥 DÉCISION SELL
+    elif (sell_score_total >= 75 and momentum['momentum_gate_passed']):
         
-        fix_database_structure()
-        print("✅ Base de données prête")
+        micro_valid, micro_score, micro_reason = check_micro_momentum(df, "SELL")
         
-    except Exception as e:
-        print(f"⚠️ Erreur DB: {e}")
-
-# ================= GÉNÉRATION SIGNAL AVEC ROTATION ITÉRATIVE =================
-
-async def generate_m1_signal_with_iterative_rotation(user_id, app):
-    """
-    🔥 NOUVEAU: Génère un signal avec rotation itérative multi-marchés
-    """
-    global current_signal_id
+        if not micro_valid:
+            print(f"❌ Micro momentum SELL échoué: {micro_reason}")
+        else:
+            m5_aligned, m5_reason, m5_bonus = check_m5_alignment(m5_filter, "SELL")
+            
+            if m5_aligned or not SAINT_GRAAL_CONFIG['signal_config']['require_m5_alignment']:
+                candle_valid, pattern, pattern_conf, candle_reason = validate_candle_for_5min_sell(df)
+                
+                if candle_valid:
+                    direction = "SELL"
+                    final_score = sell_score_total + pattern_conf + m5_bonus + micro_score
+                    decision_details.append(f"SELL validé: {pattern} ({pattern_conf}%)")
+                    decision_details.append(f"Micro: {micro_reason}")
+                    decision_details.append(m5_reason)
+            else:
+                print(f"❌ SELL rejeté: {m5_reason}")
     
-    try:
-        if user_id not in active_sessions:
-            add_error_log(f"User {user_id} n'a pas de session active")
+    # ===== 9. VÉRIFICATION FINALE AVEC ATR =====
+    if direction:
+        # 🔥 VÉTO ATR: Rejeter si volatilité inappropriée
+        if atr_filter['enabled'] and atr_filter['signal'] in ["AVOID_LOW_VOL", "AVOID_HIGH_VOL"]:
+            print(f"❌ Signal rejeté par ATR: {atr_filter['reason']}")
             return None
         
-        session = active_sessions[user_id]
-        session_count = session['signal_count'] + 1
-        
-        # Incrémenter l'ID de signal pour tracking API
-        current_signal_id += 1
-        signal_tracking_id = f"sig_{session_count}_{current_signal_id}"
-        
-        print(f"\n[SIGNAL] 🔄 Génération signal #{session_count} avec rotation itérative")
-        print(f"[SIGNAL] 📊 Tracking ID: {signal_tracking_id}")
-        
-        # 🔥 ANALYSE MULTI-MARCHÉS ITÉRATIVE
-        signal_data, total_pairs_analyzed, total_batches = await analyze_multiple_markets_iterative(
-            user_id, 
-            session_count,
-            signal_id=signal_tracking_id
-        )
-        
-        if signal_data is None:
-            print(f"[SIGNAL] ❌ Aucun signal trouvé après {total_pairs_analyzed} paires analysées")
-            
-            # Même si pas de signal, créer un signal fallback
-            return await create_fallback_signal(user_id, session_count, total_pairs_analyzed, signal_tracking_id)
-        
-        # Récupérer les données du meilleur signal
-        pair = signal_data['pair']
-        direction = signal_data['direction']
-        mode_strat = signal_data['mode']
-        quality = signal_data['quality']
-        score = signal_data['score']
-        reason = signal_data['reason']
-        actual_pair = signal_data.get('actual_pair', pair)
-        batch_info = f"Batch {signal_data.get('batch', '?')}.{signal_data.get('position_in_batch', '?')}"
-        
-        print(f"[SIGNAL] 🎯 Meilleur signal: {pair} -> {direction} (Score: {score:.1f}, {batch_info})")
-        print(f"[SIGNAL] 📊 Analyse: {total_pairs_analyzed} paires, {total_batches} batches")
-        
-        # MACHINE LEARNING
-        ml_signal, ml_conf = ml_predictor.predict_signal(None, direction)
-        
-        if ml_signal is None:
-            ml_signal = direction
-            ml_conf = score / 100
-        
-        if ml_conf < CONFIDENCE_THRESHOLD:
-            ml_conf = CONFIDENCE_THRESHOLD + random.uniform(0.05, 0.15)
-            print(f"[SIGNAL] ⚡ Confiance ML ajustée: {ml_conf:.1%}")
-        
-        # CALCUL DES TEMPS
-        now_haiti = get_haiti_now()
-        now_utc = get_utc_now()
-        
-        entry_time_haiti = (now_haiti + timedelta(minutes=2)).replace(second=0, microsecond=0)
-        if entry_time_haiti < now_haiti + timedelta(minutes=2):
-            entry_time_haiti = (now_haiti + timedelta(minutes=2)).replace(second=0, microsecond=0)
-        
-        entry_time_utc = entry_time_haiti.astimezone(timezone.utc)
-        send_time_utc = now_utc
-        
-        print(f"[SIGNAL_TIMING] ⏰ Heure entrée: {entry_time_haiti.strftime('%H:%M:%S')}")
-        
-        # PERSISTENCE
-        payload = {
-            'pair': actual_pair,
-            'direction': ml_signal, 
-            'reason': f"{reason} | {batch_info}",
-            'ts_enter': entry_time_utc.isoformat(), 
-            'ts_send': send_time_utc.isoformat(),
-            'confidence': ml_conf, 
-            'payload_json': json.dumps({
-                'original_pair': pair,
-                'actual_pair': actual_pair,
-                'user_id': user_id, 
-                'mode': 'Rotation Itérative Multi-Marchés',
-                'strategy': 'Saint Graal 4.5 avec Rotation Itérative',
-                'strategy_mode': mode_strat,
-                'strategy_quality': quality,
-                'strategy_score': score,
-                'ml_confidence': ml_conf,
-                'rotation_info': {
-                    'pairs_analyzed': total_pairs_analyzed,
-                    'batches_analyzed': total_batches,
-                    'best_pair': pair,
-                    'best_score': score,
-                    'batch_info': batch_info,
-                    'signal_tracking_id': signal_tracking_id,
-                    'api_stats': api_manager.get_stats()
-                },
-                'session_count': session_count,
-                'session_total': SIGNALS_PER_SESSION,
-                'timing_info': {
-                    'signal_generated': now_haiti.isoformat(),
-                    'entry_scheduled': entry_time_haiti.isoformat(),
-                    'delay_before_entry_minutes': 2
-                }
-            }),
-            'max_gales': 0,
-            'timeframe': 1
-        }
-        signal_id = persist_signal(payload)
-        
-        print(f"[SIGNAL] ✅ Signal #{signal_id} persisté (Rotation itérative)")
-        
-        # Retourner l'ID du signal
-        return signal_id
-        
-    except Exception as e:
-        error_msg = f"[SIGNAL] ❌ Erreur rotation itérative: {e}"
-        add_error_log(error_msg)
-        traceback.print_exc()
-        return None
-
-async def create_fallback_signal(user_id, session_count, total_pairs_analyzed, signal_tracking_id):
-    """
-    Crée un signal fallback quand aucune paire ne donne de signal valide
-    """
-    try:
-        print(f"[FALLBACK] 🔄 Création signal fallback après {total_pairs_analyzed} paires analysées")
-        
-        # Prendre une paire aléatoire comme fallback
-        fallback_pair = random.choice(ROTATION_PAIRS)
-        actual_pair = get_current_pair(fallback_pair)
-        
-        # Direction aléatoire mais biaisée
-        direction = "CALL" if random.random() > 0.4 else "PUT"
-        ml_conf = CONFIDENCE_THRESHOLD - 0.1  # Confiance réduite
-        
-        # CALCUL DES TEMPS
-        now_haiti = get_haiti_now()
-        now_utc = get_utc_now()
-        
-        entry_time_haiti = (now_haiti + timedelta(minutes=2)).replace(second=0, microsecond=0)
-        entry_time_utc = entry_time_haiti.astimezone(timezone.utc)
-        
-        # PERSISTENCE
-        payload = {
-            'pair': actual_pair,
-            'direction': direction, 
-            'reason': f"Fallback après {total_pairs_analyzed} paires sans signal valide",
-            'ts_enter': entry_time_utc.isoformat(), 
-            'ts_send': now_utc.isoformat(),
-            'confidence': ml_conf, 
-            'payload_json': json.dumps({
-                'original_pair': fallback_pair,
-                'actual_pair': actual_pair,
-                'user_id': user_id, 
-                'mode': 'FALLBACK',
-                'strategy': 'Fallback Rotation',
-                'strategy_mode': 'FALLBACK',
-                'strategy_quality': 'LOW',
-                'strategy_score': 50,
-                'ml_confidence': ml_conf,
-                'rotation_info': {
-                    'pairs_analyzed': total_pairs_analyzed,
-                    'fallback_reason': 'Aucun signal valide trouvé',
-                    'signal_tracking_id': signal_tracking_id,
-                    'api_stats': api_manager.get_stats()
-                },
-                'session_count': session_count,
-                'session_total': SIGNALS_PER_SESSION
-            }),
-            'max_gales': 0,
-            'timeframe': 1
-        }
-        signal_id = persist_signal(payload)
-        
-        print(f"[FALLBACK] ⚠️ Signal fallback #{signal_id} créé sur {fallback_pair}")
-        return signal_id
-        
-    except Exception as e:
-        print(f"[FALLBACK] ❌ Erreur création fallback: {e}")
-        return None
-
-# ================= COMMANDES TELEGRAM =================
-
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Commande de démarrage du bot"""
-    user_id = update.effective_user.id
-    username = update.effective_user.username or "Unknown"
-    try:
-        with engine.begin() as conn:
-            existing = conn.execute(
-                text("SELECT user_id FROM subscribers WHERE user_id = :uid"),
-                {"uid": user_id}
-            ).fetchone()
-            if not existing:
-                conn.execute(
-                    text("INSERT INTO subscribers (user_id, username) VALUES (:uid, :uname)"),
-                    {"uid": user_id, "uname": username}
-                )
-        
-        is_weekend = otc_provider.is_weekend()
-        mode_text = "🏖️ OTC (Crypto)" if is_weekend else "📈 Forex"
-        
-        await update.message.reply_text(
-            f"✅ **Bienvenue au Bot Trading Saint Graal 4.5 !**\n\n"
-            f"🎯 Rotation Itérative Multi-Marchés\n"
-            f"📊 {len(ROTATION_PAIRS)} paires depuis config.py\n"
-            f"🔄 Analyse: {ROTATION_CONFIG['pairs_per_batch']} paires/batch\n"
-            f"📦 Maximum: {ROTATION_CONFIG['max_batches_per_signal']} batches/signal\n"
-            f"🌐 Mode actuel: {mode_text}\n\n"
-            f"**Commandes:**\n"
-            f"• /startsession - Démarrer session\n"
-            f"• /rotationstats - Stats rotation\n"
-            f"• /menu - Menu complet\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"💡 Recherche itérative jusqu'à trouver signal valide"
-        )
-    except Exception as e:
-        await update.message.reply_text(f"❌ Erreur: {e}")
-
-async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Affiche le menu complet"""
-    menu_text = (
-        f"📋 **MENU SAINT GRAAL 4.5 - ROTATION ITÉRATIVE**\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "**📊 Session:**\n"
-        "• /startsession - Démarrer session\n"
-        "• /sessionstatus - État session\n"
-        "• /endsession - Terminer session\n"
-        "• /forceend - Forcer fin session\n\n"
-        "**🔄 Rotation Itérative:**\n"
-        "• /rotationstats - Stats rotation\n"
-        "• /apistats - Stats API\n"
-        "• /pairslist - Liste paires\n"
-        "• /rotationconfig - Configuration\n\n"
-        "**📈 Statistiques:**\n"
-        "• /stats - Stats globales\n\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        f"🎯 Paires: {len(ROTATION_PAIRS)} depuis config.py\n"
-        f"🔄 Batch: {ROTATION_CONFIG['pairs_per_batch']} paires\n"
-        f"📦 Max batches: {ROTATION_CONFIG['max_batches_per_signal']}\n"
-        f"⚡ Recherche itérative: {'ACTIVE' if ROTATION_CONFIG['enable_iterative_search'] else 'INACTIVE'}\n"
-    )
-    await update.message.reply_text(menu_text)
-
-async def cmd_rotation_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Affiche les statistiques de rotation"""
-    stats = api_manager.get_stats()
-    
-    msg = (
-        f"🔄 **STATISTIQUES ROTATION ITÉRATIVE**\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"📊 Paires totales: {len(ROTATION_PAIRS)} (config.py)\n"
-        f"🔄 Paires/batch: {ROTATION_CONFIG['pairs_per_batch']}\n"
-        f"📦 Max batches/signal: {ROTATION_CONFIG['max_batches_per_signal']}\n"
-        f"🎯 Score minimum: {ROTATION_CONFIG['min_score_threshold']}\n"
-        f"⚡ Recherche itérative: {'✅ ACTIVE' if ROTATION_CONFIG['enable_iterative_search'] else '❌ INACTIVE'}\n"
-        f"🔄 Continue si pas de signal: {'✅ OUI' if ROTATION_CONFIG['continue_if_no_signal'] else '❌ NON'}\n\n"
-        f"🌐 **API Stats:**\n"
-        f"• Appels aujourd'hui: {stats['daily_calls']}/{stats['max_daily']}\n"
-        f"• Appels dernière minute: {stats['recent_minute']}/{stats['max_minute']}\n"
-        f"• Appels dernière heure: {stats['recent_hour']}\n"
-        f"• Disponible minute: {stats['calls_available_minute']}\n"
-        f"• Restant quotidien: {stats['daily_remaining']}\n"
-        f"• Signaux trackés: {stats['active_signals_tracking']}\n\n"
-        f"⚡ **Configuration:**\n"
-        f"• Cooldown API: {ROTATION_CONFIG['api_cooldown_seconds']}s\n"
-        f"• Cooldown batch: {ROTATION_CONFIG['batch_cooldown_seconds']}s\n"
-        f"• Max appels/signal: {ROTATION_CONFIG['max_api_calls_per_signal']}\n"
-        f"• Données minimum: {ROTATION_CONFIG['min_data_points']} bougies\n"
-    )
-    
-    await update.message.reply_text(msg)
-
-async def cmd_rotation_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Affiche la configuration de rotation"""
-    msg = (
-        f"⚙️ **CONFIGURATION ROTATION ITÉRATIVE**\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🔄 **Batch Configuration:**\n"
-        f"• Paires par batch: {ROTATION_CONFIG['pairs_per_batch']}\n"
-        f"• Max batches par signal: {ROTATION_CONFIG['max_batches_per_signal']}\n"
-        f"• Max paires analysées: {ROTATION_CONFIG['pairs_per_batch'] * ROTATION_CONFIG['max_batches_per_signal']}\n\n"
-        f"🎯 **Critères de Signal:**\n"
-        f"• Score minimum: {ROTATION_CONFIG['min_score_threshold']}\n"
-        f"• Score excellent: 95 (arrêt immédiat)\n"
-        f"• Bougies minimum: {ROTATION_CONFIG['min_data_points']}\n\n"
-        f"⏱️ **Timing:**\n"
-        f"• Cooldown API: {ROTATION_CONFIG['api_cooldown_seconds']}s\n"
-        f"• Cooldown batch: {ROTATION_CONFIG['batch_cooldown_seconds']}s\n"
-        f"• Max appels API/signal: {ROTATION_CONFIG['max_api_calls_per_signal']}\n\n"
-        f"🔧 **Logique:**\n"
-        f"• Recherche itérative: {ROTATION_CONFIG['enable_iterative_search']}\n"
-        f"• Continue sans signal: {ROTATION_CONFIG['continue_if_no_signal']}\n"
-        f"• Stratégie: {ROTATION_CONFIG['rotation_strategy']}\n\n"
-        f"📊 **Statut:**\n"
-        f"• Paires disponibles: {len(ROTATION_PAIRS)}\n"
-        f"• Mode: {'OTC (Crypto)' if otc_provider.is_weekend() else 'Forex'}\n"
-        f"• Forex ouvert: {is_forex_open()}\n"
-    )
-    
-    await update.message.reply_text(msg)
-
-async def cmd_api_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Affiche les statistiques API détaillées"""
-    stats = api_manager.get_stats()
-    
-    msg = (
-        f"🌐 **STATISTIQUES API DÉTAILLÉES**\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"📊 **Utilisation quotidienne:**\n"
-        f"• Appels: {stats['daily_calls']}/{stats['max_daily']}\n"
-        f"• Pourcentage: {(stats['daily_calls']/stats['max_daily']*100):.1f}%\n"
-        f"• Restant: {stats['daily_remaining']}\n\n"
-        f"⏱️ **Utilisation minute:**\n"
-        f"• Appels: {stats['recent_minute']}/{stats['max_minute']}\n"
-        f"• Pourcentage: {(stats['recent_minute']/stats['max_minute']*100):.1f}%\n"
-        f"• Disponible: {stats['calls_available_minute']}\n\n"
-        f"📈 **Utilisation heure:**\n"
-        f"• Appels dernière heure: {stats['recent_hour']}\n\n"
-        f"🎯 **Signaux trackés:** {stats['active_signals_tracking']}\n\n"
-        f"⚡ **Recommandations:**\n"
-    )
-    
-    if stats['calls_available_minute'] < 5:
-        msg += f"• ⚠️ Limite minute proche ({stats['calls_available_minute']} appels disponibles)\n"
-    if stats['daily_remaining'] < 100:
-        msg += f"• ⚠️ Limite quotidienne proche ({stats['daily_remaining']} appels restants)\n"
-    
-    if stats['calls_available_minute'] > 10 and stats['daily_remaining'] > 200:
-        msg += f"• ✅ Bonne marge de manœuvre\n"
-    
-    if stats['daily_calls'] > stats['max_daily'] * 0.8:
-        msg += f"• 🔴 Réduction recommandée de l'activité\n"
-    
-    await update.message.reply_text(msg)
-
-async def cmd_pairs_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Affiche la liste des paires analysées"""
-    pairs_per_row = 3
-    pairs_text = ""
-    
-    for i in range(0, len(ROTATION_PAIRS), pairs_per_row):
-        row = ROTATION_PAIRS[i:i+pairs_per_row]
-        pairs_text += " • " + " | ".join(row) + "\n"
-    
-    msg = (
-        f"📋 **LISTE DES PAIRES ANALYSÉES**\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"Source: config.py (variable d'environnement PAIRS)\n"
-        f"Total: {len(ROTATION_PAIRS)} paires\n\n"
-        f"{pairs_text}\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"🔄 Rotation: {ROTATION_CONFIG['pairs_per_batch']} paires/batch\n"
-        f"📦 Max: {ROTATION_CONFIG['max_batches_per_signal']} batches/signal\n"
-        f"🎯 Score minimum: {ROTATION_CONFIG['min_score_threshold']}\n"
-        f"⚡ Recherche itérative: {'ACTIVE' if ROTATION_CONFIG['enable_iterative_search'] else 'INACTIVE'}"
-    )
-    
-    await update.message.reply_text(msg)
-
-async def cmd_start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Démarre une nouvelle session de 8 signaux"""
-    user_id = update.effective_user.id
-    
-    if user_id in active_sessions:
-        session = active_sessions[user_id]
-        
-        if session['signal_count'] < SIGNALS_PER_SESSION:
-            next_num = session['signal_count'] + 1
-            keyboard = [[InlineKeyboardButton(f"🎯 Générer Signal #{next_num}", callback_data=f"gen_signal_{user_id}")]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await update.message.reply_text(
-                f"⚠️ Session déjà active !\n\n"
-                f"📊 Progression: {session['signal_count']}/{SIGNALS_PER_SESSION}\n"
-                f"✅ Wins: {session['wins']}\n"
-                f"❌ Losses: {session['losses']}\n\n"
-                f"Continuer avec signal #{next_num} ⬇️",
-                reply_markup=reply_markup
-            )
-        else:
-            await update.message.reply_text(
-                f"⚠️ Session déjà terminée !\n\n"
-                f"📊 Résultat: {session['signal_count']}/{SIGNALS_PER_SESSION}\n"
-                f"✅ Wins: {session['wins']}\n"
-                f"❌ Losses: {session['losses']}\n\n"
-                f"Utilisez /endsession pour voir le résumé"
-            )
-        return
-    
-    # Créer nouvelle session
-    now_haiti = get_haiti_now()
-    active_sessions[user_id] = {
-        'start_time': now_haiti,
-        'signal_count': 0,
-        'wins': 0,
-        'losses': 0,
-        'pending': 0,
-        'signals': [],
-        'verification_tasks': [],
-        'reminder_tasks': []
-    }
-    
-    keyboard = [[InlineKeyboardButton("🎯 Générer Signal #1", callback_data=f"gen_signal_{user_id}")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    is_weekend = otc_provider.is_weekend()
-    mode_text = "🏖️ OTC (Crypto)" if is_weekend else "📈 Forex"
-    
-    await update.message.reply_text(
-        f"🚀 **SESSION SAINT GRAAL 4.5 DÉMARRÉE**\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"📅 {now_haiti.strftime('%H:%M:%S')}\n"
-        f"🌐 Mode: {mode_text}\n"
-        f"🔄 Rotation: {ROTATION_CONFIG['pairs_per_batch']} paires/batch\n"
-        f"📦 Max batches: {ROTATION_CONFIG['max_batches_per_signal']}\n"
-        f"🎯 Objectif: {SIGNALS_PER_SESSION} signaux M1\n"
-        f"📊 Paires analysées: {len(ROTATION_PAIRS)} (config.py)\n\n"
-        f"Cliquez pour générer signal #1 ⬇️",
-        reply_markup=reply_markup
-    )
-
-async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Callback pour générer un signal avec rotation itérative"""
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = int(query.data.split('_')[2])
-    
-    if user_id not in active_sessions:
-        await query.edit_message_text("❌ Session expirée\n\nUtilisez /startsession")
-        return
-    
-    session = active_sessions[user_id]
-    
-    if session['signal_count'] >= SIGNALS_PER_SESSION:
-        await end_session_summary(user_id, context.application, query.message)
-        return
-    
-    await query.edit_message_text("🔄 Analyse itérative multi-marchés en cours...")
-    
-    # 🔥 UTILISATION DE LA FONCTION AVEC ROTATION ITÉRATIVE
-    signal_id = await generate_m1_signal_with_iterative_rotation(user_id, context.application)
-    
-    if signal_id:
-        session['signal_count'] += 1
-        session['pending'] += 1
-        session['signals'].append(signal_id)
-        
-        print(f"[SIGNAL] ✅ Signal #{signal_id} généré avec rotation itérative")
-        
-        with engine.connect() as conn:
-            signal = conn.execute(
-                text("SELECT pair, direction, confidence, payload_json, ts_enter FROM signals WHERE id = :sid"),
-                {"sid": signal_id}
-            ).fetchone()
-        
-        if signal:
-            pair, direction, confidence, payload_json, ts_enter = signal
-            
-            if isinstance(ts_enter, str):
-                entry_time = datetime.fromisoformat(ts_enter.replace('Z', '+00:00')).astimezone(HAITI_TZ)
+        # Vérification score final
+        if final_score >= 90:
+            # Déterminer la qualité
+            if final_score >= 140:
+                quality = "EXCELLENT"
+                mode = "5MIN_MAX"
+            elif final_score >= 120:
+                quality = "HIGH"
+                mode = "5MIN_PRO"
+            elif final_score >= 100:
+                quality = "SOLID"
+                mode = "5MIN_STANDARD"
             else:
-                entry_time = ts_enter.astimezone(HAITI_TZ)
+                quality = "MINIMUM"
+                mode = "5MIN_MIN"
             
-            now_haiti = get_haiti_now()
+            direction_display = "CALL" if direction == "BUY" else "PUT"
             
-            direction_text = "BUY ↗️" if direction == "CALL" else "SELL ↘️"
-            entry_time_formatted = entry_time.strftime('%H:%M')
+            print(f"✅ SIGNAL {direction_display} {quality}")
+            print(f"   Score total: {final_score:.1f}")
+            print(f"   Détails: {' | '.join(decision_details[:2])}")
             
-            # Décode payload pour info rotation itérative
-            rotation_info = ""
-            if payload_json:
-                try:
-                    payload = json.loads(payload_json)
-                    if 'rotation_info' in payload:
-                        ri = payload['rotation_info']
-                        rotation_info = f"\n🔄 {ri['pairs_analyzed']} paires analysées ({ri.get('batches_analyzed', '?')} batches)"
-                except:
-                    pass
-            
-            signal_msg = (
-                f"🎯 **SIGNAL #{session['signal_count']} - ROTATION ITÉRATIVE**\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"💱 {pair}\n"
-                f"📈 Direction: **{direction_text}**\n"
-                f"⏰ Heure entrée: **{entry_time_formatted}**\n"
-                f"💪 Confiance: **{int(confidence*100)}%**\n"
-                f"{rotation_info}\n"
-                f"⏱️ Timeframe: 1 minute"
-            )
-            
-            try:
-                await context.application.bot.send_message(chat_id=user_id, text=signal_msg)
-                print(f"[SIGNAL] ✅ Signal #{signal_id} ENVOYÉ")
-            except Exception as e:
-                print(f"[SIGNAL] ❌ Erreur envoi signal: {e}")
-        
-        confirmation_msg = (
-            f"✅ **Signal #{session['signal_count']} généré avec rotation itérative!**\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"📊 Progression: {session['signal_count']}/{SIGNALS_PER_SESSION}\n\n"
-            f"💡 Préparez votre position!\n"
-        )
-        
-        await query.edit_message_text(confirmation_msg)
-    else:
-        await query.edit_message_text(
-            "⚠️ Impossible de générer un signal\n\n"
-            "Erreur dans le système de rotation.\n"
-            "Réessayez dans 1 minute ou vérifiez /apistats"
-        )
-        
-        keyboard = [[InlineKeyboardButton("🔄 Réessayer", callback_data=f"gen_signal_{user_id}")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.message.reply_text("Voulez-vous réessayer ?", reply_markup=reply_markup)
+            return {
+                'signal': direction_display,
+                'mode': mode,
+                'quality': quality,
+                'score': float(final_score),
+                'reason': f"{direction_display} | Score {final_score:.1f} | {structure} | ATR:{atr_filter['atr_pips']:.1f}pips",
+                'expiration_minutes': 5,
+                'details': {
+                    'momentum_score': momentum['buy_score'] if direction == "BUY" else momentum['sell_score'],
+                    'bb_score': bb_buy_score if direction == "BUY" else bb_sell_score,
+                    'micro_momentum_score': micro_score,
+                    'atr_score': atr_filter['score'],
+                    'm5_alignment': m5_filter['trend'],
+                    'structure': structure,
+                }
+            }
+    
+    # ===== 10. PAS DE SIGNAL =====
+    print(f"❌ Aucun signal valide - Score insuffisant ou filtres échoués")
+    return None
 
-async def cmd_session_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Affiche l'état de la session"""
-    user_id = update.effective_user.id
-    
-    if user_id not in active_sessions:
-        await update.message.reply_text("ℹ️ Aucune session active\n\nUtilisez /startsession")
-        return
-    
-    session = active_sessions[user_id]
-    duration = (get_haiti_now() - session['start_time']).total_seconds() / 60
-    winrate = (session['wins'] / session['signal_count'] * 100) if session['signal_count'] > 0 else 0
-    
-    msg = (
-        "📊 **ÉTAT SESSION SAINT GRAAL**\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"⏱️ Durée: {duration:.1f} min\n"
-        f"📈 Progression: {session['signal_count']}/{SIGNALS_PER_SESSION}\n\n"
-        f"✅ Wins: {session['wins']}\n"
-        f"❌ Losses: {session['losses']}\n"
-        f"⏳ Signaux en cours: {session['pending']}\n\n"
-        f"📊 Win Rate: {winrate:.1f}%\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        f"🎯 Garantie: {SIGNALS_PER_SESSION - session['signal_count']} signaux restants\n"
-    )
-    
-    await update.message.reply_text(msg)
+# ================= FONCTIONS DE COMPATIBILITÉ MISES À JOUR =================
 
-async def cmd_end_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Termine la session active manuellement"""
-    user_id = update.effective_user.id
-    
-    if user_id not in active_sessions:
-        await update.message.reply_text("ℹ️ Aucune session active")
-        return
-    
-    session = active_sessions[user_id]
-    
-    if 'reminder_tasks' in session:
-        for task in session['reminder_tasks']:
-            if not task.done():
-                try:
-                    task.cancel()
-                except:
-                    pass
-    
-    if session['pending'] > 0:
-        await update.message.reply_text(
-            f"⚠️ {session['pending']} signal(s) en cours\n\n"
-            f"Attendez la fin des bougies ou confirmez la fin avec /forceend"
-        )
-        return
-    
-    await end_session_summary(user_id, context.application)
-    await update.message.reply_text("✅ Session terminée !")
-
-async def cmd_force_end(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Force la fin de session même avec signaux en attente"""
-    user_id = update.effective_user.id
-    
-    if user_id not in active_sessions:
-        await update.message.reply_text("ℹ️ Aucune session active")
-        return
-    
-    session = active_sessions[user_id]
-    
-    if 'verification_tasks' in session:
-        for task in session['verification_tasks']:
-            if not task.done():
-                task.cancel()
-    
-    if 'reminder_tasks' in session:
-        for task in session['reminder_tasks']:
-            if not task.done():
-                try:
-                    task.cancel()
-                except:
-                    pass
-    
-    await end_session_summary(user_id, context.application)
-    await update.message.reply_text("✅ Session terminée (forcée) !")
-
-async def end_session_summary(user_id, app, message=None):
-    """Envoie le résumé de fin de session"""
-    if user_id not in active_sessions:
-        return
-    
-    session = active_sessions[user_id]
-    duration = (get_haiti_now() - session['start_time']).total_seconds() / 60
-    winrate = (session['wins'] / session['signal_count'] * 100) if session['signal_count'] > 0 else 0
-    
-    summary = (
-        "🏁 **SESSION SAINT GRAAL TERMINÉE**\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"⏱️ Durée: {duration:.1f} min\n"
-        f"📊 Signaux: {session['signal_count']}/{SIGNALS_PER_SESSION}\n\n"
-        f"✅ Wins: {session['wins']}\n"
-        f"❌ Losses: {session['losses']}\n"
-        f"📈 Win Rate: **{winrate:.1f}%**\n\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "🎯 Garantie: 8 signaux/session\n"
-        "Utilisez /startsession pour nouvelle session"
-    )
-    
-    keyboard = [[InlineKeyboardButton("🚀 Nouvelle Session", callback_data="new_session")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    if message:
-        await message.reply_text(summary, reply_markup=reply_markup)
-    else:
-        await app.bot.send_message(chat_id=user_id, text=summary, reply_markup=reply_markup)
-    
-    del active_sessions[user_id]
-
-async def callback_new_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Callback pour démarrer nouvelle session"""
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = query.from_user.id
-    
-    await query.message.delete()
-    
-    fake_message = query.message
-    fake_update = Update(update_id=0, message=fake_message)
-    fake_update.effective_user = query.from_user
-    
-    await cmd_start_session(fake_update, context)
-
-async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Affiche les statistiques globales"""
+def get_signal_with_metadata(df, signal_count=0, total_signals=6):
+    """
+    🔥 FONCTION PRINCIPALE AVEC NOUVEAUX FILTRES
+    """
     try:
-        with engine.connect() as conn:
-            total = conn.execute(text('SELECT COUNT(*) FROM signals WHERE timeframe = 1')).scalar()
-            wins = conn.execute(text("SELECT COUNT(*) FROM signals WHERE result='WIN' AND timeframe = 1")).scalar()
-            losses = conn.execute(text("SELECT COUNT(*) FROM signals WHERE result='LOSE' AND timeframe = 1")).scalar()
+        if df is None or len(df) < 100:
+            print("❌ Données insuffisantes pour analyse")
+            return None
         
-        verified = wins + losses
-        winrate = (wins/verified*100) if verified > 0 else 0
+        # Utiliser la version avec micro momentum et ATR
+        result = rule_signal_saint_graal_5min_pro_v3(df, signal_count, total_signals)
         
-        # Stats rotation
-        rotation_stats = api_manager.get_stats()
+        if result is not None:
+            direction_display = result['signal']
+            quality_display = {
+                'EXCELLENT': '⭐⭐⭐⭐⭐',
+                'HIGH': '⭐⭐⭐⭐',
+                'SOLID': '⭐⭐⭐',
+                'MINIMUM': '⭐⭐',
+                'CRITICAL': '⭐'
+            }.get(result['quality'], '⭐')
+            
+            reason = f"{quality_display} {direction_display} (5min) | Score: {result['score']:.0f}"
+            
+            return {
+                'direction': direction_display,
+                'mode': result['mode'],
+                'quality': result['quality'],
+                'score': float(result['score']),
+                'reason': reason,
+                'expiration_minutes': 5,
+                'session_info': {
+                    'current_signal': signal_count + 1,
+                    'total_signals': total_signals,
+                    'timeframe': 'M1',
+                    'expiration': '5MIN',
+                    'filters': 'MICRO_MOMENTUM+ATR+M5',
+                }
+            }
         
-        msg = (
-            f"📊 **Statistiques Saint Graal 4.5**\n\n"
-            f"Total signaux: {total}\n"
-            f"✅ Wins: {wins}\n"
-            f"❌ Losses: {losses}\n"
-            f"📈 Win rate: {winrate:.1f}%\n\n"
-            f"🔄 **Rotation Itérative:**\n"
-            f"• Paires analysées: {len(ROTATION_PAIRS)} (config.py)\n"
-            f"• Appels API aujourd'hui: {rotation_stats['daily_calls']}/{rotation_stats['max_daily']}\n"
-            f"• Appels dernière minute: {rotation_stats['recent_minute']}/{rotation_stats['max_minute']}\n"
-            f"• Signaux trackés: {rotation_stats['active_signals_tracking']}\n\n"
-            f"🎯 Garantie: 8 signaux/session"
-        )
+        print(f"🎯 Aucun signal valide - Session {signal_count+1}/{total_signals}")
+        return None
         
-        await update.message.reply_text(msg)
     except Exception as e:
-        await update.message.reply_text(f"❌ Erreur: {e}")
+        print(f"❌ Erreur critique: {str(e)}")
+        return None
 
-# ================= SERVEUR HTTP =================
+# ================= POINT D'ENTRÉE PRINCIPAL =================
 
-async def health_check(request):
-    """Endpoint de santé pour le serveur HTTP"""
-    return web.json_response({
-        'status': 'ok',
-        'timestamp': get_haiti_now().isoformat(),
-        'forex_open': is_forex_open(),
-        'otc_active': otc_provider.is_weekend(),
-        'active_sessions': len(active_sessions),
-        'rotation_pairs': len(ROTATION_PAIRS),
-        'api_stats': api_manager.get_stats(),
-        'rotation_config': ROTATION_CONFIG,
-        'mode': 'OTC' if otc_provider.is_weekend() else 'Forex',
-        'strategy': 'Saint Graal 4.5 avec Rotation Itérative',
-        'signals_per_session': SIGNALS_PER_SESSION,
+if __name__ == "__main__":
+    print("🎯 DESK PRO BINAIRE - VERSION 4.5 ULTIMATE PLUS")
+    print("🔥 NOUVEAUX FILTRES AJOUTÉS:")
+    print("   1. Micro garde-fou momentum (cohérence dernières bougies M1)")
+    print("   2. Filtre ATR (volatilité optimale 5-15 pips)")
+    print("   3. Vétos ATR pour basse/haute volatilité")
+    print("   4. Bonus squeeze ATR pour breakouts potentiels")
+    print("\n✅ Système de filtrage multicouche optimal pour Pocket Option 5min!")
+    
+    # Exemple d'utilisation
+    print("\n📋 EXEMPLE D'UTILISATION:")
+    print("""
+    # Créer un DataFrame de données OHLC
+    df = pd.DataFrame({
+        'open': [1.1000, 1.1010, 1.1020],
+        'high': [1.1010, 1.1025, 1.1030],
+        'low': [1.0995, 1.1005, 1.1015],
+        'close': [1.1005, 1.1020, 1.1025]
     })
-
-async def start_http_server():
-    """Démarre le serveur HTTP pour les checks de santé"""
-    app = web.Application()
-    app.router.add_get('/health', health_check)
-    app.router.add_get('/', health_check)
     
-    runner = web.AppRunner(app)
-    await runner.setup()
+    # Obtenir un signal
+    signal = get_signal_with_metadata(df, signal_count=0, total_signals=6)
     
-    port = int(os.getenv('PORT', 10000))
-    site = web.TCPSite(runner, '0.0.0.0', port)
-    await site.start()
-    
-    print(f"✅ HTTP server running on :{port}")
-    return runner
-
-# ================= POINT D'ENTRÉE =================
-
-async def main():
-    print("\n" + "="*60)
-    print("🤖 BOT SAINT GRAAL 4.5 - ROTATION ITÉRATIVE MULTI-MARCHÉS")
-    print("🎯 8 SIGNAUX GARANTIS - ANALYSE ITÉRATIVE MULTI-PAIRES")
-    print("🔄 RECHERCHE ITÉRATIVE JUSQU'À TROUVER SIGNAL VALIDE")
-    print("="*60)
-    print(f"🎯 Stratégie: Saint Graal 4.5 avec Rotation Itérative")
-    print(f"📊 Paires analysées: {len(ROTATION_PAIRS)} (config.py)")
-    print(f"🔄 Batch: {ROTATION_CONFIG['pairs_per_batch']} paires")
-    print(f"📦 Max batches: {ROTATION_CONFIG['max_batches_per_signal']}")
-    print(f"🎯 Score minimum: {ROTATION_CONFIG['min_score_threshold']}")
-    print(f"⚡ Recherche itérative: {ROTATION_CONFIG['enable_iterative_search']}")
-    print(f"🔄 Continue si pas de signal: {ROTATION_CONFIG['continue_if_no_signal']}")
-    print(f"🔧 Gestion limites API: Active avec tracking par signal")
-    print("="*60 + "\n")
-
-    # Initialiser la base de données
-    ensure_db()
-
-    # Démarrer le serveur HTTP
-    http_runner = await start_http_server()
-
-    # Configurer l'application Telegram
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-    
-    # Commandes principales
-    app.add_handler(CommandHandler('start', cmd_start))
-    app.add_handler(CommandHandler('menu', cmd_menu))
-    app.add_handler(CommandHandler('startsession', cmd_start_session))
-    app.add_handler(CommandHandler('sessionstatus', cmd_session_status))
-    app.add_handler(CommandHandler('endsession', cmd_end_session))
-    app.add_handler(CommandHandler('forceend', cmd_force_end))
-    app.add_handler(CommandHandler('stats', cmd_stats))
-    
-    # Commandes rotation
-    app.add_handler(CommandHandler('rotationstats', cmd_rotation_stats))
-    app.add_handler(CommandHandler('rotationconfig', cmd_rotation_config))
-    app.add_handler(CommandHandler('apistats', cmd_api_stats))
-    app.add_handler(CommandHandler('pairslist', cmd_pairs_list))
-    
-    # Callbacks
-    app.add_handler(CallbackQueryHandler(callback_generate_signal, pattern=r'^gen_signal_'))
-    app.add_handler(CallbackQueryHandler(callback_new_session, pattern=r'^new_session$'))
-
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling(drop_pending_updates=True)
-
-    bot_info = await app.bot.get_me()
-    print(f"✅ BOT ACTIF: @{bot_info.username}\n")
-    print(f"🔧 Mode actuel: {'OTC (Crypto)' if otc_provider.is_weekend() else 'Forex'}")
-    print(f"📊 Paires: {len(ROTATION_PAIRS)} depuis config.py")
-    print(f"🔄 Batch: {ROTATION_CONFIG['pairs_per_batch']} paires")
-    print(f"📦 Max batches: {ROTATION_CONFIG['max_batches_per_signal']}")
-    print(f"🎯 Score minimum: {ROTATION_CONFIG['min_score_threshold']}")
-    print(f"⚡ Recherche itérative: {'ACTIVE' if ROTATION_CONFIG['enable_iterative_search'] else 'INACTIVE'}")
-    print(f"🔄 Continue si pas de signal: {'OUI' if ROTATION_CONFIG['continue_if_no_signal'] else 'NON'}")
-    print(f"📈 Gestion limites API: Active avec tracking par signal")
-
-    try:
-        while True:
-            await asyncio.sleep(1)
-    except (KeyboardInterrupt, SystemExit):
-        print("\n🛑 Arrêt du Bot Saint Graal 4.5...")
-        await app.updater.stop()
-        await app.stop()
-        await app.shutdown()
-        await http_runner.cleanup()
-
-if __name__ == '__main__':
-    asyncio.run(main())
+    if signal:
+        print(f"Signal détecté: {signal['direction']} | Qualité: {signal['quality']}")
+    else:
+        print("Aucun signal détecté")
+    """)
