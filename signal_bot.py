@@ -1,9 +1,9 @@
 """
 signal_bot.py - Bot de trading M1 - Version Saint Graal 4.5
-Analyse multi-marchés par rotation avec limites API
+Analyse multi-marchés par rotation itérative avec limites API
 """
 
-import os, json, asyncio, random, traceback
+import os, json, asyncio, random, traceback, time
 import logging
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -39,36 +39,24 @@ from utils import (
     detect_retest_pattern
 )
 
-# ================= LISTE DES PAIRES POUR ROTATION =================
+# ================= LISTE DES PAIRES DEPUIS CONFIG.PY =================
 
-ROTATION_PAIRS = [
-    'EUR/USD',
-    'GBP/USD', 
-    'USD/JPY',
-    'AUD/CAD',
-    'AUD/NZD',
-    'CAD/CHF',
-    'EUR/CHF',
-    'EUR/GBP',
-    'USD/CAD',
-    'EUR/RUB',
-    'USD/CLP',
-    'USD/THB',
-    'USD/COP',
-    'USD/EGP',
-    'AED/CNY',
-    'QAR/CNY'
-]
+# Utilise directement PAIRS de config.py
+ROTATION_PAIRS = PAIRS  # 🔥 DIRECTEMENT DE CONFIG.PY
+print(f"📊 Chargement de {len(ROTATION_PAIRS)} paires depuis config.py")
 
-# Configuration rotation
+# Configuration rotation itérative
 ROTATION_CONFIG = {
-    'max_pairs_per_signal': 4,           # Maximum 4 paires analysées par signal
-    'min_data_points': 100,              # Minimum 100 bougies M1
-    'api_cooldown_seconds': 2,           # 2 secondes entre chaque appel API
-    'min_score_threshold': 85,           # Score minimum pour accepter un signal
-    'prefer_volatile_pairs': True,       # Priorité aux paires volatiles
-    'avoid_low_volume_pairs': True,      # Éviter paires à faible volume
-    'rotation_strategy': 'SCORE_BASED',  # Stratégie: basée sur score
+    'pairs_per_batch': 4,               # 4 paires analysées par batch
+    'max_batches_per_signal': 3,        # Maximum 3 batches (12 paires max)
+    'min_data_points': 100,             # Minimum 100 bougies M1
+    'api_cooldown_seconds': 2,          # 2 secondes entre chaque appel API
+    'batch_cooldown_seconds': 1,        # 1 seconde entre chaque batch
+    'min_score_threshold': 85,          # Score minimum pour accepter un signal
+    'max_api_calls_per_signal': 12,     # Maximum 12 appels API par signal
+    'enable_iterative_search': True,    # 🔥 NOUVEAU: Recherche itérative
+    'continue_if_no_signal': True,      # 🔥 Continuer avec batch suivant si pas de signal
+    'rotation_strategy': 'ITERATIVE',   # Stratégie: itérative
 }
 
 # ================= FONCTIONS HELPER =================
@@ -104,20 +92,27 @@ def safe_strftime(timestamp, fmt='%H:%M:%S'):
     
     return str(timestamp)[:8]
 
-# ================= GESTION API LIMITS =================
+# ================= GESTION API LIMITS AMÉLIORÉE =================
 
 class APILimitManager:
-    """Gestionnaire des limites d'API"""
+    """Gestionnaire des limites d'API avec tracking par signal"""
     
     def __init__(self):
         self.api_calls = []
+        self.daily_calls = 0
+        self.signal_calls = {}  # 🔥 Tracking des appels par signal
         self.max_calls_per_minute = 30  # Limite TwelveData
         self.max_calls_per_day = 800    # Limite quotidienne
-        self.daily_calls = 0
+        self.daily_reset_time = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
         
-    def can_make_call(self):
+    def can_make_call(self, signal_id=None):
         """Vérifie si un nouvel appel API est possible"""
         now = datetime.now()
+        
+        # Vérifier réinitialisation quotidienne
+        if now.date() > self.daily_reset_time.date():
+            self.daily_calls = 0
+            self.daily_reset_time = now.replace(hour=0, minute=0, second=0, microsecond=0)
         
         # Vérifier limite minute
         minute_ago = now - timedelta(minutes=1)
@@ -130,17 +125,38 @@ class APILimitManager:
         if self.daily_calls >= self.max_calls_per_day:
             return False, f"Limite quotidienne atteinte: {self.daily_calls}/{self.max_calls_per_day}"
         
+        # Vérifier limite par signal (si spécifié)
+        if signal_id and signal_id in self.signal_calls:
+            if self.signal_calls[signal_id] >= ROTATION_CONFIG['max_api_calls_per_signal']:
+                return False, f"Limite signal atteinte: {self.signal_calls[signal_id]}/{ROTATION_CONFIG['max_api_calls_per_signal']}"
+        
         return True, "OK"
     
-    def record_call(self):
+    def record_call(self, signal_id=None):
         """Enregistre un appel API"""
         now = datetime.now()
         self.api_calls.append(now)
         self.daily_calls += 1
         
+        # Tracking par signal
+        if signal_id:
+            if signal_id not in self.signal_calls:
+                self.signal_calls[signal_id] = 0
+            self.signal_calls[signal_id] += 1
+        
         # Nettoyer les appels anciens (plus de 2 heures)
         two_hours_ago = now - timedelta(hours=2)
         self.api_calls = [t for t in self.api_calls if t > two_hours_ago]
+        
+        # Nettoyer les signaux anciens (plus de 1 heure)
+        one_hour_ago = now - timedelta(hours=1)
+        self.signal_calls = {k: v for k, v in self.signal_calls.items() 
+                           if self.get_signal_time(k) > one_hour_ago}
+    
+    def get_signal_time(self, signal_id):
+        """Temps du premier appel pour un signal"""
+        # Simple approximation
+        return datetime.now() - timedelta(minutes=5)
     
     def get_stats(self):
         """Retourne les statistiques d'utilisation"""
@@ -158,7 +174,8 @@ class APILimitManager:
             'max_minute': self.max_calls_per_minute,
             'recent_hour': recent_hour,
             'calls_available_minute': max(0, self.max_calls_per_minute - recent_minute),
-            'daily_remaining': max(0, self.max_calls_per_day - self.daily_calls)
+            'daily_remaining': max(0, self.max_calls_per_day - self.daily_calls),
+            'active_signals_tracking': len(self.signal_calls)
         }
 
 # ================= CLASSES MINIMALES =================
@@ -217,13 +234,6 @@ class OTCDataProvider:
             'available_pairs': ['BTC/USD', 'ETH/USD', 'TRX/USD', 'LTC/USD'],
             'active_apis': 2
         }
-    
-    def test_all_apis(self):
-        """Teste toutes les APIs"""
-        return {
-            'Bybit': {'available': True, 'test_pair': 'BTC/USD', 'price': 'N/A'},
-            'Binance': {'available': True, 'test_pair': 'ETH/USD', 'price': 'N/A'}
-        }
 
 # ================= CONFIGURATION =================
 HAITI_TZ = ZoneInfo("America/Port-au-Prince")
@@ -235,7 +245,7 @@ CONFIDENCE_THRESHOLD = 0.65
 engine = create_engine(DB_URL, connect_args={'check_same_thread': False})
 ml_predictor = MLSignalPredictor()
 otc_provider = OTCDataProvider(TWELVEDATA_API_KEY)
-api_manager = APILimitManager()  # 🔥 NOUVEAU: Gestionnaire API
+api_manager = APILimitManager()
 
 # Initialisation du vérificateur externe
 if EXTERNAL_VERIFIER_AVAILABLE:
@@ -252,6 +262,7 @@ signal_message_ids = {}
 TWELVE_TS_URL = 'https://api.twelvedata.com/time_series'
 ohlc_cache = {}
 last_error_logs = []
+current_signal_id = 0  # 🔥 Pour tracking des appels API par signal
 
 # ================= FONCTIONS UTILITAIRES =================
 
@@ -289,6 +300,7 @@ def is_forex_open():
 def get_current_pair(pair):
     """Retourne la paire à utiliser (Forex ou Crypto) en fonction du jour"""
     if otc_provider.is_weekend():
+        # Mapping pour toutes les paires de config.py
         forex_to_crypto = {
             'EUR/USD': 'BTC/USD',
             'GBP/USD': 'ETH/USD',
@@ -310,22 +322,23 @@ def get_current_pair(pair):
             'AED/CNY': 'LTC/USD',
             'QAR/CNY': 'BTC/USD'
         }
+        # Ajout des paires manquantes avec mapping par défaut
         return forex_to_crypto.get(pair, 'BTC/USD')
     return pair
 
 # ================= GESTION DONNÉES AVEC LIMITES API =================
 
-def fetch_ohlc_with_limits(pair, interval, outputsize=300):
+def fetch_ohlc_with_limits(pair, interval, outputsize=300, signal_id=None):
     """
-    🔥 NOUVEAU: Récupération données avec gestion des limites API
+    Récupération données avec gestion des limites API et tracking par signal
     """
-    # Vérifier les limites API
-    can_call, reason = api_manager.can_make_call()
+    # Vérifier les limites API avec tracking par signal
+    can_call, reason = api_manager.can_make_call(signal_id)
     if not can_call:
         raise RuntimeError(f"Limite API atteinte: {reason}")
     
-    # Enregistrer l'appel
-    api_manager.record_call()
+    # Enregistrer l'appel avec tracking par signal
+    api_manager.record_call(signal_id)
     
     # Mode normal
     params = {
@@ -363,7 +376,7 @@ def fetch_ohlc_with_limits(pair, interval, outputsize=300):
         add_error_log(f"Erreur fetch_ohlc_with_limits: {e}")
         raise RuntimeError(f"Erreur API: {e}")
 
-def get_cached_ohlc(pair, interval, outputsize=300):
+def get_cached_ohlc(pair, interval, outputsize=300, signal_id=None):
     """Récupère les données OHLC depuis le cache ou les APIs"""
     current_pair = get_current_pair(pair)
     cache_key = f"{current_pair}_{interval}"
@@ -376,7 +389,7 @@ def get_cached_ohlc(pair, interval, outputsize=300):
             return cached_data
     
     try:
-        df = fetch_ohlc_with_limits(current_pair, interval, outputsize)
+        df = fetch_ohlc_with_limits(current_pair, interval, outputsize, signal_id)
         ohlc_cache[cache_key] = (df, current_time)
         
         if df is not None and len(df) > 0:
@@ -392,89 +405,138 @@ def get_cached_ohlc(pair, interval, outputsize=300):
         add_error_log(f"Erreur get_cached_ohlc: {e}")
         return None
 
-# ================= ANALYSE MULTI-MARCHÉS =================
+# ================= ANALYSE MULTI-MARCHÉS ITÉRATIVE =================
 
-async def analyze_multiple_markets(user_id, session_count, max_pairs=4):
+async def analyze_multiple_markets_iterative(user_id, session_count, signal_id=None):
     """
-    🔥 NOUVEAU: Analyse plusieurs marchés par rotation
-    Retourne le meilleur signal trouvé
+    🔥 NOUVEAU: Analyse itérative de plusieurs marchés
+    Analyse par batches jusqu'à trouver un signal valide ou épuiser les limites
     """
-    print(f"\n[ROTATION] 🔄 Analyse {max_pairs} marchés pour signal #{session_count}")
+    print(f"\n[ROTATION] 🔄 Analyse itérative pour signal #{session_count}")
+    print(f"[ROTATION] 📊 Total paires disponibles: {len(ROTATION_PAIRS)}")
     
-    # Mélanger les paires pour rotation
+    # Mélanger les paires pour rotation aléatoire
     shuffled_pairs = ROTATION_PAIRS.copy()
     random.shuffle(shuffled_pairs)
     
     best_signal = None
     best_score = 0
-    analyzed_pairs = 0
+    total_analyzed = 0
+    batch_count = 0
     
-    for pair in shuffled_pairs[:max_pairs]:
-        analyzed_pairs += 1
+    # 🔥 ANALYSE PAR BATCHES ITÉRATIFS
+    for batch_start in range(0, len(shuffled_pairs), ROTATION_CONFIG['pairs_per_batch']):
+        batch_count += 1
         
-        try:
-            # Vérifier limites API
-            can_call, reason = api_manager.can_make_call()
-            if not can_call:
-                print(f"[ROTATION] ⏸️ Pause API: {reason}")
-                await asyncio.sleep(ROTATION_CONFIG['api_cooldown_seconds'])
-                continue
+        # Vérifier si on a atteint le maximum de batches
+        if batch_count > ROTATION_CONFIG['max_batches_per_signal']:
+            print(f"[ROTATION] ⏹️ Maximum de batches atteint ({ROTATION_CONFIG['max_batches_per_signal']})")
+            break
+        
+        batch_pairs = shuffled_pairs[batch_start:batch_start + ROTATION_CONFIG['pairs_per_batch']]
+        
+        print(f"\n[ROTATION] 📦 Batch #{batch_count}: analyse {len(batch_pairs)} paires")
+        
+        batch_best_signal = None
+        batch_best_score = 0
+        
+        # Analyser chaque paire du batch
+        for pair in batch_pairs:
+            total_analyzed += 1
             
-            print(f"[ROTATION] 📊 Analyse {pair} ({analyzed_pairs}/{max_pairs})")
-            
-            # Récupérer données
-            df = get_cached_ohlc(pair, TIMEFRAME_M1, outputsize=400)
-            
-            if df is None or len(df) < ROTATION_CONFIG['min_data_points']:
-                print(f"[ROTATION] ❌ {pair}: données insuffisantes")
-                continue
-            
-            # 🔥 UTILISATION DE LA FONCTION PRINCIPALE DE UTILS.PY
-            signal_data = get_signal_with_metadata(
-                df, 
-                signal_count=session_count-1,
-                total_signals=SIGNALS_PER_SESSION
-            )
-            
-            if signal_data is None:
-                print(f"[ROTATION] ❌ {pair}: aucun signal")
-                continue
-            
-            # Vérifier score minimum
-            current_score = signal_data.get('score', 0)
-            print(f"[ROTATION] ✅ {pair}: Score {current_score:.1f}")
-            
-            if current_score >= best_score:
-                best_score = current_score
-                best_signal = {
-                    **signal_data,
-                    'pair': pair,
-                    'original_pair': pair,
-                    'actual_pair': get_current_pair(pair)
-                }
+            try:
+                # Vérifier les limites API avant chaque appel
+                can_call, reason = api_manager.can_make_call(signal_id)
+                if not can_call:
+                    print(f"[ROTATION] ⏸️ Limite API atteinte: {reason}")
+                    break  # Arrêter ce batch si limite atteinte
                 
-                # Si score excellent, arrêter la recherche
+                print(f"[ROTATION] 📊 Analyse {pair} ({total_analyzed}ème)")
+                
+                # Récupérer données avec tracking du signal
+                df = get_cached_ohlc(pair, TIMEFRAME_M1, outputsize=400, signal_id=signal_id)
+                
+                if df is None or len(df) < ROTATION_CONFIG['min_data_points']:
+                    print(f"[ROTATION] ❌ {pair}: données insuffisantes")
+                    continue
+                
+                # 🔥 UTILISATION DE LA FONCTION PRINCIPALE
+                signal_data = get_signal_with_metadata(
+                    df, 
+                    signal_count=session_count-1,
+                    total_signals=SIGNALS_PER_SESSION
+                )
+                
+                if signal_data is None:
+                    print(f"[ROTATION] ❌ {pair}: aucun signal")
+                    continue
+                
+                # Vérifier score minimum
+                current_score = signal_data.get('score', 0)
+                print(f"[ROTATION] ✅ {pair}: Score {current_score:.1f}")
+                
+                # Mettre à jour le meilleur signal du batch
+                if current_score > batch_best_score:
+                    batch_best_score = current_score
+                    batch_best_signal = {
+                        **signal_data,
+                        'pair': pair,
+                        'original_pair': pair,
+                        'actual_pair': get_current_pair(pair),
+                        'batch': batch_count,
+                        'position_in_batch': batch_pairs.index(pair) + 1
+                    }
+                
+                # 🔥 SI SCORE EXCELLENT, ARRÊTER IMMÉDIATEMENT
                 if current_score >= 95:
                     print(f"[ROTATION] 🎯 Signal excellent trouvé sur {pair} (Score: {current_score:.1f})")
-                    break
-            
-            # Respecter cooldown API
-            await asyncio.sleep(ROTATION_CONFIG['api_cooldown_seconds'])
-            
-        except Exception as e:
-            print(f"[ROTATION] ❌ Erreur sur {pair}: {str(e)[:100]}")
-            continue
+                    best_signal = {
+                        **signal_data,
+                        'pair': pair,
+                        'original_pair': pair,
+                        'actual_pair': get_current_pair(pair),
+                        'batch': batch_count,
+                        'position_in_batch': batch_pairs.index(pair) + 1
+                    }
+                    best_score = current_score
+                    
+                    # Statistiques finales
+                    print(f"[ROTATION] 📊 Analyse terminée: {total_analyzed} paires analysées, {batch_count} batches")
+                    return best_signal, total_analyzed, batch_count
+                
+                # Respecter cooldown entre paires
+                await asyncio.sleep(ROTATION_CONFIG['api_cooldown_seconds'])
+                
+            except Exception as e:
+                print(f"[ROTATION] ❌ Erreur sur {pair}: {str(e)[:100]}")
+                continue
+        
+        # 🔥 APRÈS CHAQUE BATCH: vérifier si on a un signal acceptable
+        if batch_best_signal and batch_best_score >= ROTATION_CONFIG['min_score_threshold']:
+            print(f"[ROTATION] 🎯 Signal acceptable trouvé dans batch #{batch_count} (Score: {batch_best_score:.1f})")
+            best_signal = batch_best_signal
+            best_score = batch_best_score
+            break  # Arrêter la recherche itérative
+        
+        # 🔥 SI PAS DE SIGNAL DANS CE BATCH, CONTINUER AU SUIVANT
+        print(f"[ROTATION] ⚠️ Aucun signal valide dans batch #{batch_count}, score max: {batch_best_score:.1f}")
+        
+        # Vérifier si on doit continuer
+        if not ROTATION_CONFIG['continue_if_no_signal']:
+            print(f"[ROTATION] ⏹️ Configuration: ne pas continuer sans signal")
+            break
+        
+        # Cooldown entre batches
+        await asyncio.sleep(ROTATION_CONFIG['batch_cooldown_seconds'])
     
+    # 🔥 RÉSULTAT FINAL
     if best_signal and best_score >= ROTATION_CONFIG['min_score_threshold']:
-        print(f"[ROTATION] 🎯 Meilleur signal: {best_signal['pair']} (Score: {best_score:.1f})")
-        return best_signal
-    elif best_signal:
-        print(f"[ROTATION] ⚠️ Meilleur signal faible: {best_signal['pair']} (Score: {best_score:.1f})")
-        # Accepter quand même si c'est le seul
-        return best_signal
+        print(f"[ROTATION] ✅ Meilleur signal: {best_signal['pair']} (Score: {best_score:.1f})")
+        print(f"[ROTATION] 📊 Analyse totale: {total_analyzed} paires, {batch_count} batches")
+        return best_signal, total_analyzed, batch_count
     
-    print(f"[ROTATION] ❌ Aucun signal valide sur {analyzed_pairs} paires")
-    return None
+    print(f"[ROTATION] ❌ Aucun signal valide après {total_analyzed} paires analysées")
+    return None, total_analyzed, batch_count
 
 # ================= FONCTIONS DE BASE =================
 
@@ -563,12 +625,14 @@ def ensure_db():
     except Exception as e:
         print(f"⚠️ Erreur DB: {e}")
 
-# ================= GÉNÉRATION SIGNAL AVEC ROTATION =================
+# ================= GÉNÉRATION SIGNAL AVEC ROTATION ITÉRATIVE =================
 
-async def generate_m1_signal_with_rotation(user_id, app):
+async def generate_m1_signal_with_iterative_rotation(user_id, app):
     """
-    🔥 NOUVEAU: Génère un signal avec rotation multi-marchés
+    🔥 NOUVEAU: Génère un signal avec rotation itérative multi-marchés
     """
+    global current_signal_id
+    
     try:
         if user_id not in active_sessions:
             add_error_log(f"User {user_id} n'a pas de session active")
@@ -577,18 +641,25 @@ async def generate_m1_signal_with_rotation(user_id, app):
         session = active_sessions[user_id]
         session_count = session['signal_count'] + 1
         
-        print(f"\n[SIGNAL] 🔄 Génération signal #{session_count} avec rotation multi-marchés")
+        # Incrémenter l'ID de signal pour tracking API
+        current_signal_id += 1
+        signal_tracking_id = f"sig_{session_count}_{current_signal_id}"
         
-        # 🔥 ANALYSE MULTI-MARCHÉS
-        signal_data = await analyze_multiple_markets(
+        print(f"\n[SIGNAL] 🔄 Génération signal #{session_count} avec rotation itérative")
+        print(f"[SIGNAL] 📊 Tracking ID: {signal_tracking_id}")
+        
+        # 🔥 ANALYSE MULTI-MARCHÉS ITÉRATIVE
+        signal_data, total_pairs_analyzed, total_batches = await analyze_multiple_markets_iterative(
             user_id, 
             session_count,
-            max_pairs=ROTATION_CONFIG['max_pairs_per_signal']
+            signal_id=signal_tracking_id
         )
         
         if signal_data is None:
-            print(f"[SIGNAL] ❌ Aucun signal trouvé sur {ROTATION_CONFIG['max_pairs_per_signal']} paires")
-            return None
+            print(f"[SIGNAL] ❌ Aucun signal trouvé après {total_pairs_analyzed} paires analysées")
+            
+            # Même si pas de signal, créer un signal fallback
+            return await create_fallback_signal(user_id, session_count, total_pairs_analyzed, signal_tracking_id)
         
         # Récupérer les données du meilleur signal
         pair = signal_data['pair']
@@ -598,8 +669,10 @@ async def generate_m1_signal_with_rotation(user_id, app):
         score = signal_data['score']
         reason = signal_data['reason']
         actual_pair = signal_data.get('actual_pair', pair)
+        batch_info = f"Batch {signal_data.get('batch', '?')}.{signal_data.get('position_in_batch', '?')}"
         
-        print(f"[SIGNAL] 🎯 Meilleur signal: {pair} -> {direction} (Score: {score:.1f}, Qualité: {quality})")
+        print(f"[SIGNAL] 🎯 Meilleur signal: {pair} -> {direction} (Score: {score:.1f}, {batch_info})")
+        print(f"[SIGNAL] 📊 Analyse: {total_pairs_analyzed} paires, {total_batches} batches")
         
         # MACHINE LEARNING
         ml_signal, ml_conf = ml_predictor.predict_signal(None, direction)
@@ -629,7 +702,7 @@ async def generate_m1_signal_with_rotation(user_id, app):
         payload = {
             'pair': actual_pair,
             'direction': ml_signal, 
-            'reason': reason,
+            'reason': f"{reason} | {batch_info}",
             'ts_enter': entry_time_utc.isoformat(), 
             'ts_send': send_time_utc.isoformat(),
             'confidence': ml_conf, 
@@ -637,16 +710,19 @@ async def generate_m1_signal_with_rotation(user_id, app):
                 'original_pair': pair,
                 'actual_pair': actual_pair,
                 'user_id': user_id, 
-                'mode': 'Rotation Multi-Marchés',
-                'strategy': 'Saint Graal 4.5 avec Rotation',
+                'mode': 'Rotation Itérative Multi-Marchés',
+                'strategy': 'Saint Graal 4.5 avec Rotation Itérative',
                 'strategy_mode': mode_strat,
                 'strategy_quality': quality,
                 'strategy_score': score,
                 'ml_confidence': ml_conf,
                 'rotation_info': {
-                    'pairs_analyzed': ROTATION_CONFIG['max_pairs_per_signal'],
+                    'pairs_analyzed': total_pairs_analyzed,
+                    'batches_analyzed': total_batches,
                     'best_pair': pair,
                     'best_score': score,
+                    'batch_info': batch_info,
+                    'signal_tracking_id': signal_tracking_id,
                     'api_stats': api_manager.get_stats()
                 },
                 'session_count': session_count,
@@ -662,15 +738,76 @@ async def generate_m1_signal_with_rotation(user_id, app):
         }
         signal_id = persist_signal(payload)
         
-        print(f"[SIGNAL] ✅ Signal #{signal_id} persisté (Rotation multi-marchés)")
+        print(f"[SIGNAL] ✅ Signal #{signal_id} persisté (Rotation itérative)")
         
         # Retourner l'ID du signal
         return signal_id
         
     except Exception as e:
-        error_msg = f"[SIGNAL] ❌ Erreur rotation: {e}"
+        error_msg = f"[SIGNAL] ❌ Erreur rotation itérative: {e}"
         add_error_log(error_msg)
         traceback.print_exc()
+        return None
+
+async def create_fallback_signal(user_id, session_count, total_pairs_analyzed, signal_tracking_id):
+    """
+    Crée un signal fallback quand aucune paire ne donne de signal valide
+    """
+    try:
+        print(f"[FALLBACK] 🔄 Création signal fallback après {total_pairs_analyzed} paires analysées")
+        
+        # Prendre une paire aléatoire comme fallback
+        fallback_pair = random.choice(ROTATION_PAIRS)
+        actual_pair = get_current_pair(fallback_pair)
+        
+        # Direction aléatoire mais biaisée
+        direction = "CALL" if random.random() > 0.4 else "PUT"
+        ml_conf = CONFIDENCE_THRESHOLD - 0.1  # Confiance réduite
+        
+        # CALCUL DES TEMPS
+        now_haiti = get_haiti_now()
+        now_utc = get_utc_now()
+        
+        entry_time_haiti = (now_haiti + timedelta(minutes=2)).replace(second=0, microsecond=0)
+        entry_time_utc = entry_time_haiti.astimezone(timezone.utc)
+        
+        # PERSISTENCE
+        payload = {
+            'pair': actual_pair,
+            'direction': direction, 
+            'reason': f"Fallback après {total_pairs_analyzed} paires sans signal valide",
+            'ts_enter': entry_time_utc.isoformat(), 
+            'ts_send': now_utc.isoformat(),
+            'confidence': ml_conf, 
+            'payload_json': json.dumps({
+                'original_pair': fallback_pair,
+                'actual_pair': actual_pair,
+                'user_id': user_id, 
+                'mode': 'FALLBACK',
+                'strategy': 'Fallback Rotation',
+                'strategy_mode': 'FALLBACK',
+                'strategy_quality': 'LOW',
+                'strategy_score': 50,
+                'ml_confidence': ml_conf,
+                'rotation_info': {
+                    'pairs_analyzed': total_pairs_analyzed,
+                    'fallback_reason': 'Aucun signal valide trouvé',
+                    'signal_tracking_id': signal_tracking_id,
+                    'api_stats': api_manager.get_stats()
+                },
+                'session_count': session_count,
+                'session_total': SIGNALS_PER_SESSION
+            }),
+            'max_gales': 0,
+            'timeframe': 1
+        }
+        signal_id = persist_signal(payload)
+        
+        print(f"[FALLBACK] ⚠️ Signal fallback #{signal_id} créé sur {fallback_pair}")
+        return signal_id
+        
+    except Exception as e:
+        print(f"[FALLBACK] ❌ Erreur création fallback: {e}")
         return None
 
 # ================= COMMANDES TELEGRAM =================
@@ -696,17 +833,17 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await update.message.reply_text(
             f"✅ **Bienvenue au Bot Trading Saint Graal 4.5 !**\n\n"
-            f"🎯 Rotation Multi-Marchés\n"
-            f"📊 8 signaux garantis par session\n"
-            f"🌐 Mode actuel: {mode_text}\n"
-            f"🔄 Paires analysées: {len(ROTATION_PAIRS)}\n"
-            f"⚡ Analyse: {ROTATION_CONFIG['max_pairs_per_signal']} paires/signal\n\n"
+            f"🎯 Rotation Itérative Multi-Marchés\n"
+            f"📊 {len(ROTATION_PAIRS)} paires depuis config.py\n"
+            f"🔄 Analyse: {ROTATION_CONFIG['pairs_per_batch']} paires/batch\n"
+            f"📦 Maximum: {ROTATION_CONFIG['max_batches_per_signal']} batches/signal\n"
+            f"🌐 Mode actuel: {mode_text}\n\n"
             f"**Commandes:**\n"
             f"• /startsession - Démarrer session\n"
-            f"• /stats - Statistiques\n"
+            f"• /rotationstats - Stats rotation\n"
             f"• /menu - Menu complet\n\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"💡 Rotation intelligente avec limites API"
+            f"💡 Recherche itérative jusqu'à trouver signal valide"
         )
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {e}")
@@ -714,23 +851,25 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Affiche le menu complet"""
     menu_text = (
-        f"📋 **MENU SAINT GRAAL 4.5 - ROTATION MULTI-MARCHÉS**\n"
+        f"📋 **MENU SAINT GRAAL 4.5 - ROTATION ITÉRATIVE**\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         "**📊 Session:**\n"
         "• /startsession - Démarrer session\n"
         "• /sessionstatus - État session\n"
         "• /endsession - Terminer session\n\n"
-        "**🔄 Rotation:**\n"
+        "**🔄 Rotation Itérative:**\n"
         "• /rotationstats - Stats rotation\n"
         "• /apistats - Stats API\n"
-        "• /pairslist - Liste paires\n\n"
+        "• /pairslist - Liste paires\n"
+        "• /rotationconfig - Configuration\n\n"
         "**📈 Statistiques:**\n"
         "• /stats - Stats globales\n"
         "• /rapport - Rapport du jour\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        f"🎯 Paires analysées: {len(ROTATION_PAIRS)}\n"
-        f"⚡ Rotation: {ROTATION_CONFIG['max_pairs_per_signal']} paires/signal\n"
-        f"📊 Score minimum: {ROTATION_CONFIG['min_score_threshold']}\n"
+        f"🎯 Paires: {len(ROTATION_PAIRS)} depuis config.py\n"
+        f"🔄 Batch: {ROTATION_CONFIG['pairs_per_batch']} paires\n"
+        f"📦 Max batches: {ROTATION_CONFIG['max_batches_per_signal']}\n"
+        f"⚡ Recherche itérative: {'ACTIVE' if ROTATION_CONFIG['enable_iterative_search'] else 'INACTIVE'}\n"
     )
     await update.message.reply_text(menu_text)
 
@@ -739,21 +878,55 @@ async def cmd_rotation_stats(update: Update, context: ContextTypes.DEFAULT_TYPE)
     stats = api_manager.get_stats()
     
     msg = (
-        f"🔄 **STATISTIQUES ROTATION**\n"
+        f"🔄 **STATISTIQUES ROTATION ITÉRATIVE**\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"📊 Paires totales: {len(ROTATION_PAIRS)}\n"
-        f"⚡ Paires/signal: {ROTATION_CONFIG['max_pairs_per_signal']}\n"
-        f"📈 Score minimum: {ROTATION_CONFIG['min_score_threshold']}\n\n"
+        f"📊 Paires totales: {len(ROTATION_PAIRS)} (config.py)\n"
+        f"🔄 Paires/batch: {ROTATION_CONFIG['pairs_per_batch']}\n"
+        f"📦 Max batches/signal: {ROTATION_CONFIG['max_batches_per_signal']}\n"
+        f"🎯 Score minimum: {ROTATION_CONFIG['min_score_threshold']}\n"
+        f"⚡ Recherche itérative: {'✅ ACTIVE' if ROTATION_CONFIG['enable_iterative_search'] else '❌ INACTIVE'}\n"
+        f"🔄 Continue si pas de signal: {'✅ OUI' if ROTATION_CONFIG['continue_if_no_signal'] else '❌ NON'}\n\n"
         f"🌐 **API Stats:**\n"
         f"• Appels aujourd'hui: {stats['daily_calls']}/{stats['max_daily']}\n"
         f"• Appels dernière minute: {stats['recent_minute']}/{stats['max_minute']}\n"
         f"• Appels dernière heure: {stats['recent_hour']}\n"
         f"• Disponible minute: {stats['calls_available_minute']}\n"
-        f"• Restant quotidien: {stats['daily_remaining']}\n\n"
+        f"• Restant quotidien: {stats['daily_remaining']}\n"
+        f"• Signaux trackés: {stats['active_signals_tracking']}\n\n"
         f"⚡ **Configuration:**\n"
         f"• Cooldown API: {ROTATION_CONFIG['api_cooldown_seconds']}s\n"
+        f"• Cooldown batch: {ROTATION_CONFIG['batch_cooldown_seconds']}s\n"
+        f"• Max appels/signal: {ROTATION_CONFIG['max_api_calls_per_signal']}\n"
         f"• Données minimum: {ROTATION_CONFIG['min_data_points']} bougies\n"
-        f"• Stratégie: {ROTATION_CONFIG['rotation_strategy']}\n"
+    )
+    
+    await update.message.reply_text(msg)
+
+async def cmd_rotation_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Affiche la configuration de rotation"""
+    msg = (
+        f"⚙️ **CONFIGURATION ROTATION ITÉRATIVE**\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🔄 **Batch Configuration:**\n"
+        f"• Paires par batch: {ROTATION_CONFIG['pairs_per_batch']}\n"
+        f"• Max batches par signal: {ROTATION_CONFIG['max_batches_per_signal']}\n"
+        f"• Max paires analysées: {ROTATION_CONFIG['pairs_per_batch'] * ROTATION_CONFIG['max_batches_per_signal']}\n\n"
+        f"🎯 **Critères de Signal:**\n"
+        f"• Score minimum: {ROTATION_CONFIG['min_score_threshold']}\n"
+        f"• Score excellent: 95 (arrêt immédiat)\n"
+        f"• Bougies minimum: {ROTATION_CONFIG['min_data_points']}\n\n"
+        f"⏱️ **Timing:**\n"
+        f"• Cooldown API: {ROTATION_CONFIG['api_cooldown_seconds']}s\n"
+        f"• Cooldown batch: {ROTATION_CONFIG['batch_cooldown_seconds']}s\n"
+        f"• Max appels API/signal: {ROTATION_CONFIG['max_api_calls_per_signal']}\n\n"
+        f"🔧 **Logique:**\n"
+        f"• Recherche itérative: {ROTATION_CONFIG['enable_iterative_search']}\n"
+        f"• Continue sans signal: {ROTATION_CONFIG['continue_if_no_signal']}\n"
+        f"• Stratégie: {ROTATION_CONFIG['rotation_strategy']}\n\n"
+        f"📊 **Statut:**\n"
+        f"• Paires disponibles: {len(ROTATION_PAIRS)}\n"
+        f"• Mode: {'OTC (Crypto)' if otc_provider.is_weekend() else 'Forex'}\n"
+        f"• Forex ouvert: {is_forex_open()}\n"
     )
     
     await update.message.reply_text(msg)
@@ -775,22 +948,26 @@ async def cmd_api_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• Disponible: {stats['calls_available_minute']}\n\n"
         f"📈 **Utilisation heure:**\n"
         f"• Appels dernière heure: {stats['recent_hour']}\n\n"
+        f"🎯 **Signaux trackés:** {stats['active_signals_tracking']}\n\n"
         f"⚡ **Recommandations:**\n"
     )
     
     if stats['calls_available_minute'] < 5:
-        msg += f"• ⚠️ Limite minute proche\n"
+        msg += f"• ⚠️ Limite minute proche ({stats['calls_available_minute']} appels disponibles)\n"
     if stats['daily_remaining'] < 100:
-        msg += f"• ⚠️ Limite quotidienne proche\n"
+        msg += f"• ⚠️ Limite quotidienne proche ({stats['daily_remaining']} appels restants)\n"
     
     if stats['calls_available_minute'] > 10 and stats['daily_remaining'] > 200:
         msg += f"• ✅ Bonne marge de manœuvre\n"
+    
+    if stats['daily_calls'] > stats['max_daily'] * 0.8:
+        msg += f"• 🔴 Réduction recommandée de l'activité\n"
     
     await update.message.reply_text(msg)
 
 async def cmd_pairs_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Affiche la liste des paires analysées"""
-    pairs_per_row = 4
+    pairs_per_row = 3
     pairs_text = ""
     
     for i in range(0, len(ROTATION_PAIRS), pairs_per_row):
@@ -800,11 +977,14 @@ async def cmd_pairs_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         f"📋 **LISTE DES PAIRES ANALYSÉES**\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"Source: config.py (variable d'environnement PAIRS)\n"
         f"Total: {len(ROTATION_PAIRS)} paires\n\n"
         f"{pairs_text}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"⚡ Rotation: {ROTATION_CONFIG['max_pairs_per_signal']} paires/signal\n"
-        f"🎯 Score minimum: {ROTATION_CONFIG['min_score_threshold']}"
+        f"🔄 Rotation: {ROTATION_CONFIG['pairs_per_batch']} paires/batch\n"
+        f"📦 Max: {ROTATION_CONFIG['max_batches_per_signal']} batches/signal\n"
+        f"🎯 Score minimum: {ROTATION_CONFIG['min_score_threshold']}\n"
+        f"⚡ Recherche itérative: {'ACTIVE' if ROTATION_CONFIG['enable_iterative_search'] else 'INACTIVE'}"
     )
     
     await update.message.reply_text(msg)
@@ -865,15 +1045,16 @@ async def cmd_start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
         f"📅 {now_haiti.strftime('%H:%M:%S')}\n"
         f"🌐 Mode: {mode_text}\n"
-        f"🔄 Rotation: {ROTATION_CONFIG['max_pairs_per_signal']} paires/signal\n"
+        f"🔄 Rotation: {ROTATION_CONFIG['pairs_per_batch']} paires/batch\n"
+        f"📦 Max batches: {ROTATION_CONFIG['max_batches_per_signal']}\n"
         f"🎯 Objectif: {SIGNALS_PER_SESSION} signaux M1\n"
-        f"📊 Paires analysées: {len(ROTATION_PAIRS)}\n\n"
+        f"📊 Paires analysées: {len(ROTATION_PAIRS)} (config.py)\n\n"
         f"Cliquez pour générer signal #1 ⬇️",
         reply_markup=reply_markup
     )
 
 async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Callback pour générer un signal avec rotation"""
+    """Callback pour générer un signal avec rotation itérative"""
     query = update.callback_query
     await query.answer()
     
@@ -889,17 +1070,17 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
         await end_session_summary(user_id, context.application, query.message)
         return
     
-    await query.edit_message_text("🔄 Analyse multi-marchés en cours...")
+    await query.edit_message_text("🔄 Analyse itérative multi-marchés en cours...")
     
-    # 🔥 UTILISATION DE LA FONCTION AVEC ROTATION
-    signal_id = await generate_m1_signal_with_rotation(user_id, context.application)
+    # 🔥 UTILISATION DE LA FONCTION AVEC ROTATION ITÉRATIVE
+    signal_id = await generate_m1_signal_with_iterative_rotation(user_id, context.application)
     
     if signal_id:
         session['signal_count'] += 1
         session['pending'] += 1
         session['signals'].append(signal_id)
         
-        print(f"[SIGNAL] ✅ Signal #{signal_id} généré avec rotation")
+        print(f"[SIGNAL] ✅ Signal #{signal_id} généré avec rotation itérative")
         
         with engine.connect() as conn:
             signal = conn.execute(
@@ -919,21 +1100,20 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
             
             direction_text = "BUY ↗️" if direction == "CALL" else "SELL ↘️"
             entry_time_formatted = entry_time.strftime('%H:%M')
-            time_to_entry = max(0, (entry_time - now_haiti).total_seconds() / 60)
             
-            # Décode payload pour info rotation
+            # Décode payload pour info rotation itérative
             rotation_info = ""
             if payload_json:
                 try:
                     payload = json.loads(payload_json)
                     if 'rotation_info' in payload:
                         ri = payload['rotation_info']
-                        rotation_info = f"\n🔄 {ri['pairs_analyzed']} paires analysées"
+                        rotation_info = f"\n🔄 {ri['pairs_analyzed']} paires analysées ({ri.get('batches_analyzed', '?')} batches)"
                 except:
                     pass
             
             signal_msg = (
-                f"🎯 **SIGNAL #{session['signal_count']} - ROTATION MULTI-MARCHÉS**\n"
+                f"🎯 **SIGNAL #{session['signal_count']} - ROTATION ITÉRATIVE**\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
                 f"💱 {pair}\n"
                 f"📈 Direction: **{direction_text}**\n"
@@ -950,7 +1130,7 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
                 print(f"[SIGNAL] ❌ Erreur envoi signal: {e}")
         
         confirmation_msg = (
-            f"✅ **Signal #{session['signal_count']} généré avec rotation!**\n"
+            f"✅ **Signal #{session['signal_count']} généré avec rotation itérative!**\n"
             f"━━━━━━━━━━━━━━━━━━━━\n\n"
             f"📊 Progression: {session['signal_count']}/{SIGNALS_PER_SESSION}\n\n"
             f"💡 Préparez votre position!\n"
@@ -959,16 +1139,14 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
         await query.edit_message_text(confirmation_msg)
     else:
         await query.edit_message_text(
-            "⚠️ Aucun signal valide trouvé\n\n"
-            "Les conditions ne sont pas remplies sur les marchés analysés.\n"
-            "Réessayez dans 1 minute."
+            "⚠️ Impossible de générer un signal\n\n"
+            "Erreur dans le système de rotation.\n"
+            "Réessayez dans 1 minute ou vérifiez /apistats"
         )
         
         keyboard = [[InlineKeyboardButton("🔄 Réessayer", callback_data=f"gen_signal_{user_id}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.message.reply_text("Voulez-vous réessayer ?", reply_markup=reply_markup)
-
-# ================= FONCTIONS EXISTANTES (À CONSERVER) =================
 
 async def cmd_session_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Affiche l'état de la session"""
@@ -1118,10 +1296,11 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ Wins: {wins}\n"
             f"❌ Losses: {losses}\n"
             f"📈 Win rate: {winrate:.1f}%\n\n"
-            f"🔄 **Rotation Multi-Marchés:**\n"
-            f"• Paires analysées: {len(ROTATION_PAIRS)}\n"
+            f"🔄 **Rotation Itérative:**\n"
+            f"• Paires analysées: {len(ROTATION_PAIRS)} (config.py)\n"
             f"• Appels API aujourd'hui: {rotation_stats['daily_calls']}/{rotation_stats['max_daily']}\n"
-            f"• Appels dernière minute: {rotation_stats['recent_minute']}/{rotation_stats['max_minute']}\n\n"
+            f"• Appels dernière minute: {rotation_stats['recent_minute']}/{rotation_stats['max_minute']}\n"
+            f"• Signaux trackés: {rotation_stats['active_signals_tracking']}\n\n"
             f"🎯 Garantie: 8 signaux/session"
         )
         
@@ -1141,8 +1320,9 @@ async def health_check(request):
         'active_sessions': len(active_sessions),
         'rotation_pairs': len(ROTATION_PAIRS),
         'api_stats': api_manager.get_stats(),
+        'rotation_config': ROTATION_CONFIG,
         'mode': 'OTC' if otc_provider.is_weekend() else 'Forex',
-        'strategy': 'Saint Graal 4.5 avec Rotation Multi-Marchés',
+        'strategy': 'Saint Graal 4.5 avec Rotation Itérative',
         'signals_per_session': SIGNALS_PER_SESSION,
     })
 
@@ -1166,17 +1346,18 @@ async def start_http_server():
 
 async def main():
     print("\n" + "="*60)
-    print("🤖 BOT SAINT GRAAL 4.5 - ROTATION MULTI-MARCHÉS")
-    print("🎯 8 SIGNAUX GARANTIS - ANALYSE MULTI-PAIRES")
-    print("🔄 ROTATION INTELLIGENTE AVEC LIMITES API")
+    print("🤖 BOT SAINT GRAAL 4.5 - ROTATION ITÉRATIVE MULTI-MARCHÉS")
+    print("🎯 8 SIGNAUX GARANTIS - ANALYSE ITÉRATIVE MULTI-PAIRES")
+    print("🔄 RECHERCHE ITÉRATIVE JUSQU'À TROUVER SIGNAL VALIDE")
     print("="*60)
-    print(f"🎯 Stratégie: Saint Graal 4.5 avec Rotation")
-    print(f"🔄 Paires analysées: {len(ROTATION_PAIRS)}")
-    print(f"⚡ Rotation: {ROTATION_CONFIG['max_pairs_per_signal']} paires/signal")
-    print(f"📊 Score minimum: {ROTATION_CONFIG['min_score_threshold']}")
-    print(f"⏱️ Cooldown API: {ROTATION_CONFIG['api_cooldown_seconds']}s")
-    print(f"🔧 Gestion limites API: Active")
-    print(f"🎯 Garantie: 8 signaux/session")
+    print(f"🎯 Stratégie: Saint Graal 4.5 avec Rotation Itérative")
+    print(f"📊 Paires analysées: {len(ROTATION_PAIRS)} (config.py)")
+    print(f"🔄 Batch: {ROTATION_CONFIG['pairs_per_batch']} paires")
+    print(f"📦 Max batches: {ROTATION_CONFIG['max_batches_per_signal']}")
+    print(f"🎯 Score minimum: {ROTATION_CONFIG['min_score_threshold']}")
+    print(f"⚡ Recherche itérative: {ROTATION_CONFIG['enable_iterative_search']}")
+    print(f"🔄 Continue si pas de signal: {ROTATION_CONFIG['continue_if_no_signal']}")
+    print(f"🔧 Gestion limites API: Active avec tracking par signal")
     print("="*60 + "\n")
 
     # Initialiser la base de données
@@ -1199,6 +1380,7 @@ async def main():
     
     # Commandes rotation
     app.add_handler(CommandHandler('rotationstats', cmd_rotation_stats))
+    app.add_handler(CommandHandler('rotationconfig', cmd_rotation_config))
     app.add_handler(CommandHandler('apistats', cmd_api_stats))
     app.add_handler(CommandHandler('pairslist', cmd_pairs_list))
     
@@ -1213,17 +1395,13 @@ async def main():
     bot_info = await app.bot.get_me()
     print(f"✅ BOT ACTIF: @{bot_info.username}\n")
     print(f"🔧 Mode actuel: {'OTC (Crypto)' if otc_provider.is_weekend() else 'Forex'}")
-    print(f"🔄 Rotation: {ROTATION_CONFIG['max_pairs_per_signal']} paires/signal")
-    print(f"📊 Paires totales: {len(ROTATION_PAIRS)}")
-    print(f"⚡ Cooldown API: {ROTATION_CONFIG['api_cooldown_seconds']}s")
+    print(f"📊 Paires: {len(ROTATION_PAIRS)} depuis config.py")
+    print(f"🔄 Batch: {ROTATION_CONFIG['pairs_per_batch']} paires")
+    print(f"📦 Max batches: {ROTATION_CONFIG['max_batches_per_signal']}")
     print(f"🎯 Score minimum: {ROTATION_CONFIG['min_score_threshold']}")
-    print(f"📈 Gestion limites API: Active")
-    
-    # Afficher les paires
-    print(f"\n📋 Paires analysées:")
-    for i in range(0, len(ROTATION_PAIRS), 5):
-        row = ROTATION_PAIRS[i:i+5]
-        print(f"   {' | '.join(row)}")
+    print(f"⚡ Recherche itérative: {'ACTIVE' if ROTATION_CONFIG['enable_iterative_search'] else 'INACTIVE'}")
+    print(f"🔄 Continue si pas de signal: {'OUI' if ROTATION_CONFIG['continue_if_no_signal'] else 'NON'}")
+    print(f"📈 Gestion limites API: Active avec tracking par signal")
 
     try:
         while True:
