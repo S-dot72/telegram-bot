@@ -1,6 +1,6 @@
 """
-utils.py - STRATÉGIE BINAIRE M1 PRO - VERSION 4.5 ULTIMATE PLUS
-Ajout: Micro garde-fou momentum + Filtre ATR
+utils.py - STRATÉGIE BINAIRE M1 PRO - VERSION 4.6 ULTIMATE PLUS
+Ajout: Croisement bande médiane BB + Micro garde-fou momentum + Filtre ATR
 """
 
 import pandas as pd
@@ -37,6 +37,16 @@ SAINT_GRAAL_CONFIG = {
         'optimal_atr_pips': [5, 15],  # Zone optimale 5-15 pips
         'atr_trend_weight': 10,       # Bonus si ATR en hausse (momentum)
         'squeeze_detection': True,    # Détection de squeeze ATR
+    },
+    
+    # 🔥 AJOUT: CONFIG CROISEMENT BANDE MÉDIANE BB
+    'bb_crossover': {
+        'enabled': True,
+        'lookback_bars': 2,           # Vérifier les 2 dernières bougies
+        'require_confirmation': True, # Confirmation requise
+        'weight': 12,                 # Poids dans le score
+        'min_candle_size_pips': 3,    # Taille minimale de bougie
+        'strict_mode': True,          # Mode strict ou non
     },
     
     'buy_rules': {
@@ -86,6 +96,7 @@ SAINT_GRAAL_CONFIG = {
         'oversold_zone': 30,
         'overbought_zone': 70,
         'middle_band_weight': 25,
+        'crossover_weight': 15,  # Bonus pour croisement bande médiane
     },
     
     'signal_config': {
@@ -264,6 +275,138 @@ def calculate_atr_filter(df):
         'is_squeeze': is_squeeze,
         'atr_trend': atr_trend,
     }
+
+# ================= NOUVEAU: LOGIQUE CROISEMENT BANDE MÉDIANE BB =================
+
+def check_bb_middle_crossover(df, direction):
+    """
+    🔥 NOUVEAU: Vérifie le croisement de la bande médiane des Bollinger Bands
+    Retourne True si la bougie actuelle ferme au-dessus (BUY) ou en-dessous (SELL) de la bande médiane
+    """
+    if not SAINT_GRAAL_CONFIG['bb_crossover']['enabled']:
+        return True, 0, "Croisement BB désactivé"
+    
+    if len(df) < SAINT_GRAAL_CONFIG['bollinger_config']['window'] + 5:
+        return False, 0, "Données insuffisantes pour BB crossover"
+    
+    # Calcul des Bandes de Bollinger
+    bb = BollingerBands(
+        close=df['close'],
+        window=SAINT_GRAAL_CONFIG['bollinger_config']['window'],
+        window_dev=SAINT_GRAAL_CONFIG['bollinger_config']['window_dev']
+    )
+    
+    bb_middle = bb.bollinger_mavg()
+    
+    # Vérifier les dernières bougies
+    lookback = SAINT_GRAAL_CONFIG['bb_crossover']['lookback_bars']
+    recent_data = df.tail(lookback + 1).copy()  # +1 pour comparer avec la précédente
+    
+    if len(recent_data) < lookback + 1:
+        return False, 0, f"Pas assez de données: {len(recent_data)} < {lookback + 1}"
+    
+    # Obtenir les valeurs de bande médiane correspondantes
+    recent_middle = bb_middle.iloc[-(lookback + 1):].values
+    recent_closes = recent_data['close'].values
+    recent_opens = recent_data['open'].values
+    
+    crossover_detected = False
+    crossover_strength = 0
+    reason = ""
+    
+    if direction == "BUY":
+        # Vérifier si la bougie actuelle ferme AU-DESSUS de la bande médiane
+        current_close = recent_closes[-1]
+        current_middle = recent_middle[-1]
+        
+        # Vérifier la bougie précédente (pour confirmation)
+        prev_close = recent_closes[-2] if lookback >= 1 else None
+        prev_middle = recent_middle[-2] if lookback >= 1 else None
+        
+        # Logique BUY: Fermeture au-dessus de la bande médiane
+        if current_close > current_middle:
+            crossover_detected = True
+            
+            # Calculer la force du croisement (distance en pips)
+            distance_pips = (current_close - current_middle) / 0.0001
+            crossover_strength = min(SAINT_GRAAL_CONFIG['bb_crossover']['weight'], 
+                                    distance_pips * 2)  # Bonus proportionnel
+            
+            # Vérification de confirmation
+            if SAINT_GRAAL_CONFIG['bb_crossover']['require_confirmation']:
+                # Si la bougie précédente était en-dessous, c'est un vrai croisement
+                if prev_close is not None and prev_middle is not None:
+                    if prev_close < prev_middle:
+                        crossover_strength += 5  # Bonus pour vrai croisement
+                        reason = f"Vrai croisement BUY: {distance_pips:.1f} pips au-dessus"
+                    else:
+                        reason = f"BUY: Déjà au-dessus, {distance_pips:.1f} pips"
+                else:
+                    reason = f"BUY: {distance_pips:.1f} pips au-dessus de la médiane"
+            else:
+                reason = f"BUY: {distance_pips:.1f} pips au-dessus de la médiane"
+            
+            # Vérifier taille de bougie
+            current_open = recent_opens[-1]
+            candle_size = abs(current_close - current_open) / 0.0001
+            if candle_size >= SAINT_GRAAL_CONFIG['bb_crossover']['min_candle_size_pips']:
+                crossover_strength += 3
+                reason += f" (bougie forte: {candle_size:.1f} pips)"
+            else:
+                reason += f" (bougie faible: {candle_size:.1f} pips)"
+        else:
+            reason = f"BUY rejeté: Fermeture {current_close} < Bande médiane {current_middle:.5f}"
+    
+    elif direction == "SELL":
+        # Vérifier si la bougie actuelle ferme EN-DESSOUS de la bande médiane
+        current_close = recent_closes[-1]
+        current_middle = recent_middle[-1]
+        
+        # Vérifier la bougie précédente (pour confirmation)
+        prev_close = recent_closes[-2] if lookback >= 1 else None
+        prev_middle = recent_middle[-2] if lookback >= 1 else None
+        
+        # Logique SELL: Fermeture en-dessous de la bande médiane
+        if current_close < current_middle:
+            crossover_detected = True
+            
+            # Calculer la force du croisement (distance en pips)
+            distance_pips = (current_middle - current_close) / 0.0001
+            crossover_strength = min(SAINT_GRAAL_CONFIG['bb_crossover']['weight'], 
+                                    distance_pips * 2)  # Bonus proportionnel
+            
+            # Vérification de confirmation
+            if SAINT_GRAAL_CONFIG['bb_crossover']['require_confirmation']:
+                # Si la bougie précédente était au-dessus, c'est un vrai croisement
+                if prev_close is not None and prev_middle is not None:
+                    if prev_close > prev_middle:
+                        crossover_strength += 5  # Bonus pour vrai croisement
+                        reason = f"Vrai croisement SELL: {distance_pips:.1f} pips en-dessous"
+                    else:
+                        reason = f"SELL: Déjà en-dessous, {distance_pips:.1f} pips"
+                else:
+                    reason = f"SELL: {distance_pips:.1f} pips en-dessous de la médiane"
+            else:
+                reason = f"SELL: {distance_pips:.1f} pips en-dessous de la médiane"
+            
+            # Vérifier taille de bougie
+            current_open = recent_opens[-1]
+            candle_size = abs(current_close - current_open) / 0.0001
+            if candle_size >= SAINT_GRAAL_CONFIG['bb_crossover']['min_candle_size_pips']:
+                crossover_strength += 3
+                reason += f" (bougie forte: {candle_size:.1f} pips)"
+            else:
+                reason += f" (bougie faible: {candle_size:.1f} pips)"
+        else:
+            reason = f"SELL rejeté: Fermeture {current_close} > Bande médiane {current_middle:.5f}"
+    
+    # Mode strict: Rejeter si le croisement est trop faible
+    if (SAINT_GRAAL_CONFIG['bb_crossover']['strict_mode'] and 
+        crossover_detected and 
+        crossover_strength < 5):
+        return False, 0, f"Croisement trop faible: {crossover_strength:.1f}"
+    
+    return crossover_detected, crossover_strength, reason
 
 # ================= FONCTIONS EXISTANTES DÉVELOPPÉES =================
 
@@ -500,7 +643,7 @@ def analyze_momentum_asymmetric_optimized(df):
     }
 
 def calculate_bollinger_signals(df):
-    """Calcule les signaux des Bandes de Bollinger"""
+    """Calcule les signaux des Bandes de Bollinger avec croisement médiane"""
     if len(df) < SAINT_GRAAL_CONFIG['bollinger_config']['window'] + 10:
         return {
             'bb_position': 50,
@@ -509,7 +652,10 @@ def calculate_bollinger_signals(df):
             'bb_squeeze': False,
             'bb_upper': 0,
             'bb_lower': 0,
-            'bb_middle': 0
+            'bb_middle': 0,
+            'price_above_middle': False,
+            'price_below_middle': False,
+            'middle_crossover': 'NEUTRAL'
         }
     
     bb = BollingerBands(
@@ -539,7 +685,26 @@ def calculate_bollinger_signals(df):
     current_width = float(bb_width.iloc[-1])
     bb_squeeze = current_width < avg_width * 0.7
     
-    # Détermination du signal
+    # 🔥 AJOUT: Position par rapport à la bande médiane
+    price_above_middle = current_price > current_middle
+    price_below_middle = current_price < current_middle
+    
+    # 🔥 AJOUT: Détection de croisement
+    middle_crossover = "NEUTRAL"
+    if len(df) >= 2:
+        prev_price = float(df.iloc[-2]['close'])
+        prev_middle = float(bb_middle.iloc[-2]) if len(bb_middle) >= 2 else current_middle
+        
+        if prev_price <= prev_middle and current_price > current_middle:
+            middle_crossover = "BULLISH_CROSS"
+        elif prev_price >= prev_middle and current_price < current_middle:
+            middle_crossover = "BEARISH_CROSS"
+        elif price_above_middle:
+            middle_crossover = "ABOVE_MIDDLE"
+        elif price_below_middle:
+            middle_crossover = "BELOW_MIDDLE"
+    
+    # Détermination du signal traditionnel
     bb_signal = "NEUTRAL"
     
     if bb_position < SAINT_GRAAL_CONFIG['bollinger_config']['oversold_zone']:
@@ -556,11 +721,14 @@ def calculate_bollinger_signals(df):
         'bb_squeeze': bb_squeeze,
         'bb_upper': current_upper,
         'bb_lower': current_lower,
-        'bb_middle': current_middle
+        'bb_middle': current_middle,
+        'price_above_middle': price_above_middle,
+        'price_below_middle': price_below_middle,
+        'middle_crossover': middle_crossover
     }
 
 def get_bb_confirmation_score(bb_signal, direction, stochastic_value):
-    """Calcule le score de confirmation Bollinger Bands"""
+    """Calcule le score de confirmation Bollinger Bands avec croisement médiane"""
     score = 0
     reason = ""
     
@@ -588,6 +756,23 @@ def get_bb_confirmation_score(bb_signal, direction, stochastic_value):
         elif stochastic_value < 40:
             score += 10
             reason += " + Stoch Bas"
+        
+        # 🔥 NOUVEAU: Bonus pour position au-dessus de la bande médiane
+        if bb_signal['price_above_middle']:
+            score += SAINT_GRAAL_CONFIG['bollinger_config']['crossover_weight']
+            reason += " + Au-dessus médiane"
+            
+            # Bonus supplémentaire pour vrai croisement
+            if bb_signal['middle_crossover'] == "BULLISH_CROSS":
+                score += 8
+                reason += " (Croisement haussier)"
+        
+        # 🔥 VÉTO: Si prix en-dessous de la bande médiane en mode strict
+        if (SAINT_GRAAL_CONFIG['bb_crossover']['strict_mode'] and 
+            bb_signal['price_below_middle'] and 
+            bb_signal['middle_crossover'] != "BULLISH_CROSS"):
+            score -= 15
+            reason += " - En-dessous médiane (vété)"
     
     elif direction == "SELL":
         # Score de position
@@ -613,6 +798,23 @@ def get_bb_confirmation_score(bb_signal, direction, stochastic_value):
         elif stochastic_value > 60:
             score += 10
             reason += " + Stoch Haut"
+        
+        # 🔥 NOUVEAU: Bonus pour position en-dessous de la bande médiane
+        if bb_signal['price_below_middle']:
+            score += SAINT_GRAAL_CONFIG['bollinger_config']['crossover_weight']
+            reason += " + En-dessous médiane"
+            
+            # Bonus supplémentaire pour vrai croisement
+            if bb_signal['middle_crossover'] == "BEARISH_CROSS":
+                score += 8
+                reason += " (Croisement baissier)"
+        
+        # 🔥 VÉTO: Si prix au-dessus de la bande médiane en mode strict
+        if (SAINT_GRAAL_CONFIG['bb_crossover']['strict_mode'] and 
+            bb_signal['price_above_middle'] and 
+            bb_signal['middle_crossover'] != "BEARISH_CROSS"):
+            score -= 15
+            reason += " - Au-dessus médiane (vété)"
     
     # Bonus si prix proche de la bande
     current_diff_to_band = 0
@@ -796,12 +998,12 @@ def validate_candle_for_5min_sell(df):
 
 # ================= FONCTION PRINCIPALE MISE À JOUR =================
 
-def rule_signal_saint_graal_5min_pro_v3(df, signal_count=0, total_signals_needed=6):
+def rule_signal_saint_graal_5min_pro_v4(df, signal_count=0, total_signals_needed=6):
     """
-    🔥 VERSION 4.5 : AVEC MICRO MOMENTUM + FILTRE ATR
+    🔥 VERSION 4.6 : AVEC CROISEMENT BANDE MÉDIANE BB + MICRO MOMENTUM + FILTRE ATR
     """
     print(f"\n{'='*70}")
-    print(f"🎯 BINAIRE 5 MIN V4.5 - Signal #{signal_count+1}/{total_signals_needed}")
+    print(f"🎯 BINAIRE 5 MIN V4.6 - Signal #{signal_count+1}/{total_signals_needed}")
     print(f"{'='*70}")
     
     if len(df) < 100:
@@ -822,11 +1024,11 @@ def rule_signal_saint_graal_5min_pro_v3(df, signal_count=0, total_signals_needed
     momentum = analyze_momentum_asymmetric_optimized(df)
     print(f"⚡ Momentum: RSI {momentum['rsi']:.1f} | StochF {momentum['stoch_k_fast']:.1f} | StochS {momentum['stoch_k_slow']:.1f}")
     
-    # ===== 4. BOLLINGER BANDS =====
+    # ===== 4. BOLLINGER BANDS AVEC CROISEMENT =====
     bb_signal = calculate_bollinger_signals(df)
-    print(f"📊 BB: Position {bb_signal['bb_position']:.1f}% | Signal: {bb_signal['bb_signal']}")
+    print(f"📊 BB: Position {bb_signal['bb_position']:.1f}% | Signal: {bb_signal['bb_signal']} | Croisement: {bb_signal['middle_crossover']}")
     
-    # ===== 5. 🔥 NOUVEAU: FILTRE ATR =====
+    # ===== 5. 🔥 FILTRE ATR =====
     atr_filter = calculate_atr_filter(df)
     print(f"📏 ATR: {atr_filter['reason']}")
     
@@ -895,11 +1097,16 @@ def rule_signal_saint_graal_5min_pro_v3(df, signal_count=0, total_signals_needed
     # 🔥 DÉCISION BUY
     if (buy_score_total >= 70 and momentum['momentum_gate_passed']):
         
-        # 🔥 NOUVEAU: Vérification micro momentum
+        # 🔥 Vérification micro momentum
         micro_valid, micro_score, micro_reason = check_micro_momentum(df, "BUY")
+        
+        # 🔥 NOUVEAU: Vérification croisement bande médiane BB
+        bb_crossover_valid, bb_crossover_score, bb_crossover_reason = check_bb_middle_crossover(df, "BUY")
         
         if not micro_valid:
             print(f"❌ Micro momentum BUY échoué: {micro_reason}")
+        elif not bb_crossover_valid:
+            print(f"❌ Croisement BB BUY échoué: {bb_crossover_reason}")
         else:
             # Vérification alignement M5
             m5_aligned, m5_reason, m5_bonus = check_m5_alignment(m5_filter, "BUY")
@@ -910,9 +1117,11 @@ def rule_signal_saint_graal_5min_pro_v3(df, signal_count=0, total_signals_needed
                 
                 if candle_valid:
                     direction = "BUY"
-                    final_score = buy_score_total + pattern_conf + m5_bonus + micro_score
+                    final_score = (buy_score_total + pattern_conf + m5_bonus + 
+                                 micro_score + bb_crossover_score)
                     decision_details.append(f"BUY validé: {pattern} ({pattern_conf}%)")
                     decision_details.append(f"Micro: {micro_reason}")
+                    decision_details.append(f"BB: {bb_crossover_reason}")
                     decision_details.append(m5_reason)
             else:
                 print(f"❌ BUY rejeté: {m5_reason}")
@@ -922,8 +1131,13 @@ def rule_signal_saint_graal_5min_pro_v3(df, signal_count=0, total_signals_needed
         
         micro_valid, micro_score, micro_reason = check_micro_momentum(df, "SELL")
         
+        # 🔥 NOUVEAU: Vérification croisement bande médiane BB
+        bb_crossover_valid, bb_crossover_score, bb_crossover_reason = check_bb_middle_crossover(df, "SELL")
+        
         if not micro_valid:
             print(f"❌ Micro momentum SELL échoué: {micro_reason}")
+        elif not bb_crossover_valid:
+            print(f"❌ Croisement BB SELL échoué: {bb_crossover_reason}")
         else:
             m5_aligned, m5_reason, m5_bonus = check_m5_alignment(m5_filter, "SELL")
             
@@ -932,9 +1146,11 @@ def rule_signal_saint_graal_5min_pro_v3(df, signal_count=0, total_signals_needed
                 
                 if candle_valid:
                     direction = "SELL"
-                    final_score = sell_score_total + pattern_conf + m5_bonus + micro_score
+                    final_score = (sell_score_total + pattern_conf + m5_bonus + 
+                                 micro_score + bb_crossover_score)
                     decision_details.append(f"SELL validé: {pattern} ({pattern_conf}%)")
                     decision_details.append(f"Micro: {micro_reason}")
+                    decision_details.append(f"BB: {bb_crossover_reason}")
                     decision_details.append(m5_reason)
             else:
                 print(f"❌ SELL rejeté: {m5_reason}")
@@ -966,22 +1182,24 @@ def rule_signal_saint_graal_5min_pro_v3(df, signal_count=0, total_signals_needed
             
             print(f"✅ SIGNAL {direction_display} {quality}")
             print(f"   Score total: {final_score:.1f}")
-            print(f"   Détails: {' | '.join(decision_details[:2])}")
+            print(f"   Détails: {' | '.join(decision_details[:3])}")
             
             return {
                 'signal': direction_display,
                 'mode': mode,
                 'quality': quality,
                 'score': float(final_score),
-                'reason': f"{direction_display} | Score {final_score:.1f} | {structure} | ATR:{atr_filter['atr_pips']:.1f}pips",
+                'reason': f"{direction_display} | Score {final_score:.1f} | {structure} | ATR:{atr_filter['atr_pips']:.1f}pips | BB:{bb_signal['middle_crossover']}",
                 'expiration_minutes': 5,
                 'details': {
                     'momentum_score': momentum['buy_score'] if direction == "BUY" else momentum['sell_score'],
                     'bb_score': bb_buy_score if direction == "BUY" else bb_sell_score,
                     'micro_momentum_score': micro_score,
+                    'bb_crossover_score': bb_crossover_score,
                     'atr_score': atr_filter['score'],
                     'm5_alignment': m5_filter['trend'],
                     'structure': structure,
+                    'bb_crossover': bb_signal['middle_crossover'],
                 }
             }
     
@@ -1000,8 +1218,8 @@ def get_signal_with_metadata(df, signal_count=0, total_signals=6):
             print("❌ Données insuffisantes pour analyse")
             return None
         
-        # Utiliser la version avec micro momentum et ATR
-        result = rule_signal_saint_graal_5min_pro_v3(df, signal_count, total_signals)
+        # Utiliser la version avec croisement BB, micro momentum et ATR
+        result = rule_signal_saint_graal_5min_pro_v4(df, signal_count, total_signals)
         
         if result is not None:
             direction_display = result['signal']
@@ -1013,7 +1231,7 @@ def get_signal_with_metadata(df, signal_count=0, total_signals=6):
                 'CRITICAL': '⭐'
             }.get(result['quality'], '⭐')
             
-            reason = f"{quality_display} {direction_display} (5min) | Score: {result['score']:.0f}"
+            reason = f"{quality_display} {direction_display} (5min) | Score: {result['score']:.0f} | BB:{result['details']['bb_crossover']}"
             
             return {
                 'direction': direction_display,
@@ -1027,7 +1245,7 @@ def get_signal_with_metadata(df, signal_count=0, total_signals=6):
                     'total_signals': total_signals,
                     'timeframe': 'M1',
                     'expiration': '5MIN',
-                    'filters': 'MICRO_MOMENTUM+ATR+M5',
+                    'filters': 'BB_CROSSOVER+MICRO_MOMENTUM+ATR+M5',
                 }
             }
         
@@ -1041,12 +1259,13 @@ def get_signal_with_metadata(df, signal_count=0, total_signals=6):
 # ================= POINT D'ENTRÉE PRINCIPAL =================
 
 if __name__ == "__main__":
-    print("🎯 DESK PRO BINAIRE - VERSION 4.5 ULTIMATE PLUS")
+    print("🎯 DESK PRO BINAIRE - VERSION 4.6 ULTIMATE PLUS")
     print("🔥 NOUVEAUX FILTRES AJOUTÉS:")
-    print("   1. Micro garde-fou momentum (cohérence dernières bougies M1)")
-    print("   2. Filtre ATR (volatilité optimale 5-15 pips)")
-    print("   3. Vétos ATR pour basse/haute volatilité")
-    print("   4. Bonus squeeze ATR pour breakouts potentiels")
+    print("   1. Croisement bande médiane BB (signal directionnel)")
+    print("   2. Micro garde-fou momentum (cohérence dernières bougies M1)")
+    print("   3. Filtre ATR (volatilité optimale 5-15 pips)")
+    print("   4. Vétos ATR pour basse/haute volatilité")
+    print("   5. Bonus squeeze ATR pour breakouts potentiels")
     print("\n✅ Système de filtrage multicouche optimal pour Pocket Option 5min!")
     
     # Exemple d'utilisation
