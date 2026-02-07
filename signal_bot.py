@@ -28,16 +28,16 @@ except ImportError:
     print("⚠️ Vérificateur externe non disponible")
 
 from config import *
-from utils import (
-    compute_indicators, 
-    get_signal_with_metadata,  # 🔥 Utilisation de la fonction principale compatibilité
-    calculate_signal_quality_score,
-    get_m1_candle_range,
-    get_next_m1_candle,
-    analyze_market_structure,
-    is_near_swing_high,
-    detect_retest_pattern
-)
+# CORRECTION DES IMPORTS - Utiliser uniquement la fonction disponible
+try:
+    from utils import get_signal_with_metadata
+    UTILS_AVAILABLE = True
+    print("✅ Utils importé avec succès - Fonction: get_signal_with_metadata")
+except ImportError as e:
+    print(f"❌ ERREUR CRITIQUE: Impossible d'importer get_signal_with_metadata depuis utils.py")
+    print(f"   Détails: {e}")
+    print("   Vérifiez que utils.py contient bien cette fonction")
+    exit(1)
 
 # ================= LISTE DES PAIRES DEPUIS CONFIG.PY =================
 
@@ -856,15 +856,15 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "**📊 Session:**\n"
         "• /startsession - Démarrer session\n"
         "• /sessionstatus - État session\n"
-        "• /endsession - Terminer session\n\n"
+        "• /endsession - Terminer session\n"
+        "• /forceend - Forcer fin session\n\n"
         "**🔄 Rotation Itérative:**\n"
         "• /rotationstats - Stats rotation\n"
         "• /apistats - Stats API\n"
         "• /pairslist - Liste paires\n"
         "• /rotationconfig - Configuration\n\n"
         "**📈 Statistiques:**\n"
-        "• /stats - Stats globales\n"
-        "• /rapport - Rapport du jour\n\n"
+        "• /stats - Stats globales\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"🎯 Paires: {len(ROTATION_PAIRS)} depuis config.py\n"
         f"🔄 Batch: {ROTATION_CONFIG['pairs_per_batch']} paires\n"
@@ -988,8 +988,6 @@ async def cmd_pairs_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     
     await update.message.reply_text(msg)
-
-# ================= FONCTIONS EXISTANTES (ADAPTÉES) =================
 
 async def cmd_start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Démarre une nouvelle session de 8 signaux"""
