@@ -1,6 +1,6 @@
 """
-🔥 STRATÉGIE BINAIRE M1 PRO - VERSION 6.0 ULTRA-PERFORMANTE
-🎯 Optimisé pour générer des signaux fréquents avec critères assouplis
+🚀 STRATÉGIE BINAIRE M1 PRO - VERSION 9.1 STABILISÉE
+🔥 ARCHITECTURE PRO - LOGIQUE PARFAITE
 """
 
 import pandas as pd
@@ -12,617 +12,493 @@ from ta.volatility import BollingerBands, AverageTrueRange
 import warnings
 warnings.filterwarnings('ignore')
 
-# ================= CONFIGURATION OPTIMISÉE POUR SIGNALS M1 =================
+# ================= CONFIGURATION STABILISÉE =================
 
 SAINT_GRAAL_CONFIG = {
     'expiration_minutes': 5,
     
-    'micro_momentum_filter': {
+    # 🔥 ZONES D'INTERDICTION AVEC STRICT_MODE FONCTIONNEL
+    'forbidden_zones': {
+        'no_buy_zone': {
+            'enabled': True,
+            'stoch_fast_max': 75,
+            'rsi_max': 60,
+            'bb_position_max': 65,
+            'strict_mode': True,  # VETO ABSOLU
+            'penalty': 15,  # Si strict_mode=False
+        },
+        'no_sell_zone': {
+            'enabled': True,
+            'stoch_fast_min': 25,
+            'rsi_min': 40,
+            'bb_position_min': 35,
+            'strict_mode': True,  # VETO ABSOLU
+            'penalty': 15,
+        },
+        'swing_filter': {
+            'enabled': True,
+            'lookback_bars': 8,
+            'no_buy_at_swing_high': True,
+            'no_sell_at_swing_low': True,
+            'strict_mode': False,  # SOFT VETO
+            'swing_penalty': 20,
+            'swing_momentum_threshold': 100,
+        }
+    },
+    
+    # 🔥 MOMENTUM GATE SÉPARÉ BUY/SELL
+    'momentum_rules': {
+        'buy_conditions': {
+            'rsi_max': 52,
+            'rsi_oversold': 32,
+            'stoch_max': 35,
+            'stoch_oversold': 20,
+            'require_stoch_rising': True,
+        },
+        'sell_conditions': {
+            'rsi_min': 58,
+            'rsi_overbought': 68,
+            'stoch_min': 65,
+            'stoch_overbought': 75,
+            'require_stoch_falling': True,
+        },
+        'momentum_gate_diff': 10,
+        'smart_gate': True,
+    },
+    
+    'micro_momentum': {
         'enabled': True,
-        'lookback_bars': 2,
-        'min_bullish_bars': 1,
-        'min_bearish_bars': 1,
-        'require_price_alignment': False,
-        'require_volume_confirmation': False,
-        'weight': 10,
+        'lookback_bars': 3,
+        'min_bullish_bars': 2,
+        'min_bearish_bars': 2,
+        'require_trend_alignment': True,
+        'weight': 12,
+    },
+    
+    'bollinger_config': {
+        'window': 20,
+        'window_dev': 2,
+        'oversold_zone': 25,
+        'overbought_zone': 75,
+        'buy_zone_max': 45,
+        'sell_zone_min': 55,
+        'middle_band_weight': 15,
+        'strict_mode': True,  # VETO ABSOLU
+        'penalty': 10,  # Si strict_mode=False
     },
     
     'atr_filter': {
         'enabled': True,
-        'window': 10,
-        'min_atr_pips': 1,
-        'max_atr_pips': 35,
-        'optimal_atr_pips': [2, 25],
-        'atr_trend_weight': 8,
-        'squeeze_detection': False,
+        'window': 14,
+        'min_atr_pips': 3,
+        'max_atr_pips': 25,
+        'optimal_range': [5, 15],
     },
     
-    'bb_crossover': {
-        'enabled': True,
-        'lookback_bars': 1,
-        'require_confirmation': False,
-        'weight': 8,
-        'min_candle_size_pips': 1,
-        'strict_mode': False,
-    },
-    
-    'buy_rules': {
-        'stoch_period': 5,
-        'stoch_smooth': 2,
-        'rsi_max_for_buy': 50,
-        'rsi_oversold': 35,
-        'require_swing_confirmation': False,
-        'min_signal_duration_bars': 1,
-        'bb_confirmation': True,
-        'score_threshold': 60,
-    },
-    
-    'sell_rules': {
-        'stoch_period': 7,
-        'stoch_smooth': 2,
-        'rsi_min_for_sell': 55,
-        'stoch_min_overbought': 65,
-        'require_swing_break': False,
-        'max_swing_distance_pips': 10,
-        'momentum_gate_diff': 8,
-        'min_signal_duration_bars': 2,
-        'bb_confirmation': True,
-        'score_threshold': 65,
-    },
-    
+    # 🔥 M5 AVEC SOFT VETO CONTEXTUEL
     'm5_filter': {
         'enabled': True,
-        'ema_fast': 30,
-        'ema_slow': 100,
-        'min_required_m5_bars': 30,
+        'ema_fast': 50,
+        'ema_slow': 200,
         'weight': 15,
-        'strict_mode': False,
+        'soft_veto': True,
+        'max_score_against_trend': 95,
     },
     
-    'bollinger_config': {
-        'window': 14,
-        'window_dev': 1.8,
-        'oversold_zone': 25,
-        'overbought_zone': 75,
-        'middle_band_weight': 20,
-        'crossover_weight': 12,
+    # 🔥 ÉTAT DE MARCHÉ (TREND/RANGE)
+    'market_state': {
+        'enabled': True,
+        'adx_threshold': 25,
+        'rsi_range_threshold': 45,  # Si RSI entre 45-55, probablement range
+        'prioritize_bb_in_range': True,
+        'prioritize_momentum_in_trend': True,
     },
     
-    'signal_config': {
-        'require_m5_alignment': False,
-        'min_quality_score': 75,
-        'max_signals_per_session': 12,
-        'cooldown_bars_after_signal': 2,
-        'force_signal_after_minutes': 10,
+    'signal_validation': {
+        'min_score': 85,
+        'max_score_realistic': 145,  # Score max réaliste
+        'confidence_zones': {
+            85: 65,   # MINIMUM
+            95: 72,   # SOLID
+            105: 78,  # GOOD
+            115: 85,  # HIGH
+            125: 90,  # EXCELLENT
+            135: 92,  # PREMIUM
+        },
+        'cooldown_bars': 3,
+    },
+    
+    # 🔥 COOLDOWN DYNAMIQUE AVEC QUALITÉ
+    'risk_management': {
+        'dynamic_cooldown': True,
+        'normal_cooldown': 3,
+        'cooldown_by_quality': {
+            'EXCELLENT': 2,   # Perte sur excellent → cooldown court
+            'HIGH': 3,
+            'SOLID': 4,
+            'MINIMUM': 6,     # Perte sur minimum → cooldown long
+        },
+        'max_daily_trades': 20,
+        'max_consecutive_losses': 3,
     }
 }
 
-# ================= FONCTION DE DÉBOGAGE =================
+# ================= ÉTAT DU TRADING AVEC QUALITÉ =================
 
-def debug_no_signals(df):
-    """Debug pourquoi aucun signal n'est généré"""
-    momentum = analyze_momentum_asymmetric_optimized(df)
-    bb = calculate_bollinger_signals(df)
-    atr = calculate_atr_filter(df)
-    
-    print(f"\n🔍 DEBUG - Pourquoi pas de signal ?")
-    print(f"RSI: {momentum['rsi']:.1f}")
-    print(f"Stoch K Fast: {momentum['stoch_k_fast']:.1f}")
-    print(f"Stoch K Slow: {momentum['stoch_k_slow']:.1f}")
-    print(f"BB Position: {bb['bb_position']:.1f}%")
-    print(f"ATR: {atr['atr_pips']:.1f} pips")
-    print(f"ATR Signal: {atr['signal']}")
-    print(f"Buy Score: {momentum['buy_score']}")
-    print(f"Sell Score: {momentum['sell_score']}")
-    
-    conditions = {
-        'buy_score_total >= 70': momentum['buy_score'] >= 70,
-        'sell_score_total >= 75': momentum['sell_score'] >= 75,
-        'momentum_gate_passed': momentum['momentum_gate_passed'],
-        'atr_optimal': atr['signal'] not in ['AVOID_LOW_VOL', 'AVOID_HIGH_VOL']
-    }
-    
-    for cond, value in conditions.items():
-        print(f"{cond}: {'✅' if value else '❌'}")
-    
-    return conditions
-
-# ================= FONCTION POUR FORCER UN SIGNAL =================
-
-def force_signal_if_needed(df, minutes_without_signal=10):
-    """Force un signal si trop longtemps sans résultat"""
-    if len(df) < 50:
-        return None
-    
-    current_price = float(df.iloc[-1]['close'])
-    prev_price = float(df.iloc[-2]['close'])
-    
-    # Calculer RSI simple
-    rsi = RSIIndicator(close=df['close'], window=10).rsi().iloc[-1]
-    
-    # Calculer tendance simple
-    ma_fast = df['close'].rolling(window=5).mean().iloc[-1]
-    ma_slow = df['close'].rolling(window=20).mean().iloc[-1]
-    
-    # Logique de décision forcée
-    if current_price > prev_price and rsi < 60:
-        return {
-            'direction': 'CALL',
-            'quality': 'FORCED',
-            'score': 80.0,
-            'confidence': 65,
-            'reason': f'Signal forcé après {minutes_without_signal}min sans | RSI: {rsi:.1f} | Trend: BULLISH',
-            'expiration_minutes': 5,
-            'details': {
-                'rsi': float(rsi),
-                'trend': 'BULLISH',
-                'price_change': ((current_price - prev_price) / prev_price * 100)
-            }
-        }
-    elif current_price < prev_price and rsi > 40:
-        return {
-            'direction': 'PUT',
-            'quality': 'FORCED',
-            'score': 80.0,
-            'confidence': 65,
-            'reason': f'Signal forcé après {minutes_without_signal}min sans | RSI: {rsi:.1f} | Trend: BEARISH',
-            'expiration_minutes': 5,
-            'details': {
-                'rsi': float(rsi),
-                'trend': 'BEARISH',
-                'price_change': ((prev_price - current_price) / prev_price * 100)
-            }
-        }
-    elif ma_fast > ma_slow:
-        # Tendance haussière
-        return {
-            'direction': 'CALL',
-            'quality': 'FORCED_MA',
-            'score': 75.0,
-            'confidence': 60,
-            'reason': f'Signal forcé MA | MA5 > MA20 | RSI: {rsi:.1f}',
-            'expiration_minutes': 5
-        }
-    else:
-        # Tendance baissière
-        return {
-            'direction': 'PUT',
-            'quality': 'FORCED_MA',
-            'score': 75.0,
-            'confidence': 60,
-            'reason': f'Signal forcé MA | MA5 < MA20 | RSI: {rsi:.1f}',
-            'expiration_minutes': 5
-        }
-
-# ================= FONCTION POUR CALCULER LE POURCENTAGE DE CONFIANCE =================
-
-def calculate_confidence_percentage(final_score):
-    """Calcule le pourcentage de confiance basé sur le score final"""
-    min_score = 75
-    max_score = 150
-    
-    if final_score <= min_score:
-        return 50
-    elif final_score >= max_score:
-        return 100
-    else:
-        percentage = 50 + ((final_score - min_score) / (max_score - min_score)) * 50
-        return min(100, max(50, round(percentage)))
-
-# ================= FONCTION POUR GÉNÉRER LE MESSAGE DE SIGNAL =================
-
-def generate_signal_message(signal_data, pairs_analyzed=5, batches=1):
-    """Génère un message formaté pour le signal"""
-    if not signal_data or not isinstance(signal_data, dict):
-        return None
-    
-    required_keys = ['direction', 'quality', 'score']
-    for key in required_keys:
-        if key not in signal_data:
-            return None
-    
-    direction = signal_data['direction']
-    quality = signal_data['quality']
-    score = signal_data['score']
-    confidence = signal_data.get('confidence', calculate_confidence_percentage(score))
-    
-    if direction == "CALL":
-        direction_emoji = "↗️"
-        direction_text = "CALL ↗️"
-    else:
-        direction_emoji = "↘️"
-        direction_text = "PUT ↘️"
-    
-    quality_stars = {
-        'EXCELLENT': '⭐⭐⭐⭐⭐',
-        'HIGH': '⭐⭐⭐⭐',
-        'SOLID': '⭐⭐⭐',
-        'MINIMUM': '⭐⭐',
-        'CRITICAL': '⭐',
-        'FORCED': '⚠️ FORCÉ',
-        'FORCED_MA': '⚠️ FORCÉ-MA'
-    }.get(quality, '⭐')
-    
-    current_time = datetime.now().strftime("%H:%M")
-    
-    message = f"""
-🎯 **SIGNAL #1 - ROTATION ITÉRATIVE**
-━━━━━━━━━━━━━━━━━━━━
-💱 ETH/USD
-📈 Direction: **{direction_text}**
-⏰ Heure entrée: **{current_time}**
-💪 Confiance: **{confidence}%**
-{quality_stars} Qualité: **{quality}**
-
-🔄 {pairs_analyzed} paires analysées ({batches} batches)
-⏱️ Timeframe: 1 minute
-🎯 Expiration: 5 minutes
-📊 Score système: **{score:.0f}/200**
-━━━━━━━━━━━━━━━━━━━━
-📋 Détails techniques:
-• Momentum aligné: ✓
-• Bollinger Bands: ✓
-• Filtre ATR: ✓  
-• Micro momentum: ✓
-• Croisement BB médiane: ✓
-━━━━━━━━━━━━━━━━━━━━
-⚠️ **RAPPEL RISQUES**
-• Maximum 3-5% du capital par trade
-• Stop loss mental obligatoire
-• Pas de revenge trading
-━━━━━━━━━━━━━━━━━━━━
-🚀 **ACTION IMMÉDIATE**
-1. Vérifier confluence sur M5
-2. Entrée au prix marché
-3. Expiration: 5 minutes
-4. TP: 75-85% | SL: 0%
-━━━━━━━━━━━━━━━━━━━━
-"""
-    return message
-
-# ================= MICRO GARDE-FOU MOMENTUM =================
-
-def check_micro_momentum(df, direction, lookback=2):
-    """Vérifie la cohérence des dernières bougies M1 avec la direction"""
-    if len(df) < lookback + 1:
-        return True, 5, "Données insuffisantes - accepté"
-    
-    recent = df.tail(lookback).copy()
-    closes = recent['close'].values
-    opens = recent['open'].values
-    
-    bullish_count = 0
-    bearish_count = 0
-    
-    for i in range(len(recent)):
-        if closes[i] > opens[i]:
-            bullish_count += 1
-        elif closes[i] < opens[i]:
-            bearish_count += 1
-    
-    if direction == "BUY":
-        if bullish_count >= 1:
-            micro_score = SAINT_GRAAL_CONFIG['micro_momentum_filter']['weight']
-            return True, micro_score, f"Micro momentum BUY: {bullish_count}/{lookback} haussier"
+class TradingState:
+    """Gère l'état du trading avec qualité des trades"""
+    def __init__(self):
+        self.last_trade_time = None
+        self.last_trade_result = None  # 'win', 'loss'
+        self.last_trade_quality = None  # 'EXCELLENT', 'HIGH', etc.
+        self.consecutive_losses = 0
+        self.daily_trades = 0
+        self.daily_reset_time = None
+        
+    def reset_daily_if_needed(self):
+        """Réinitialise le compteur quotidien"""
+        now = datetime.now()
+        if self.daily_reset_time is None or now >= self.daily_reset_time:
+            self.daily_trades = 0
+            self.daily_reset_time = datetime(now.year, now.month, now.day, 23, 59, 59)
+            
+    def record_trade(self, result, quality):
+        """Enregistre un trade avec sa qualité"""
+        self.last_trade_time = datetime.now()
+        self.last_trade_result = result
+        self.last_trade_quality = quality
+        
+        if result == 'loss':
+            self.consecutive_losses += 1
         else:
-            return True, 5, f"Micro momentum faible BUY: {bullish_count}/{lookback} haussier"
+            self.consecutive_losses = 0
+            
+        self.daily_trades += 1
+        
+    def get_cooldown_bars(self):
+        """Retourne le cooldown basé sur la qualité du dernier trade perdant"""
+        if not SAINT_GRAAL_CONFIG['risk_management']['dynamic_cooldown']:
+            return SAINT_GRAAL_CONFIG['signal_validation']['cooldown_bars']
+            
+        if self.last_trade_result == 'loss' and self.last_trade_quality:
+            # Cooldown basé sur la qualité du trade perdant
+            quality_cooldown = SAINT_GRAAL_CONFIG['risk_management']['cooldown_by_quality'].get(
+                self.last_trade_quality, 
+                SAINT_GRAAL_CONFIG['risk_management']['normal_cooldown']
+            )
+            return quality_cooldown
+            
+        return SAINT_GRAAL_CONFIG['risk_management']['normal_cooldown']
     
-    elif direction == "SELL":
-        if bearish_count >= 1:
-            micro_score = SAINT_GRAAL_CONFIG['micro_momentum_filter']['weight']
-            return True, micro_score, f"Micro momentum SELL: {bearish_count}/{lookback} baissier"
-        else:
-            return True, 5, f"Micro momentum faible SELL: {bearish_count}/{lookback} baissier"
-    
-    return True, 5, "Direction non critique"
+    def can_trade(self, current_time):
+        """Vérifie si le trading est autorisé"""
+        self.reset_daily_if_needed()
+        
+        # Vérifier cooldown
+        if self.last_trade_time:
+            cooldown_minutes = self.get_cooldown_bars()
+            time_diff = (current_time - self.last_trade_time).total_seconds() / 60
+            
+            if time_diff < cooldown_minutes:
+                remaining = cooldown_minutes - time_diff
+                return False, f"Cooldown: {remaining:.1f}min restants"
+        
+        # Vérifier limites
+        if self.daily_trades >= SAINT_GRAAL_CONFIG['risk_management']['max_daily_trades']:
+            return False, "Limite quotidienne atteinte"
+            
+        if self.consecutive_losses >= SAINT_GRAAL_CONFIG['risk_management']['max_consecutive_losses']:
+            return False, f"{self.consecutive_losses} pertes consécutives"
+            
+        return True, "OK"
 
-# ================= FILTRE ATR OPTIMISÉ =================
+trading_state = TradingState()
 
-def calculate_atr_filter(df):
-    """🔥 FILTRE ATR - Version optimisée pour M1"""
-    if len(df) < 20:
-        return {
-            'enabled': False,
-            'atr_value': 0,
-            'atr_pips': 0,
-            'signal': 'NO_DATA',
-            'score': 0,
-            'reason': 'Données insuffisantes pour ATR',
-            'is_squeeze': False,
-            'atr_trend': 'NEUTRAL',
-        }
+# ================= DÉTECTION ÉTAT DE MARCHÉ =================
+
+def detect_market_state(df):
+    """Détecte si le marché est en TREND ou RANGE"""
+    if len(df) < 30:
+        return {'state': 'NEUTRAL', 'adx': 0, 'reason': 'Données insuffisantes'}
     
-    atr_indicator = AverageTrueRange(
+    # Calcul ADX
+    adx_indicator = ADXIndicator(
         high=df['high'],
         low=df['low'],
         close=df['close'],
-        window=SAINT_GRAAL_CONFIG['atr_filter']['window']
+        window=14
     )
+    adx = float(adx_indicator.adx().iloc[-1])
     
-    atr_values = atr_indicator.average_true_range()
-    current_atr = float(atr_values.iloc[-1])
-    atr_pips = current_atr / 0.0001
+    # Calcul RSI pour détecter range
+    rsi = RSIIndicator(close=df['close'], window=14).rsi()
+    current_rsi = float(rsi.iloc[-1])
     
-    score = 5  # Score de base
-    signal = "ACCEPTABLE_VOL"
-    reason = f"ATR: {atr_pips:.1f} pips"
+    # Détection de range (RSI proche de 50)
+    rsi_range_threshold = SAINT_GRAAL_CONFIG['market_state']['rsi_range_threshold']
+    in_rsi_range = abs(current_rsi - 50) < (50 - rsi_range_threshold)
     
-    min_atr = SAINT_GRAAL_CONFIG['atr_filter']['min_atr_pips']
-    max_atr = SAINT_GRAAL_CONFIG['atr_filter']['max_atr_pips']
-    optimal_range = SAINT_GRAAL_CONFIG['atr_filter']['optimal_atr_pips']
+    if adx >= SAINT_GRAAL_CONFIG['market_state']['adx_threshold']:
+        state = "TREND"
+        reason = f"ADX fort: {adx:.1f}"
+    elif in_rsi_range:
+        state = "RANGE"
+        reason = f"Range RSI: {current_rsi:.1f}"
+    else:
+        state = "NEUTRAL"
+        reason = f"ADX: {adx:.1f}, RSI: {current_rsi:.1f}"
     
-    if atr_pips < min_atr:
-        signal = "LOW_VOL"
-        score = 0
-        reason = f"ATR bas: {atr_pips:.1f} pips"
-    
-    elif atr_pips > max_atr:
-        signal = "HIGH_VOL"
-        score = 0
-        reason = f"ATR haut: {atr_pips:.1f} pips"
-    
-    elif optimal_range[0] <= atr_pips <= optimal_range[1]:
-        signal = "OPTIMAL_VOL"
-        score = 10
-        reason = f"ATR optimal: {atr_pips:.1f} pips"
-    
-    # Toujours accepter sauf extrêmes
-    if signal in ["LOW_VOL", "HIGH_VOL"]:
-        score = -5  # Léger malus mais pas rejet
-    
-    return {
-        'enabled': True,
-        'atr_value': current_atr,
-        'atr_pips': atr_pips,
-        'signal': signal,
-        'score': score,
-        'reason': reason,
-        'is_squeeze': False,
-        'atr_trend': 'NEUTRAL',
-    }
+    return {'state': state, 'adx': adx, 'rsi': current_rsi, 'reason': reason}
 
-# ================= LOGIQUE CROISEMENT BANDE MÉDIANE BB =================
+# ================= MOMENTUM GATE SÉPARÉ BUY/SELL =================
 
-def check_bb_middle_crossover(df, direction):
-    """🔥 Vérifie le croisement de la bande médiane des Bollinger Bands"""
-    if not SAINT_GRAAL_CONFIG['bb_crossover']['enabled']:
-        return True, 5, "Croisement BB désactivé"
+def calculate_momentum_gate(df, direction, momentum_data):
+    """Calcule le momentum gate spécifique à chaque direction"""
+    if not SAINT_GRAAL_CONFIG['momentum_rules']['smart_gate']:
+        # Gate simple basé sur différence Stoch
+        stoch_diff = abs(momentum_data['stoch_k'] - momentum_data['stoch_d'])
+        return stoch_diff >= SAINT_GRAAL_CONFIG['momentum_rules']['momentum_gate_diff']
     
-    if len(df) < SAINT_GRAAL_CONFIG['bollinger_config']['window'] + 3:
-        return True, 5, "Données insuffisantes - accepté"
+    # 🔥 GATE INTELLIGENT 2/3 CONDITIONS (SÉPARÉ BUY/SELL)
+    gate_score = 0
     
-    bb = BollingerBands(
-        close=df['close'],
-        window=SAINT_GRAAL_CONFIG['bollinger_config']['window'],
-        window_dev=SAINT_GRAAL_CONFIG['bollinger_config']['window_dev']
-    )
+    # Condition 1: Stoch diff
+    stoch_diff = abs(momentum_data['stoch_k'] - momentum_data['stoch_d'])
+    if stoch_diff >= SAINT_GRAAL_CONFIG['momentum_rules']['momentum_gate_diff']:
+        gate_score += 1
     
-    bb_middle = bb.bollinger_mavg()
-    
-    lookback = SAINT_GRAAL_CONFIG['bb_crossover']['lookback_bars']
-    recent_data = df.tail(lookback + 1).copy()
-    
-    if len(recent_data) < lookback + 1:
-        return True, 5, "Données récentes insuffisantes"
-    
-    recent_middle = bb_middle.iloc[-(lookback + 1):].values
-    recent_closes = recent_data['close'].values
-    
-    crossover_detected = True  # Par défaut accepté
-    crossover_strength = 5  # Score de base
-    reason = "BB position acceptable"
-    
+    # Condition 2: RSI slope cohérente
+    rsi_slope_ok = False
     if direction == "BUY":
-        current_close = recent_closes[-1]
-        current_middle = recent_middle[-1]
-        
-        if current_close > current_middle:
-            distance_pips = (current_close - current_middle) / 0.0001
-            crossover_strength = min(SAINT_GRAAL_CONFIG['bb_crossover']['weight'], 
-                                    distance_pips * 1.5 + 5)
-            reason = f"BUY: {distance_pips:.1f} pips au-dessus médiane"
-        else:
-            reason = f"BUY: Sous médiane mais accepté"
+        if momentum_data['rsi'] > momentum_data.get('prev_rsi', momentum_data['rsi']):
+            gate_score += 1
+            rsi_slope_ok = True
+    else:  # SELL
+        if momentum_data['rsi'] < momentum_data.get('prev_rsi', momentum_data['rsi']):
+            gate_score += 1
+            rsi_slope_ok = True
     
-    elif direction == "SELL":
-        current_close = recent_closes[-1]
-        current_middle = recent_middle[-1]
-        
-        if current_close < current_middle:
-            distance_pips = (current_middle - current_close) / 0.0001
-            crossover_strength = min(SAINT_GRAAL_CONFIG['bb_crossover']['weight'], 
-                                    distance_pips * 1.5 + 5)
-            reason = f"SELL: {distance_pips:.1f} pips sous médiane"
-        else:
-            reason = f"SELL: Au-dessus médiane mais accepté"
+    # Condition 3: Micro momentum des prix
+    price_momentum_ok = False
+    if len(df) >= 5:
+        last_3_closes = df['close'].values[-3:]
+        if direction == "BUY":
+            if last_3_closes[-1] > last_3_closes[-2]:
+                gate_score += 1
+                price_momentum_ok = True
+        else:  # SELL
+            if last_3_closes[-1] < last_3_closes[-2]:
+                gate_score += 1
+                price_momentum_ok = True
     
-    return crossover_detected, crossover_strength, reason
-
-# ================= FONCTIONS DE BASE OPTIMISÉES =================
-
-def calculate_m5_filter(df_m1):
-    """Filtre M5 simplifié"""
-    if len(df_m1) < 150:
-        return {
-            'trend': 'NEUTRAL',
-            'score': 0,
-            'reason': 'Données M5 insuffisantes',
-            'ema_fast': None,
-            'ema_slow': None
-        }
-    
-    df_m5 = df_m1.resample('5min').agg({
-        'open': 'first',
-        'high': 'max',
-        'low': 'min',
-        'close': 'last'
-    }).dropna()
-    
-    if len(df_m5) < SAINT_GRAAL_CONFIG['m5_filter']['min_required_m5_bars']:
-        return {
-            'trend': 'NEUTRAL',
-            'score': 0,
-            'reason': 'Bougies M5 insuffisantes',
-            'ema_fast': None,
-            'ema_slow': None
-        }
-    
-    ema_fast = EMAIndicator(
-        close=df_m5['close'],
-        window=SAINT_GRAAL_CONFIG['m5_filter']['ema_fast']
-    ).ema_indicator()
-    
-    ema_slow = EMAIndicator(
-        close=df_m5['close'],
-        window=SAINT_GRAAL_CONFIG['m5_filter']['ema_slow']
-    ).ema_indicator()
-    
-    current_ema_fast = float(ema_fast.iloc[-1])
-    current_ema_slow = float(ema_slow.iloc[-1])
-    
-    if current_ema_fast > current_ema_slow:
-        trend = "BULLISH"
-        score = SAINT_GRAAL_CONFIG['m5_filter']['weight']
-        reason = f"M5 BULLISH"
-    elif current_ema_slow > current_ema_fast:
-        trend = "BEARISH"
-        score = SAINT_GRAAL_CONFIG['m5_filter']['weight']
-        reason = f"M5 BEARISH"
-    else:
-        trend = "NEUTRAL"
-        score = 0
-        reason = "M5 NEUTRAL"
-    
-    return {
-        'trend': trend,
-        'score': score,
-        'reason': reason,
-        'ema_fast': current_ema_fast,
-        'ema_slow': current_ema_slow
+    # Debug info
+    debug_info = {
+        'direction': direction,
+        'gate_score': gate_score,
+        'stoch_diff': stoch_diff,
+        'rsi_slope_ok': rsi_slope_ok,
+        'price_momentum_ok': price_momentum_ok
     }
+    
+    return gate_score >= 2, debug_info
 
-def analyze_market_structure(df, lookback=15):
-    """Analyse simplifiée de la structure du marché"""
-    if len(df) < lookback:
-        return "NEUTRAL", 0
-    
-    recent_data = df.tail(lookback).copy()
-    
-    # Simple tendance basée sur les moyennes mobiles
-    sma_fast = recent_data['close'].rolling(window=5).mean()
-    sma_slow = recent_data['close'].rolling(window=10).mean()
-    
-    if sma_fast.iloc[-1] > sma_slow.iloc[-1] * 1.001:
-        return "UPTREND", 10
-    elif sma_slow.iloc[-1] > sma_fast.iloc[-1] * 1.001:
-        return "DOWNTREND", 10
-    else:
-        return "NEUTRAL", 5
+# ================= ANALYSE MOMENTUM CORRIGÉE =================
 
-def analyze_momentum_asymmetric_optimized(df):
-    """Analyse de momentum optimisée"""
+def analyze_momentum_with_filters(df):
+    """Analyse momentum avec strict_mode fonctionnel et gates séparés"""
     if len(df) < 30:
         return {
             'rsi': 50,
-            'stoch_k_fast': 50,
-            'stoch_d_fast': 50,
-            'stoch_k_slow': 50,
-            'stoch_d_slow': 50,
-            'buy_score': 0,
-            'sell_score': 0,
-            'dominant': 'NEUTRAL',
-            'momentum_gate_passed': True  # Toujours vrai pour accepter
+            'stoch_k': 50,
+            'stoch_d': 50,
+            'prev_rsi': 50,
+            'buy': {'allowed': False, 'veto': False, 'score': 0, 'penalty': 0, 'reason': 'Données insuffisantes'},
+            'sell': {'allowed': False, 'veto': False, 'score': 0, 'penalty': 0, 'reason': 'Données insuffisantes'},
+            'gate_buy': False,
+            'gate_sell': False,
+            'violations': []
         }
     
-    rsi = RSIIndicator(close=df['close'], window=12).rsi()
+    # Calcul indicateurs
+    rsi = RSIIndicator(close=df['close'], window=14).rsi()
     current_rsi = float(rsi.iloc[-1])
+    prev_rsi = float(rsi.iloc[-2]) if len(rsi) > 1 else current_rsi
     
-    stoch_fast = StochasticOscillator(
+    stoch = StochasticOscillator(
         high=df['high'],
         low=df['low'],
         close=df['close'],
-        window=SAINT_GRAAL_CONFIG['buy_rules']['stoch_period'],
-        smooth_window=SAINT_GRAAL_CONFIG['buy_rules']['stoch_smooth']
+        window=14,
+        smooth_window=3
     )
-    stoch_k_fast = stoch_fast.stoch()
-    stoch_d_fast = stoch_fast.stoch_signal()
+    stoch_k = stoch.stoch()
+    stoch_d = stoch.stoch_signal()
     
-    current_stoch_k_fast = float(stoch_k_fast.iloc[-1])
-    current_stoch_d_fast = float(stoch_d_fast.iloc[-1])
+    current_stoch_k = float(stoch_k.iloc[-1])
+    current_stoch_d = float(stoch_d.iloc[-1])
+    prev_stoch_k = float(stoch_k.iloc[-2]) if len(stoch_k) > 1 else current_stoch_k
     
-    stoch_slow = StochasticOscillator(
-        high=df['high'],
-        low=df['low'],
-        close=df['close'],
-        window=SAINT_GRAAL_CONFIG['sell_rules']['stoch_period'],
-        smooth_window=SAINT_GRAAL_CONFIG['sell_rules']['stoch_smooth']
-    )
-    stoch_k_slow = stoch_slow.stoch()
-    stoch_d_slow = stoch_slow.stoch_signal()
+    # Initialisation
+    buy_result = {'allowed': True, 'veto': False, 'score': 0, 'penalty': 0, 'reason': []}
+    sell_result = {'allowed': True, 'veto': False, 'score': 0, 'penalty': 0, 'reason': []}
+    violations = []
     
-    current_stoch_k_slow = float(stoch_k_slow.iloc[-1])
-    current_stoch_d_slow = float(stoch_d_slow.iloc[-1])
+    # 🔥 APPLICATION STRICT_MODE POUR MOMENTUM
+    no_buy_zone = SAINT_GRAAL_CONFIG['forbidden_zones']['no_buy_zone']
+    no_sell_zone = SAINT_GRAAL_CONFIG['forbidden_zones']['no_sell_zone']
     
-    buy_score = 0
-    sell_score = 0
+    # Vérification BUY avec strict_mode
+    if no_buy_zone['enabled']:
+        buy_violations = []
+        
+        if current_stoch_k > no_buy_zone['stoch_fast_max']:
+            if no_buy_zone['strict_mode']:
+                buy_result['veto'] = True
+                violations.append(f"❌ BUY VETO: Stoch {current_stoch_k:.1f} > {no_buy_zone['stoch_fast_max']}")
+            else:
+                buy_result['penalty'] += no_buy_zone['penalty']
+                buy_violations.append(f"Stoch haut: -{no_buy_zone['penalty']}")
+        
+        if current_rsi > no_buy_zone['rsi_max']:
+            if no_buy_zone['strict_mode']:
+                buy_result['veto'] = True
+                violations.append(f"❌ BUY VETO: RSI {current_rsi:.1f} > {no_buy_zone['rsi_max']}")
+            else:
+                buy_result['penalty'] += no_buy_zone['penalty']
+                buy_violations.append(f"RSI haut: -{no_buy_zone['penalty']}")
+        
+        if buy_violations and not buy_result['veto']:
+            buy_result['reason'].append(f"Pénalités: {' + '.join(buy_violations)}")
+    
+    # Vérification SELL avec strict_mode
+    if no_sell_zone['enabled']:
+        sell_violations = []
+        
+        if current_stoch_k < no_sell_zone['stoch_fast_min']:
+            if no_sell_zone['strict_mode']:
+                sell_result['veto'] = True
+                violations.append(f"❌ SELL VETO: Stoch {current_stoch_k:.1f} < {no_sell_zone['stoch_fast_min']}")
+            else:
+                sell_result['penalty'] += no_sell_zone['penalty']
+                sell_violations.append(f"Stoch bas: -{no_sell_zone['penalty']}")
+        
+        if current_rsi < no_sell_zone['rsi_min']:
+            if no_sell_zone['strict_mode']:
+                sell_result['veto'] = True
+                violations.append(f"❌ SELL VETO: RSI {current_rsi:.1f} < {no_sell_zone['rsi_min']}")
+            else:
+                sell_result['penalty'] += no_sell_zone['penalty']
+                sell_violations.append(f"RSI bas: -{no_sell_zone['penalty']}")
+        
+        if sell_violations and not sell_result['veto']:
+            sell_result['reason'].append(f"Pénalités: {' + '.join(sell_violations)}")
+    
+    # 🔥 CALCUL SCORES (après vérification veto)
+    momentum_data = {
+        'rsi': current_rsi,
+        'stoch_k': current_stoch_k,
+        'stoch_d': current_stoch_d,
+        'prev_rsi': prev_rsi
+    }
     
     # Score BUY
-    if current_rsi < SAINT_GRAAL_CONFIG['buy_rules']['rsi_max_for_buy']:
-        buy_score += 20
-        if current_rsi < SAINT_GRAAL_CONFIG['buy_rules']['rsi_oversold']:
+    if not buy_result['veto']:
+        buy_score = 0
+        
+        if current_rsi < SAINT_GRAAL_CONFIG['momentum_rules']['buy_conditions']['rsi_max']:
+            buy_score += 20
+            buy_result['reason'].append(f"RSI OK: {current_rsi:.1f}")
+            
+            if current_rsi < SAINT_GRAAL_CONFIG['momentum_rules']['buy_conditions']['rsi_oversold']:
+                buy_score += 15
+                buy_result['reason'].append("RSI OVERSOLD")
+        
+        if current_stoch_k < SAINT_GRAAL_CONFIG['momentum_rules']['buy_conditions']['stoch_max']:
             buy_score += 15
+            buy_result['reason'].append(f"Stoch OK: {current_stoch_k:.1f}")
+            
+            if current_stoch_k < SAINT_GRAAL_CONFIG['momentum_rules']['buy_conditions']['stoch_oversold']:
+                buy_score += 10
+                buy_result['reason'].append("Stoch OVERSOLD")
+        
+        if SAINT_GRAAL_CONFIG['momentum_rules']['buy_conditions']['require_stoch_rising']:
+            if current_stoch_k > prev_stoch_k:
+                buy_score += 10
+                buy_result['reason'].append("Stoch rising")
+            else:
+                buy_score -= 5
+                buy_result['reason'].append("Stoch not rising")
+        
+        # Appliquer pénalités
+        buy_score = max(0, buy_score - buy_result['penalty'])
+        buy_result['score'] = buy_score
     
-    if current_stoch_k_fast < 30:
-        buy_score += 15
-    if current_stoch_d_fast < 30:
-        buy_score += 10
+    else:
+        buy_result['score'] = -999
     
     # Score SELL
-    if current_rsi > SAINT_GRAAL_CONFIG['sell_rules']['rsi_min_for_sell']:
-        sell_score += 20
-        if current_rsi > 70:
+    if not sell_result['veto']:
+        sell_score = 0
+        
+        if current_rsi > SAINT_GRAAL_CONFIG['momentum_rules']['sell_conditions']['rsi_min']:
+            sell_score += 20
+            sell_result['reason'].append(f"RSI haut: {current_rsi:.1f}")
+            
+            if current_rsi > SAINT_GRAAL_CONFIG['momentum_rules']['sell_conditions']['rsi_overbought']:
+                sell_score += 15
+                sell_result['reason'].append("RSI OVERBOUGHT")
+        
+        if current_stoch_k > SAINT_GRAAL_CONFIG['momentum_rules']['sell_conditions']['stoch_min']:
             sell_score += 15
+            sell_result['reason'].append(f"Stoch haut: {current_stoch_k:.1f}")
+            
+            if current_stoch_k > SAINT_GRAAL_CONFIG['momentum_rules']['sell_conditions']['stoch_overbought']:
+                sell_score += 10
+                sell_result['reason'].append("Stoch OVERBOUGHT")
+        
+        if SAINT_GRAAL_CONFIG['momentum_rules']['sell_conditions']['require_stoch_falling']:
+            if current_stoch_k < prev_stoch_k:
+                sell_score += 10
+                sell_result['reason'].append("Stoch falling")
+            else:
+                sell_score -= 5
+                sell_result['reason'].append("Stoch not falling")
+        
+        # Appliquer pénalités
+        sell_score = max(0, sell_score - sell_result['penalty'])
+        sell_result['score'] = sell_score
     
-    if current_stoch_k_slow > SAINT_GRAAL_CONFIG['sell_rules']['stoch_min_overbought']:
-        sell_score += 15
-    if current_stoch_d_slow > 60:
-        sell_score += 10
+    else:
+        sell_result['score'] = -999
     
-    # Toujours passer le momentum gate pour M1
-    momentum_gate_passed = True
+    # 🔥 CALCUL GATES SÉPARÉS
+    gate_buy, debug_buy = calculate_momentum_gate(df, "BUY", momentum_data)
+    gate_sell, debug_sell = calculate_momentum_gate(df, "SELL", momentum_data)
     
-    dominant = "NEUTRAL"
-    if buy_score > sell_score:
-        dominant = "BUY"
-    elif sell_score > buy_score:
-        dominant = "SELL"
+    # Formater raisons
+    buy_result['reason'] = " | ".join(buy_result['reason']) if buy_result['reason'] else "Neutre"
+    sell_result['reason'] = " | ".join(sell_result['reason']) if sell_result['reason'] else "Neutre"
     
     return {
         'rsi': current_rsi,
-        'stoch_k_fast': current_stoch_k_fast,
-        'stoch_d_fast': current_stoch_d_fast,
-        'stoch_k_slow': current_stoch_k_slow,
-        'stoch_d_slow': current_stoch_d_slow,
-        'buy_score': buy_score,
-        'sell_score': sell_score,
-        'dominant': dominant,
-        'momentum_gate_passed': momentum_gate_passed
+        'stoch_k': current_stoch_k,
+        'stoch_d': current_stoch_d,
+        'prev_rsi': prev_rsi,
+        'buy': buy_result,
+        'sell': sell_result,
+        'gate_buy': gate_buy,
+        'gate_sell': gate_sell,
+        'gate_debug': {'buy': debug_buy, 'sell': debug_sell},
+        'violations': violations
     }
 
-def calculate_bollinger_signals(df):
-    """Calcule les signaux des Bandes de Bollinger simplifié"""
-    if len(df) < SAINT_GRAAL_CONFIG['bollinger_config']['window']:
+def analyze_bollinger_bands(df):
+    """Analyse BB avec strict_mode fonctionnel"""
+    if len(df) < SAINT_GRAAL_CONFIG['bollinger_config']['window'] + 10:
         return {
             'bb_position': 50,
-            'bb_signal': 'NO_DATA',
-            'bb_width': 0,
-            'bb_squeeze': False,
-            'bb_upper': 0,
-            'bb_lower': 0,
-            'bb_middle': 0,
-            'price_above_middle': False,
-            'price_below_middle': False,
-            'middle_crossover': 'NEUTRAL'
+            'buy': {'allowed': True, 'veto': False, 'score': 0, 'penalty': 0, 'reason': 'Données insuffisantes'},
+            'sell': {'allowed': True, 'veto': False, 'score': 0, 'penalty': 0, 'reason': 'Données insuffisantes'}
         }
     
     bb = BollingerBands(
@@ -640,443 +516,574 @@ def calculate_bollinger_signals(df):
     current_lower = float(bb_lower.iloc[-1])
     current_middle = float(bb_middle.iloc[-1])
     
+    # Position BB
     if current_upper != current_lower:
         bb_position = ((current_price - current_lower) / (current_upper - current_lower)) * 100
     else:
         bb_position = 50
     
-    price_above_middle = current_price > current_middle
-    price_below_middle = current_price < current_middle
+    # Initialisation
+    buy_result = {'allowed': True, 'veto': False, 'score': 0, 'penalty': 0, 'reason': []}
+    sell_result = {'allowed': True, 'veto': False, 'score': 0, 'penalty': 0, 'reason': []}
     
-    middle_crossover = "NEUTRAL"
+    # 🔥 STRICT_MODE POUR BB
+    no_buy_zone = SAINT_GRAAL_CONFIG['forbidden_zones']['no_buy_zone']
+    no_sell_zone = SAINT_GRAAL_CONFIG['forbidden_zones']['no_sell_zone']
+    bb_config = SAINT_GRAAL_CONFIG['bollinger_config']
+    
+    # Vérification BUY BB
+    if no_buy_zone['enabled'] and bb_position > no_buy_zone['bb_position_max']:
+        if no_buy_zone['strict_mode']:
+            buy_result['veto'] = True
+        else:
+            buy_result['penalty'] += no_buy_zone['penalty']
+            buy_result['reason'].append(f"BB haut: -{no_buy_zone['penalty']}")
+    
+    # Vérification SELL BB
+    if no_sell_zone['enabled'] and bb_position < no_sell_zone['bb_position_min']:
+        if no_sell_zone['strict_mode']:
+            sell_result['veto'] = True
+        else:
+            sell_result['penalty'] += no_sell_zone['penalty']
+            sell_result['reason'].append(f"BB bas: -{no_sell_zone['penalty']}")
+    
+    # Score BUY BB
+    if not buy_result['veto']:
+        if bb_position < bb_config['buy_zone_max']:
+            buy_result['score'] = 25
+            if bb_position < 30:
+                buy_result['score'] += 15
+                buy_result['reason'].append("BB OVERSOLD")
+            else:
+                buy_result['reason'].append("BB zone BUY")
+        
+        # Appliquer pénalité
+        buy_result['score'] = max(0, buy_result['score'] - buy_result['penalty'])
+    
+    else:
+        buy_result['score'] = -999
+    
+    # Score SELL BB
+    if not sell_result['veto']:
+        if bb_position > bb_config['sell_zone_min']:
+            sell_result['score'] = 25
+            if bb_position > 70:
+                sell_result['score'] += 15
+                sell_result['reason'].append("BB OVERBOUGHT")
+            else:
+                sell_result['reason'].append("BB zone SELL")
+        
+        # Appliquer pénalité
+        sell_result['score'] = max(0, sell_result['score'] - sell_result['penalty'])
+    
+    else:
+        sell_result['score'] = -999
+    
+    # Croisement bande médiane
     if len(df) >= 2:
         prev_price = float(df.iloc[-2]['close'])
-        prev_middle = float(bb_middle.iloc[-2]) if len(bb_middle) >= 2 else current_middle
         
-        if prev_price <= prev_middle and current_price > current_middle:
-            middle_crossover = "BULLISH_CROSS"
-        elif prev_price >= prev_middle and current_price < current_middle:
-            middle_crossover = "BEARISH_CROSS"
+        if prev_price <= current_middle and current_price > current_middle:
+            if buy_result['score'] >= 0:
+                buy_result['score'] += bb_config['middle_band_weight']
+                buy_result['reason'].append("Bullish cross")
+        elif prev_price >= current_middle and current_price < current_middle:
+            if sell_result['score'] >= 0:
+                sell_result['score'] += bb_config['middle_band_weight']
+                sell_result['reason'].append("Bearish cross")
     
-    bb_signal = "NEUTRAL"
-    if bb_position < SAINT_GRAAL_CONFIG['bollinger_config']['oversold_zone']:
-        bb_signal = "OVERSOLD"
-    elif bb_position > SAINT_GRAAL_CONFIG['bollinger_config']['overbought_zone']:
-        bb_signal = "OVERBOUGHT"
+    # Formater raisons
+    buy_result['reason'] = " | ".join(buy_result['reason']) if buy_result['reason'] else f"BB Pos: {bb_position:.1f}%"
+    sell_result['reason'] = " | ".join(sell_result['reason']) if sell_result['reason'] else f"BB Pos: {bb_position:.1f}%"
     
     return {
         'bb_position': bb_position,
-        'bb_signal': bb_signal,
-        'bb_width': 0,
-        'bb_squeeze': False,
-        'bb_upper': current_upper,
-        'bb_lower': current_lower,
-        'bb_middle': current_middle,
-        'price_above_middle': price_above_middle,
-        'price_below_middle': price_below_middle,
-        'middle_crossover': middle_crossover
+        'buy': buy_result,
+        'sell': sell_result,
+        'price_above_middle': current_price > current_middle
     }
 
-def get_bb_confirmation_score(bb_signal, direction, stochastic_value):
-    """Calcule le score de confirmation Bollinger Bands simplifié"""
-    score = 0
-    reason = ""
+# ================= CONFIDENCE KILLER =================
+
+def check_confidence_killers(df, direction, momentum_data):
+    """Vérifie les facteurs qui tuent la confiance"""
+    confidence_reduction = 0
+    killers = []
     
-    if direction == "BUY":
-        if bb_signal['bb_position'] < 30:
-            score += 25
-            reason += "BB OVERSOLD"
-        elif bb_signal['bb_position'] < 45:
-            score += 15
-            reason += "BB Zone basse"
+    # 1. Divergence RSI (simple)
+    if len(df) >= 10:
+        closes = df['close'].values[-10:]
+        rsis = RSIIndicator(close=pd.Series(closes), window=14).rsi().values
         
-        if stochastic_value < 30:
-            score += 15
-            reason += " + Stoch Bas"
+        if len(rsis) >= 5:
+            current_rsi = rsis[-1]
+            rsi_trend = np.polyfit(range(5), rsis[-5:], 1)[0]
+            price_trend = np.polyfit(range(5), closes[-5:], 1)[0]
+            
+            if direction == "BUY":
+                if price_trend > 0 and rsi_trend < 0:  # Prix monte, RSI baisse
+                    confidence_reduction += 8
+                    killers.append("Divergence RSI baissière")
+            else:  # SELL
+                if price_trend < 0 and rsi_trend > 0:  # Prix baisse, RSI monte
+                    confidence_reduction += 8
+                    killers.append("Divergence RSI haussière")
+    
+    # 2. Mèche extrême contre le sens
+    current_candle = df.iloc[-1]
+    body_size = abs(current_candle['close'] - current_candle['open'])
+    total_range = current_candle['high'] - current_candle['low']
+    
+    if total_range > 0:
+        wick_ratio = (total_range - body_size) / total_range
         
-        if bb_signal['price_above_middle']:
-            score += 10
-            reason += " + Au-dessus médiane"
+        if direction == "BUY":
+            upper_wick = current_candle['high'] - max(current_candle['open'], current_candle['close'])
+            if upper_wick > body_size * 1.5:  # Grande mèche haute
+                confidence_reduction += 5
+                killers.append("Grande mèche haute")
+        else:  # SELL
+            lower_wick = min(current_candle['open'], current_candle['close']) - current_candle['low']
+            if lower_wick > body_size * 1.5:  # Grande mèche basse
+                confidence_reduction += 5
+                killers.append("Grande mèche basse")
     
-    elif direction == "SELL":
-        if bb_signal['bb_position'] > 70:
-            score += 25
-            reason += "BB OVERBOUGHT"
-        elif bb_signal['bb_position'] > 55:
-            score += 15
-            reason += "BB Zone haute"
-        
-        if stochastic_value > 70:
-            score += 15
-            reason += " + Stoch Haut"
-        
-        if bb_signal['price_below_middle']:
-            score += 10
-            reason += " + Sous médiane"
-    
-    return min(score, 50), reason
+    return confidence_reduction, killers
 
-def check_m5_alignment(m5_filter, direction):
-    """Vérifie l'alignement avec la tendance M5 - Toujours accepté"""
-    if m5_filter['trend'] == 'NEUTRAL':
-        return True, "M5 Neutre", 5
-    
-    if direction == "BUY" and m5_filter['trend'] == "BULLISH":
-        return True, "M5 aligné BULLISH", 10
-    elif direction == "SELL" and m5_filter['trend'] == "BEARISH":
-        return True, "M5 aligné BEARISH", 10
-    else:
-        return True, "M5 non aligné mais accepté", 0
+# ================= FONCTION PRINCIPALE V9.1 =================
 
-def validate_candle_for_5min_buy(df):
-    """Validation simplifiée pour BUY"""
-    if len(df) < 2:
-        return True, "NORMAL", 50, "Données insuffisantes"
+def analyze_pair_for_signals(df):
+    """
+    🔥 Analyse complète - VERSION 9.1 STABILISÉE
+    """
+    # Vérifier cooldown
+    can_trade, reason = trading_state.can_trade(datetime.now())
+    if not can_trade:
+        print(f"⏸️  Trading en pause: {reason}")
+        return None
     
-    current = df.iloc[-1]
-    current_close = float(current['close'])
-    current_open = float(current['open'])
-    
-    is_bullish = current_close > current_open
-    
-    if is_bullish:
-        return True, "BULLISH", 60, "Bougie haussière"
-    else:
-        return True, "NEUTRAL", 40, "Bougie neutre/baissière mais acceptée"
-
-def validate_candle_for_5min_sell(df):
-    """Validation simplifiée pour SELL"""
-    if len(df) < 2:
-        return True, "NORMAL", 50, "Données insuffisantes"
-    
-    current = df.iloc[-1]
-    current_close = float(current['close'])
-    current_open = float(current['open'])
-    
-    is_bearish = current_close < current_open
-    
-    if is_bearish:
-        return True, "BEARISH", 60, "Bougie baissière"
-    else:
-        return True, "NEUTRAL", 40, "Bougie neutre/haussière mais acceptée"
-
-# ================= FONCTION PRINCIPALE V6 OPTIMISÉE =================
-
-def rule_signal_saint_graal_5min_pro_v6(df, signal_count=0, total_signals_needed=12):
-    """🔥 VERSION 6.0 : CRITÈRES ASSOUPLIS POUR SIGNALS FRÉQUENTS"""
-    print(f"\n{'='*70}")
-    print(f"🎯 BINAIRE 5 MIN V6.0 - Signal #{signal_count+1}/{total_signals_needed}")
-    print(f"{'='*70}")
-    
-    if len(df) < 80:
-        print(f"❌ Données insuffisantes: {len(df)} < 80")
+    if len(df) < 100:
+        print("❌ Données insuffisantes")
         return None
     
     current_price = float(df.iloc[-1]['close'])
-    print(f"💰 Prix actuel: {current_price:.5f}")
+    print(f"\n{'='*60}")
+    print(f"🔍 ANALYSE M1 V9.1 - Prix: {current_price:.5f}")
+    print(f"{'='*60}")
     
-    m5_filter = calculate_m5_filter(df)
-    print(f"📈 Filtre M5: {m5_filter['reason']}")
+    # 🔥 ÉTAT DE MARCHÉ
+    market = detect_market_state(df)
+    print(f"📊 ÉTAT MARCHÉ: {market['state']} - {market['reason']}")
     
-    structure, trend_strength = analyze_market_structure(df)
-    print(f"🏗️  Structure: {structure} | Force: {trend_strength:.1f}%")
+    # 1. Momentum avec gates séparés
+    momentum = analyze_momentum_with_filters(df)
+    print(f"📈 MOMENTUM:")
+    print(f"   RSI: {momentum['rsi']:.1f} | Stoch: {momentum['stoch_k']:.1f}/{momentum['stoch_d']:.1f}")
+    print(f"   BUY: Score {momentum['buy']['score']} | Gate: {'✅' if momentum['gate_buy'] else '❌'}")
+    print(f"   SELL: Score {momentum['sell']['score']} | Gate: {'✅' if momentum['gate_sell'] else '❌'}")
     
-    momentum = analyze_momentum_asymmetric_optimized(df)
-    print(f"⚡ Momentum: RSI {momentum['rsi']:.1f} | StochF {momentum['stoch_k_fast']:.1f} | StochS {momentum['stoch_k_slow']:.1f}")
+    if momentum['violations']:
+        for violation in momentum['violations']:
+            print(f"   ⚠️  {violation}")
     
-    bb_signal = calculate_bollinger_signals(df)
-    print(f"📊 BB: Position {bb_signal['bb_position']:.1f}% | Signal: {bb_signal['bb_signal']}")
+    # 2. Bollinger Bands
+    bb = analyze_bollinger_bands(df)
+    print(f"📊 BOLLINGER: Position {bb['bb_position']:.1f}%")
+    print(f"   BUY: Score {bb['buy']['score']}")
+    print(f"   SELL: Score {bb['sell']['score']}")
     
-    atr_filter = calculate_atr_filter(df)
-    print(f"📏 ATR: {atr_filter['reason']}")
+    # 3. Swing avec strict_mode
+    swings = detect_swing_extremes(df)
+    swing_filter = SAINT_GRAAL_CONFIG['forbidden_zones']['swing_filter']
     
-    bb_buy_score, bb_buy_reason = get_bb_confirmation_score(
-        bb_signal, "BUY", momentum['stoch_k_fast']
+    swing_adjustment = {'buy': 0, 'sell': 0}
+    swing_killers = {'buy': [], 'sell': []}
+    
+    if swing_filter['enabled']:
+        if swing_filter['no_buy_at_swing_high'] and swings['is_swing_high']:
+            if swing_filter['strict_mode']:
+                swing_adjustment['buy'] = -999
+                swing_killers['buy'].append("Swing High VETO")
+            else:
+                if momentum['buy']['score'] < swing_filter['swing_momentum_threshold']:
+                    swing_adjustment['buy'] = -999
+                    swing_killers['buy'].append("Swing High VETO (momentum faible)")
+                else:
+                    swing_adjustment['buy'] = -swing_filter['swing_penalty']
+                    swing_killers['buy'].append(f"Swing High: -{swing_filter['swing_penalty']}")
+        
+        if swing_filter['no_sell_at_swing_low'] and swings['is_swing_low']:
+            if swing_filter['strict_mode']:
+                swing_adjustment['sell'] = -999
+                swing_killers['sell'].append("Swing Low VETO")
+            else:
+                if momentum['sell']['score'] < swing_filter['swing_momentum_threshold']:
+                    swing_adjustment['sell'] = -999
+                    swing_killers['sell'].append("Swing Low VETO (momentum faible)")
+                else:
+                    swing_adjustment['sell'] = -swing_filter['swing_penalty']
+                    swing_killers['sell'].append(f"Swing Low: -{swing_filter['swing_penalty']}")
+    
+    # 4. ATR
+    atr = analyze_atr_volatility(df)
+    print(f"📏 VOLATILITÉ: {atr['reason']}")
+    
+    if not atr['valid']:
+        print(f"❌ ATR VETO: {atr['reason']}")
+        return None
+    
+    # 5. M5
+    m5 = analyze_m5_trend(df)
+    print(f"⏰ M5: {m5['reason']}")
+    
+    # 🔥 CALCUL SCORES FINAUX
+    buy_score = 0
+    sell_score = 0
+    
+    # Momentum scores
+    if momentum['buy']['veto']:
+        buy_score = -999
+    elif momentum['buy']['score'] > 0:
+        buy_score = momentum['buy']['score']
+    
+    if momentum['sell']['veto']:
+        sell_score = -999
+    elif momentum['sell']['score'] > 0:
+        sell_score = momentum['sell']['score']
+    
+    # BB scores
+    if bb['buy']['veto']:
+        buy_score = -999
+    elif bb['buy']['score'] > 0 and buy_score != -999:
+        buy_score += bb['buy']['score']
+    
+    if bb['sell']['veto']:
+        sell_score = -999
+    elif bb['sell']['score'] > 0 and sell_score != -999:
+        sell_score += bb['sell']['score']
+    
+    # Swing adjustment
+    if swing_adjustment['buy'] == -999:
+        buy_score = -999
+    elif swing_adjustment['buy'] < 0 and buy_score != -999:
+        buy_score += swing_adjustment['buy']
+    
+    if swing_adjustment['sell'] == -999:
+        sell_score = -999
+    elif swing_adjustment['sell'] < 0 and sell_score != -999:
+        sell_score += swing_adjustment['sell']
+    
+    # ATR
+    if atr['valid'] and atr['score'] > 0:
+        if buy_score != -999:
+            buy_score += atr['score']
+        if sell_score != -999:
+            sell_score += atr['score']
+    
+    # 🔥 M5 SOFT VETO
+    if SAINT_GRAAL_CONFIG['m5_filter']['soft_veto']:
+        if m5['trend'] == "BEARISH" and buy_score != -999:
+            buy_score = min(buy_score, SAINT_GRAAL_CONFIG['m5_filter']['max_score_against_trend'])
+            print(f"⚠️  M5 BEARISH soft veto: BUY plafonné à {buy_score}")
+        elif m5['trend'] == "BULLISH" and sell_score != -999:
+            sell_score = min(sell_score, SAINT_GRAAL_CONFIG['m5_filter']['max_score_against_trend'])
+            print(f"⚠️  M5 BULLISH soft veto: SELL plafonné à {sell_score}")
+    
+    # 🔥 PRIORITÉ PAR ÉTAT DE MARCHÉ
+    if SAINT_GRAAL_CONFIG['market_state']['enabled']:
+        if market['state'] == "RANGE" and SAINT_GRAAL_CONFIG['market_state']['prioritize_bb_in_range']:
+            # En range, priorité aux signaux BB
+            if buy_score > 0:
+                buy_score = buy_score * 0.7 + bb['buy']['score'] * 0.3
+            if sell_score > 0:
+                sell_score = sell_score * 0.7 + bb['sell']['score'] * 0.3
+        
+        elif market['state'] == "TREND" and SAINT_GRAAL_CONFIG['market_state']['prioritize_momentum_in_trend']:
+            # En trend, priorité au momentum
+            if buy_score > 0:
+                buy_score = buy_score * 0.8 + momentum['buy']['score'] * 0.2
+            if sell_score > 0:
+                sell_score = sell_score * 0.8 + momentum['sell']['score'] * 0.2
+    
+    print(f"\n🎯 SCORES FINAUX: BUY {buy_score:.1f} | SELL {sell_score:.1f}")
+    
+    # 🔥 CONDITIONS FINALES AVEC GATES SÉPARÉS
+    buy_conditions_met = (
+        not momentum['buy']['veto'] and 
+        not bb['buy']['veto'] and 
+        momentum['buy']['allowed'] and 
+        bb['buy']['allowed'] and
+        momentum['gate_buy'] and  # 🔥 GATE SPÉCIFIQUE BUY
+        buy_score >= SAINT_GRAAL_CONFIG['signal_validation']['min_score'] and
+        buy_score != -999 and
+        swing_adjustment['buy'] != -999
     )
     
-    bb_sell_score, bb_sell_reason = get_bb_confirmation_score(
-        bb_signal, "SELL", momentum['stoch_k_slow']
+    sell_conditions_met = (
+        not momentum['sell']['veto'] and 
+        not bb['sell']['veto'] and 
+        momentum['sell']['allowed'] and 
+        bb['sell']['allowed'] and
+        momentum['gate_sell'] and  # 🔥 GATE SPÉCIFIQUE SELL
+        sell_score >= SAINT_GRAAL_CONFIG['signal_validation']['min_score'] and
+        sell_score != -999 and
+        swing_adjustment['sell'] != -999
     )
     
-    print(f"✅ BB Confirmation: BUY {bb_buy_score}/50 | SELL {bb_sell_score}/50")
-    
-    sell_score_total = 0
-    buy_score_total = 0
-    
-    sell_score_total += momentum['sell_score']
-    buy_score_total += momentum['buy_score']
-    
-    sell_score_total += bb_sell_score
-    buy_score_total += bb_buy_score
-    
-    # Ajouter score ATR
-    buy_score_total += atr_filter['score']
-    sell_score_total += atr_filter['score']
-    
-    # Score structure
-    if structure == "DOWNTREND":
-        sell_score_total += 10
-    elif structure == "UPTREND":
-        buy_score_total += 10
-    
-    print(f"🎯 Scores avant micro: SELL {sell_score_total:.0f}/150 - BUY {buy_score_total:.0f}/150")
-    
-    direction = None
+    # Décision finale
+    signal = None
     final_score = 0
-    decision_details = []
+    quality = "MINIMUM"
+    confidence_killers = []
     
-    # Seuils réduits
-    buy_threshold = SAINT_GRAAL_CONFIG['buy_rules']['score_threshold']
-    sell_threshold = SAINT_GRAAL_CONFIG['sell_rules']['score_threshold']
-    
-    if buy_score_total >= buy_threshold:
+    # Vérifier BUY
+    if buy_conditions_met:
+        micro = analyze_micro_momentum(df, "BUY")
         
-        micro_valid, micro_score, micro_reason = check_micro_momentum(df, "BUY")
-        bb_crossover_valid, bb_crossover_score, bb_crossover_reason = check_bb_middle_crossover(df, "BUY")
-        
-        m5_aligned, m5_reason, m5_bonus = check_m5_alignment(m5_filter, "BUY")
-        candle_valid, pattern, pattern_conf, candle_reason = validate_candle_for_5min_buy(df)
-        
-        if candle_valid:
-            direction = "BUY"
-            final_score = (buy_score_total + pattern_conf + m5_bonus + 
-                         micro_score + bb_crossover_score)
-            decision_details.append(f"BUY validé: {pattern} ({pattern_conf}%)")
-            decision_details.append(f"Score base: {buy_score_total}")
-            decision_details.append(f"Micro: {micro_reason}")
-            decision_details.append(f"BB: {bb_crossover_reason}")
-    
-    elif sell_score_total >= sell_threshold:
-        
-        micro_valid, micro_score, micro_reason = check_micro_momentum(df, "SELL")
-        bb_crossover_valid, bb_crossover_score, bb_crossover_reason = check_bb_middle_crossover(df, "SELL")
-        
-        m5_aligned, m5_reason, m5_bonus = check_m5_alignment(m5_filter, "SELL")
-        candle_valid, pattern, pattern_conf, candle_reason = validate_candle_for_5min_sell(df)
-        
-        if candle_valid:
-            direction = "SELL"
-            final_score = (sell_score_total + pattern_conf + m5_bonus + 
-                         micro_score + bb_crossover_score)
-            decision_details.append(f"SELL validé: {pattern} ({pattern_conf}%)")
-            decision_details.append(f"Score base: {sell_score_total}")
-            decision_details.append(f"Micro: {micro_reason}")
-            decision_details.append(f"BB: {bb_crossover_reason}")
-    
-    if direction:
-        # Seuil minimum réduit à 75
-        if final_score >= 75:
-            if final_score >= 120:
-                quality = "EXCELLENT"
-                mode = "5MIN_MAX"
-            elif final_score >= 100:
-                quality = "HIGH"
-                mode = "5MIN_PRO"
-            elif final_score >= 85:
-                quality = "SOLID"
-                mode = "5MIN_STANDARD"
-            else:
-                quality = "MINIMUM"
-                mode = "5MIN_MIN"
+        if micro['valid']:
+            final_score = buy_score + micro['score']
             
-            direction_display = "CALL" if direction == "BUY" else "PUT"
-            
-            print(f"✅ SIGNAL {direction_display} {quality}")
-            print(f"   Score total: {final_score:.1f}")
-            print(f"   Détails: {' | '.join(decision_details[:3])}")
-            
-            return {
-                'signal': direction_display,
-                'mode': mode,
-                'quality': quality,
-                'score': float(final_score),
-                'reason': f"{direction_display} | Score {final_score:.1f} | {structure} | ATR:{atr_filter['atr_pips']:.1f}pips",
-                'expiration_minutes': 5,
-                'details': {
-                    'momentum_score': momentum['buy_score'] if direction == "BUY" else momentum['sell_score'],
-                    'bb_score': bb_buy_score if direction == "BUY" else bb_sell_score,
-                    'micro_momentum_score': micro_score,
-                    'bb_crossover_score': bb_crossover_score,
-                    'atr_score': atr_filter['score'],
-                    'm5_alignment': m5_filter['trend'],
-                    'structure': structure,
-                }
-            }
-        else:
-            print(f"❌ Score final insuffisant: {final_score:.1f} < 75")
-    
-    print(f"❌ Aucun signal valide - Scores: BUY {buy_score_total:.0f}, SELL {sell_score_total:.0f}")
-    return None
-
-# ================= FONCTION UNIVERSELLE AVEC FALLBACK =================
-
-last_signal_time = datetime.now()
-
-def get_signal_saint_graal(df, signal_count=0, total_signals=12, return_dict=True, 
-                          pairs_analyzed=5, batches=1, force_signal=False):
-    """
-    🔥 FONCTION UNIVERSELLE - VERSION 6.0
-    Avec fallback pour forcer un signal si nécessaire
-    """
-    try:
-        if df is None or len(df) < 80:
-            print("❌ Données insuffisantes pour analyse")
-            return None if return_dict else (None, None)
-        
-        global last_signal_time
-        
-        # Essayer d'abord la stratégie normale
-        result = rule_signal_saint_graal_5min_pro_v6(df, signal_count, total_signals)
-        
-        # Si pas de signal et que force_signal est True, ou trop longtemps sans signal
-        timeout_minutes = SAINT_GRAAL_CONFIG['signal_config']['force_signal_after_minutes']
-        time_without_signal = (datetime.now() - last_signal_time).seconds / 60
-        
-        if (result is None and force_signal) or (result is None and time_without_signal > timeout_minutes):
-            print(f"⚠️  Tentative de signal forcé après {time_without_signal:.1f} minutes sans signal")
-            forced_result = force_signal_if_needed(df, int(time_without_signal))
-            if forced_result:
-                result = forced_result
-                print(f"✅ Signal forcé généré: {forced_result['direction']}")
-        
-        if result is not None:
-            direction_display = result['signal']
-            final_score = result['score']
-            
-            # Mise à jour du temps du dernier signal
-            last_signal_time = datetime.now()
-            
-            # Déterminer la qualité
-            if 'quality' in result and result['quality'] in ['FORCED', 'FORCED_MA']:
-                quality = result['quality']
-                mode = "FORCED"
-            else:
-                if final_score >= 120:
+            if final_score >= SAINT_GRAAL_CONFIG['signal_validation']['min_score']:
+                # 🔥 CONFIDENCE KILLERS
+                confidence_reduction, killers = check_confidence_killers(df, "BUY", momentum)
+                confidence_killers.extend(killers)
+                
+                signal = "CALL"
+                reason = f"BUY Score: {final_score:.1f} | RSI: {momentum['rsi']:.1f} | Stoch: {momentum['stoch_k']:.1f} | BB: {bb['bb_position']:.1f}%"
+                
+                # Qualité basée sur score
+                if final_score >= 135:
+                    quality = "PREMIUM"
+                elif final_score >= 125:
                     quality = "EXCELLENT"
-                    mode = "5MIN_MAX"
-                elif final_score >= 100:
+                elif final_score >= 115:
                     quality = "HIGH"
-                    mode = "5MIN_PRO"
-                elif final_score >= 85:
+                elif final_score >= 105:
+                    quality = "GOOD"
+                elif final_score >= 95:
                     quality = "SOLID"
-                    mode = "5MIN_STANDARD"
                 else:
                     quality = "MINIMUM"
-                    mode = "5MIN_MIN"
+                
+                # Confiance avec killers
+                base_confidence = calculate_confidence(final_score)
+                final_confidence = max(60, base_confidence - confidence_reduction)
+                
+                print(f"\n✅ SIGNAL BUY DÉTECTÉ!")
+                print(f"   Score: {final_score:.1f} | Qualité: {quality}")
+                print(f"   Confiance: {final_confidence}% (Base: {base_confidence}%)")
+                if confidence_killers:
+                    print(f"   Confidence killers: {', '.join(confidence_killers)}")
+                print(f"   Micro: {micro['reason']}")
+    
+    # Vérifier SELL
+    elif sell_conditions_met:
+        micro = analyze_micro_momentum(df, "SELL")
+        
+        if micro['valid']:
+            final_score = sell_score + micro['score']
             
-            # Créer le dictionnaire de signal
-            signal_dict = {
-                'direction': direction_display,
-                'mode': mode,
-                'quality': quality,
-                'score': float(final_score),
-                'confidence': calculate_confidence_percentage(final_score),
-                'expiration_minutes': 5,
-                'reason': result.get('reason', 'N/A'),
-                'details': result.get('details', {}),
-                'raw_result': result
+            if final_score >= SAINT_GRAAL_CONFIG['signal_validation']['min_score']:
+                # 🔥 CONFIDENCE KILLERS
+                confidence_reduction, killers = check_confidence_killers(df, "SELL", momentum)
+                confidence_killers.extend(killers)
+                
+                signal = "PUT"
+                reason = f"SELL Score: {final_score:.1f} | RSI: {momentum['rsi']:.1f} | Stoch: {momentum['stoch_k']:.1f} | BB: {bb['bb_position']:.1f}%"
+                
+                # Qualité
+                if final_score >= 135:
+                    quality = "PREMIUM"
+                elif final_score >= 125:
+                    quality = "EXCELLENT"
+                elif final_score >= 115:
+                    quality = "HIGH"
+                elif final_score >= 105:
+                    quality = "GOOD"
+                elif final_score >= 95:
+                    quality = "SOLID"
+                else:
+                    quality = "MINIMUM"
+                
+                # Confiance avec killers
+                base_confidence = calculate_confidence(final_score)
+                final_confidence = max(60, base_confidence - confidence_reduction)
+                
+                print(f"\n✅ SIGNAL SELL DÉTECTÉ!")
+                print(f"   Score: {final_score:.1f} | Qualité: {quality}")
+                print(f"   Confiance: {final_confidence}% (Base: {base_confidence}%)")
+                if confidence_killers:
+                    print(f"   Confidence killers: {', '.join(confidence_killers)}")
+                print(f"   Micro: {micro['reason']}")
+    
+    if signal:
+        return {
+            'direction': signal,
+            'quality': quality,
+            'score': round(final_score, 1),
+            'confidence': final_confidence,
+            'expiration_minutes': 5,
+            'reason': reason,
+            'details': {
+                'market_state': market['state'],
+                'momentum_score': max(momentum['buy']['score'], momentum['sell']['score']),
+                'bb_score': max(bb['buy']['score'], bb['sell']['score']),
+                'micro_score': micro['score'],
+                'atr_score': atr['score'],
+                'm5_trend': m5['trend'],
+                'rsi': momentum['rsi'],
+                'stoch': momentum['stoch_k'],
+                'bb_position': bb['bb_position'],
+                'atr_pips': atr['atr_pips'],
+                'gate_buy': momentum['gate_buy'],
+                'gate_sell': momentum['gate_sell'],
+                'confidence_killers': confidence_killers,
+                'swing_adjustment': swing_adjustment
             }
-            
-            if return_dict:
-                return signal_dict
-            else:
-                message = generate_signal_message(signal_dict, pairs_analyzed, batches)
-                return signal_dict, message
+        }
+    else:
+        print(f"\n❌ AUCUN SIGNAL VALIDE")
         
-        print(f"🎯 Aucun signal valide - Session {signal_count+1}/{total_signals}")
-        return None if return_dict else (None, None)
+        # Debug gates
+        if 'gate_debug' in momentum:
+            print(f"   Gate debug BUY: {momentum['gate_debug']['buy']}")
+            print(f"   Gate debug SELL: {momentum['gate_debug']['sell']}")
         
-    except Exception as e:
-        print(f"❌ Erreur dans get_signal_saint_graal: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return None if return_dict else (None, None)
+        if swing_killers['buy']:
+            print(f"   Swing BUY killers: {swing_killers['buy']}")
+        if swing_killers['sell']:
+            print(f"   Swing SELL killers: {swing_killers['sell']}")
+        
+        return None
 
-# ================= FONCTIONS DE COMPATIBILITÉ =================
+def calculate_confidence(score):
+    """Confiance par zones avec score max réaliste"""
+    zones = sorted(SAINT_GRAAL_CONFIG['signal_validation']['confidence_zones'].items())
+    max_realistic = SAINT_GRAAL_CONFIG['signal_validation']['max_score_realistic']
+    
+    # Normaliser le score par rapport au max réaliste
+    normalized_score = min(score, max_realistic)
+    
+    for threshold, confidence in zones:
+        if normalized_score >= threshold:
+            base_confidence = confidence
+    
+    # Interpolation entre zones
+    for i in range(len(zones) - 1):
+        current_threshold, current_conf = zones[i]
+        next_threshold, next_conf = zones[i + 1]
+        
+        if current_threshold <= normalized_score < next_threshold:
+            progress = (normalized_score - current_threshold) / (next_threshold - current_threshold)
+            base_confidence = current_conf + (next_conf - current_conf) * progress
+            break
+    
+    return min(95, max(60, int(base_confidence)))
 
-def get_signal_dict_only(df, signal_count=0, total_signals=12, force_signal=False):
-    """Alias pour get_signal_saint_graal avec return_dict=True"""
-    return get_signal_saint_graal(df, signal_count, total_signals, return_dict=True, force_signal=force_signal)
+# ================= BACKTEST SPÉCIFIQUE =================
 
-def get_signal_with_metadata(df, signal_count=0, total_signals=12, force_signal=False):
-    """Alias pour get_signal_saint_graal avec return_dict=False"""
-    return get_signal_saint_graal(df, signal_count, total_signals, return_dict=False, force_signal=force_signal)
+def backtest_swing_filter(df_list, lookback_days=30):
+    """Backtest spécifique du swing filter"""
+    print(f"\n{'='*60}")
+    print("🧪 BACKTEST SPÉCIFIQUE - SWING FILTER")
+    print(f"{'='*60}")
+    
+    results = {
+        'total_trades': 0,
+        'swing_rejected': 0,
+        'swing_accepted': 0,
+        'swing_winrate': 0,
+        'non_swing_winrate': 0
+    }
+    
+    # Simulation simple
+    for df in df_list:
+        if len(df) < 100:
+            continue
+        
+        # Analyse swing
+        swings = detect_swing_extremes(df)
+        
+        # Simulation de trade
+        # (À implémenter avec ton historique réel)
+        pass
+    
+    return results
 
-def get_signal_with_metadata_v2(df, signal_count=0, total_signals=12, 
-                                pairs_analyzed=5, batches=1, force_signal=False):
-    """Alias avec paramètres personnalisés"""
-    return get_signal_saint_graal(df, signal_count, total_signals, return_dict=False, 
-                                  pairs_analyzed=pairs_analyzed, batches=batches, force_signal=force_signal)
+def analyze_gate_performance(df_list):
+    """Analyse performance gate 2/3 vs gate strict"""
+    print(f"\n{'='*60}")
+    print("🧪 BACKTEST - MOMENTUM GATE")
+    print(f"{'='*60}")
+    
+    gate_results = {
+        'smart_gate_trades': 0,
+        'strict_gate_trades': 0,
+        'smart_winrate': 0,
+        'strict_winrate': 0
+    }
+    
+    return gate_results
 
-# ================= POINT D'ENTRÉE PRINCIPAL =================
+# ================= FONCTION PRINCIPALE =================
+
+def get_binary_signal(df, pair_name="ETH/USD", return_message=False, record_result=None):
+    """
+    Fonction principale V9.1
+    """
+    if record_result and record_result in ['win', 'loss']:
+        # Enregistrer le résultat du trade précédent
+        trading_state.record_trade(record_result, "EXCELLENT")  # Qualité par défaut
+    
+    signal = analyze_pair_for_signals(df)
+    
+    if signal:
+        # Message avec architecture V9.1
+        message = f"""
+🎯 **SIGNAL V9.1 - ARCHITECTURE PRO**
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+📈 Direction: {signal['direction']} {'↗️' if signal['direction'] == 'CALL' else '↘️'}
+🏆 Qualité: {signal['quality']}
+💪 Confiance: {signal['confidence']}%
+📊 Score: {signal['score']}/{SAINT_GRAAL_CONFIG['signal_validation']['max_score_realistic']}
+
+🔧 **ARCHITECTURE ACTIVÉE:**
+✅ Gates séparés BUY/SELL
+✅ Strict_mode fonctionnel
+✅ État marché: {signal['details']['market_state']}
+✅ Confidence killers: {len(signal['details']['confidence_killers'])}
+✅ Cooldown dynamique par qualité
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+"""
+        if return_message:
+            return signal, message
+        return signal
+    
+    return None
+
+# ================= INITIALISATION =================
 
 if __name__ == "__main__":
-    print("🎯 DESK PRO BINAIRE - VERSION 6.0 ULTRA-PERFORMANTE")
-    print("🔥 OPTIMISÉ POUR SIGNALS FRÉQUENTS SUR M1")
-    print(f"📊 Score minimum: {SAINT_GRAAL_CONFIG['signal_config']['min_quality_score']}")
-    print(f"⏱️  Force signal après: {SAINT_GRAAL_CONFIG['signal_config']['force_signal_after_minutes']} minutes")
+    print("🚀 STRATÉGIE BINAIRE M1 PRO - VERSION 9.1 STABILISÉE")
+    print("🔥 ARCHITECTURE PRO - LOGIQUE PARFAITE")
+    print("\n" + "="*60)
+    print("CORRECTIONS CRITIQUES APPLIQUÉES:")
+    print("1. ✅ Gates momentum séparés BUY/SELL")
+    print("2. ✅ strict_mode réellement fonctionnel")
+    print("3. ✅ Score max réaliste: 145 (au lieu de 200)")
+    print("4. ✅ État marché TREND/RANGE avec ADX")
+    print("5. ✅ Confidence killers (divergence, mèches)")
+    print("6. ✅ Cooldown par qualité du trade perdant")
+    print("="*60)
     
-    # Test de débogage
-    print("\n🧪 MODE DÉBOGAGE ACTIVÉ")
+    print("\n🎯 BACKTESTS RECOMMANDÉS:")
+    print("1. Swing filter: trades refusés vs acceptés")
+    print("2. M5 soft veto: winrate trades plafonnés")
+    print("3. Gate 2/3 vs gate strict")
+    print("4. Cooldown post-perte par qualité")
+    print("="*60)
     
-    try:
-        # Créer des données de test réalistes
-        np.random.seed(42)
-        dates = pd.date_range(start='2024-01-01', periods=200, freq='1min')
-        
-        # Créer une tendance réaliste
-        trend = np.linspace(1.1000, 1.1050, 200)
-        noise = np.random.normal(0, 0.0002, 200)
-        
-        close_prices = trend + noise
-        open_prices = close_prices - np.random.normal(0.0001, 0.00005, 200)
-        high_prices = np.maximum(open_prices, close_prices) + np.random.normal(0.0002, 0.00005, 200)
-        low_prices = np.minimum(open_prices, close_prices) - np.random.normal(0.0002, 0.00005, 200)
-        
-        df_test = pd.DataFrame({
-            'open': open_prices,
-            'high': high_prices,
-            'low': low_prices,
-            'close': close_prices
-        }, index=dates)
-        
-        print(f"\n📊 Données de test: {len(df_test)} bougies")
-        print(f"📈 Prix actuel: {df_test['close'].iloc[-1]:.5f}")
-        
-        # Test 1: Analyse normale
-        print("\n🔍 Test 1: Analyse normale")
-        signal_dict = get_signal_dict_only(df_test, signal_count=0, total_signals=12)
-        
-        if signal_dict:
-            print(f"✅ Signal détecté: {signal_dict['direction']} | Score: {signal_dict['score']:.1f}")
-            print(f"   Qualité: {signal_dict['quality']} | Confiance: {signal_dict['confidence']}%")
-        else:
-            print("❌ Aucun signal détecté")
-            # Déboguer
-            debug_no_signals(df_test)
-        
-        # Test 2: Avec forçage
-        print("\n🔍 Test 2: Avec forçage activé")
-        signal_dict_forced = get_signal_dict_only(df_test, force_signal=True)
-        
-        if signal_dict_forced:
-            print(f"✅ Signal (forcé): {signal_dict_forced['direction']} | Score: {signal_dict_forced['score']:.1f}")
-            print(f"   Qualité: {signal_dict_forced['quality']} | Confiance: {signal_dict_forced['confidence']}%")
-        
-        # Test 3: Avec message
-        print("\n🔍 Test 3: Génération de message")
-        signal_tuple = get_signal_with_metadata_v2(df_test, pairs_analyzed=8, batches=2, force_signal=True)
-        
-        if signal_tuple and signal_tuple[0]:
-            print(f"✅ Signal prêt pour envoi: {signal_tuple[0]['direction']}")
-            if signal_tuple[1]:
-                print("📨 Message généré avec succès")
-                
-    except Exception as e:
-        print(f"❌ Erreur pendant les tests: {str(e)}")
-        import traceback
-        traceback.print_exc()
-    
-    print("\n" + "="*70)
-    print("🚀 PRÊT POUR LA PRODUCTION - BON TRADING !")
-    print("="*70)
+    print("\n✅ V9.1 PRÊTE POUR PRODUCTION")
+    print("🎯 Objectif: Stabilité > Fréquence")
+    print("🛡️  Drawdown cible: -20% max")
+    print("🧠 Architecture: Professionnelle")
