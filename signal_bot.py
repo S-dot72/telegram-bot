@@ -1,9 +1,10 @@
 """
 signal_bot.py - Bot de trading M1 - Version Saint Graal 4.5
 Analyse multi-marchés par rotation itérative avec bouton persistant
+Rotation Crypto optimisée pour week-end (BTC, ETH, DOGE, SOL, LTC)
 """
 
-import os, json, asyncio, random, traceback, time, html
+import os, json, asyncio, random, traceback, time, html, hashlib
 import logging
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -35,6 +36,15 @@ SIGNALS_PER_SESSION = 8
 CONFIDENCE_THRESHOLD = 0.65
 BUTTON_TIMEOUT_MINUTES = 5  # ⏱️ Timeout pour régénération automatique du bouton
 
+# ================= PAIRES CRYPTO POUR WEEK-END =================
+CRYPTO_PAIRS = [
+    'BTC/USD',    # Bitcoin
+    'ETH/USD',    # Ethereum
+    'DOGE/USD',   # Dogecoin
+    'SOL/USD',    # Solana
+    'LTC/USD',    # Litecoin
+]
+
 # ================= GESTION DES ÉTATS =================
 class SessionManager:
     """Gestionnaire centralisé des sessions utilisateur"""
@@ -57,7 +67,8 @@ class SessionManager:
             'active_buttons': [],
             'last_signal_time': None,
             'next_signal_number': 1,
-            'status': 'active'
+            'status': 'active',
+            'weekend_mode': False
         }
         self.active_sessions[user_id] = session
         return session
@@ -114,12 +125,13 @@ class SessionManager:
 # ================= CONFIGURATION ROTATION =================
 # Utilise directement PAIRS de config.py
 ROTATION_PAIRS = PAIRS if 'PAIRS' in globals() else [
-    'EUR/USD', 'GBP/USD', 'USD/JPY', 'AUD/USD',
+    'EUR/USD', 'GBP/USD', 'USD/JPY', 'AUD/USD', 'BTC/USD', 'ETH/USD',
     'USD/CAD', 'EUR/RUB', 'USD/CLP', 'AUD/CAD', 'AUD/NZD', 'CAD/CHF',
     'EUR/CHF', 'EUR/GBP', 'USD/THB', 'USD/COP', 'USD/EGP', 'AED/CNY', 'QAR/CNY'
 ]
 
 print(f"📊 Chargement de {len(ROTATION_PAIRS)} paires")
+print(f"🎯 Crypto week-end: {len(CRYPTO_PAIRS)} paires")
 
 ROTATION_CONFIG = {
     'pairs_per_batch': 4,
@@ -236,7 +248,7 @@ class OTCDataProvider:
     def get_status(self):
         return {
             'is_weekend': self.is_weekend(),
-            'available_pairs': ['BTC/USD', 'ETH/USD', 'TRX/USD', 'LTC/USD'],
+            'available_pairs': CRYPTO_PAIRS,
             'active_apis': 2
         }
 
@@ -295,28 +307,19 @@ def add_error_log(message):
         last_error_logs.pop(0)
 
 def get_current_pair(pair):
-    """Retourne la paire à utiliser (Forex ou Crypto) en fonction du jour"""
+    """
+    Retourne la paire à utiliser
+    Week-end: rotation exclusive sur paires Crypto
+    Semaine: paire normale
+    """
     if otc_provider.is_weekend():
-        forex_to_crypto = {
-            'EUR/USD': 'BTC/USD',
-            'GBP/USD': 'ETH/USD',
-            'USD/JPY': 'TRX/USD',
-            'AUD/USD': 'LTC/USD',
-            'USD/CAD': 'BTC/USD',
-            'EUR/RUB': 'ETH/USD',
-            'USD/CLP': 'TRX/USD',
-            'AUD/CAD': 'LTC/USD',
-            'AUD/NZD': 'BTC/USD',
-            'CAD/CHF': 'ETH/USD',
-            'EUR/CHF': 'TRX/USD',
-            'EUR/GBP': 'LTC/USD',
-            'USD/THB': 'BTC/USD',
-            'USD/COP': 'ETH/USD',
-            'USD/EGP': 'TRX/USD',
-            'AED/CNY': 'LTC/USD',
-            'QAR/CNY': 'BTC/USD'
-        }
-        return forex_to_crypto.get(pair, 'BTC/USD')
+        # Utiliser un hash de la paire pour une distribution équitable
+        pair_hash = int(hashlib.md5(pair.encode()).hexdigest(), 16)
+        crypto_index = pair_hash % len(CRYPTO_PAIRS)
+        
+        selected_pair = CRYPTO_PAIRS[crypto_index]
+        print(f"[WEEKEND] 🔄 {pair} → {selected_pair}")
+        return selected_pair
     return pair
 
 def is_forex_open():
@@ -480,9 +483,17 @@ def persist_signal(user_id, payload):
 async def analyze_multiple_markets_iterative(user_id, session_count, signal_id=None):
     """
     Analyse itérative de plusieurs marchés
+    Rotation Crypto optimisée pour week-end
     """
     print(f"\n[ROTATION] 🔄 Analyse itérative pour signal #{session_count}")
-    print(f"[ROTATION] 📊 Total paires: {len(ROTATION_PAIRS)}")
+    
+    # Déterminer mode week-end
+    is_weekend = otc_provider.is_weekend()
+    if is_weekend:
+        print(f"[ROTATION] 🌙 WEEK-END MODE: Rotation exclusive Crypto")
+        print(f"[ROTATION] 🎯 Paires Crypto: {', '.join(CRYPTO_PAIRS)}")
+    else:
+        print(f"[ROTATION] 📊 Total paires Forex: {len(ROTATION_PAIRS)}")
     
     shuffled_pairs = ROTATION_PAIRS.copy()
     random.shuffle(shuffled_pairs)
@@ -514,15 +525,21 @@ async def analyze_multiple_markets_iterative(user_id, session_count, signal_id=N
                     print(f"[ROTATION] ⏸️ Limite API: {reason}")
                     break
                 
-                print(f"[ROTATION] 📊 Analyse {pair} ({total_analyzed}ème)")
+                # Obtenir la paire actuelle (Crypto le week-end)
+                actual_pair = get_current_pair(pair)
+                
+                if is_weekend:
+                    print(f"[ROTATION] 🌙 {pair} → {actual_pair} ({total_analyzed}ème Crypto)")
+                else:
+                    print(f"[ROTATION] 📊 Analyse {pair} ({total_analyzed}ème)")
                 
                 df = get_cached_ohlc(pair, TIMEFRAME_M1, outputsize=400, signal_id=signal_id)
                 
                 if df is None or len(df) < ROTATION_CONFIG['min_data_points']:
-                    print(f"[ROTATION] ❌ {pair}: données insuffisantes")
+                    print(f"[ROTATION] ❌ {actual_pair}: données insuffisantes")
                     continue
                 
-                # 🔥 UTILISATION EXCLUSIVE DE get_signal_with_metadata - PAS DE FALLBACK
+                # 🔥 UTILISATION EXCLUSIVE DE get_signal_with_metadata
                 signal_data = get_signal_with_metadata(
                     df, 
                     signal_count=session_count-1,
@@ -530,32 +547,34 @@ async def analyze_multiple_markets_iterative(user_id, session_count, signal_id=N
                 )
                 
                 if signal_data is None:
-                    print(f"[ROTATION] ❌ {pair}: aucun signal")
+                    print(f"[ROTATION] ❌ {actual_pair}: aucun signal")
                     continue
                 
                 current_score = signal_data.get('score', 0)
-                print(f"[ROTATION] ✅ {pair}: Score {current_score:.1f}")
+                print(f"[ROTATION] ✅ {actual_pair}: Score {current_score:.1f}")
                 
                 if current_score > batch_best_score:
                     batch_best_score = current_score
                     batch_best_signal = {
                         **signal_data,
-                        'pair': pair,
+                        'pair': actual_pair,
                         'original_pair': pair,
-                        'actual_pair': get_current_pair(pair),
+                        'actual_pair': actual_pair,
                         'batch': batch_count,
-                        'position_in_batch': batch_pairs.index(pair) + 1
+                        'position_in_batch': batch_pairs.index(pair) + 1,
+                        'is_weekend': is_weekend
                     }
                 
                 if current_score >= 95:
                     print(f"[ROTATION] 🎯 Signal excellent trouvé")
                     best_signal = {
                         **signal_data,
-                        'pair': pair,
+                        'pair': actual_pair,
                         'original_pair': pair,
-                        'actual_pair': get_current_pair(pair),
+                        'actual_pair': actual_pair,
                         'batch': batch_count,
-                        'position_in_batch': batch_pairs.index(pair) + 1
+                        'position_in_batch': batch_pairs.index(pair) + 1,
+                        'is_weekend': is_weekend
                     }
                     best_score = current_score
                     return best_signal, total_analyzed, batch_count
@@ -563,7 +582,8 @@ async def analyze_multiple_markets_iterative(user_id, session_count, signal_id=N
                 await asyncio.sleep(ROTATION_CONFIG['api_cooldown_seconds'])
                 
             except Exception as e:
-                print(f"[ROTATION] ❌ Erreur sur {pair}: {str(e)[:100]}")
+                error_msg = str(e)[:100]
+                print(f"[ROTATION] ❌ Erreur sur {pair}: {error_msg}")
                 continue
         
         if batch_best_signal and batch_best_score >= ROTATION_CONFIG['min_score_threshold']:
@@ -581,10 +601,12 @@ async def analyze_multiple_markets_iterative(user_id, session_count, signal_id=N
         await asyncio.sleep(ROTATION_CONFIG['batch_cooldown_seconds'])
     
     if best_signal and best_score >= ROTATION_CONFIG['min_score_threshold']:
-        print(f"[ROTATION] ✅ Meilleur signal: {best_signal['pair']} (Score: {best_score:.1f})")
+        pair_type = "Crypto" if is_weekend else "Forex"
+        print(f"[ROTATION] ✅ Meilleur signal {pair_type}: {best_signal['pair']} (Score: {best_score:.1f})")
         return best_signal, total_analyzed, batch_count
     
-    print(f"[ROTATION] ❌ Aucun signal valide après {total_analyzed} paires")
+    pair_type = "Crypto" if is_weekend else "Forex"
+    print(f"[ROTATION] ❌ Aucun signal valide après {total_analyzed} paires {pair_type}")
     return None, total_analyzed, batch_count
 
 # ================= GESTION BOUTON PERSISTANT =================
@@ -690,6 +712,7 @@ async def cleanup_old_buttons(user_id: int, app):
 async def generate_m1_signal_with_iterative_rotation(user_id, app):
     """
     Génère un signal avec rotation itérative - PAS DE FALLBACK
+    Rotation Crypto optimisée pour week-end
     """
     global current_signal_id
     
@@ -705,6 +728,11 @@ async def generate_m1_signal_with_iterative_rotation(user_id, app):
         
         print(f"\n[SIGNAL] 🔄 Génération signal #{session_count}")
         
+        # Vérifier mode week-end
+        is_weekend = otc_provider.is_weekend()
+        if is_weekend:
+            print(f"[SIGNAL] 🌙 MODE WEEK-END: Rotation exclusive sur 5 paires Crypto")
+        
         # Analyse multi-marchés - PAS DE FALLBACK
         signal_data, total_pairs_analyzed, total_batches = await analyze_multiple_markets_iterative(
             user_id, 
@@ -714,7 +742,8 @@ async def generate_m1_signal_with_iterative_rotation(user_id, app):
         
         # 🔥 AUCUN FALLBACK - SI PAS DE SIGNAL, RETOURNER None
         if signal_data is None:
-            print(f"[SIGNAL] ❌ Aucun signal valide trouvé après analyse rotation")
+            pair_type = "Crypto" if is_weekend else "Forex"
+            print(f"[SIGNAL] ❌ Aucun signal valide trouvé après analyse {pair_type}")
             return None
         
         pair = signal_data['pair']
@@ -725,6 +754,7 @@ async def generate_m1_signal_with_iterative_rotation(user_id, app):
         reason = signal_data['reason']
         actual_pair = signal_data.get('actual_pair', pair)
         batch_info = f"Batch {signal_data.get('batch', '?')}.{signal_data.get('position_in_batch', '?')}"
+        is_weekend_mode = signal_data.get('is_weekend', False)
         
         print(f"[SIGNAL] 🎯 Meilleur signal: {pair} -> {direction} (Score: {score:.1f})")
         
@@ -777,7 +807,9 @@ async def generate_m1_signal_with_iterative_rotation(user_id, app):
                     'best_score': score,
                     'batch_info': batch_info,
                     'signal_tracking_id': signal_tracking_id,
-                    'api_stats': api_manager.get_stats()
+                    'api_stats': api_manager.get_stats(),
+                    'is_weekend': is_weekend_mode,
+                    'crypto_pairs': CRYPTO_PAIRS if is_weekend_mode else []
                 },
                 'session_count': session_count,
                 'session_total': SIGNALS_PER_SESSION,
@@ -826,7 +858,7 @@ async def schedule_button_after_candle(signal_id, user_id, app, entry_time):
         # ENVOYER LE BOUTON IMMÉDIATEMENT APRÈS FIN BOUGIE
         print(f"[BOUGIE-BOUTON] ✅ Bougie terminée, envoi bouton IMMÉDIAT pour signal #{signal_id}")
         
-        # Créer le bouton comme dans le code précédent
+        # Créer le bouton
         session = session_manager.get_session(user_id)
         if not session:
             return
@@ -887,10 +919,15 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_weekend = otc_provider.is_weekend()
         mode_text = "🏖️ OTC (Crypto)" if is_weekend else "📈 Forex"
         
+        if is_weekend:
+            crypto_list = "\n".join([f"• {pair}" for pair in CRYPTO_PAIRS])
+            mode_text += f"\n🎯 Paires Crypto: {', '.join(CRYPTO_PAIRS)}"
+        
         await update.message.reply_text(
             f"✅ **Bienvenue au Bot Trading Saint Graal 4.5 !**\n\n"
             f"🎯 Rotation Itérative Multi-Marchés\n"
             f"📊 {len(ROTATION_PAIRS)} paires disponibles\n"
+            f"🌙 {len(CRYPTO_PAIRS)} paires Crypto week-end\n"
             f"🔄 Bouton après bougie avec régénération automatique\n"
             f"⏱️ Timeout bouton: {BUTTON_TIMEOUT_MINUTES} minutes\n"
             f"🌐 Mode actuel: {mode_text}\n\n"
@@ -903,9 +940,17 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Affiche le menu complet"""
+    is_weekend = otc_provider.is_weekend()
+    
+    if is_weekend:
+        crypto_section = f"🌙 **MODE WEEK-END:**\n• Rotation exclusive Crypto\n• {len(CRYPTO_PAIRS)} paires analysées\n"
+    else:
+        crypto_section = f"📈 **MODE FOREX:**\n• Rotation standard\n• {len(ROTATION_PAIRS)} paires analysées\n"
+    
     menu_text = (
         f"📋 **MENU SAINT GRAAL 4.5**\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"{crypto_section}\n"
         "**📊 Session:**\n"
         "• /startsession - Démarrer session\n"
         "• /sessionstatus - État session\n"
@@ -913,11 +958,13 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "**🔄 Rotation:**\n"
         "• /rotationstats - Stats rotation\n"
         "• /apistats - Stats API\n"
-        "• /pairslist - Liste paires\n\n"
+        "• /pairslist - Liste paires\n"
+        "• /cryptolist - Liste Crypto week-end\n\n"
         "**⚙️ Configuration:**\n"
         "• /buttonconfig - Configuration bouton\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        f"🎯 Paires: {len(ROTATION_PAIRS)}\n"
+        f"🎯 Paires Forex: {len(ROTATION_PAIRS)}\n"
+        f"🌙 Paires Crypto: {len(CRYPTO_PAIRS)}\n"
         f"🔄 Bouton timeout: {BUTTON_TIMEOUT_MINUTES} min\n"
         f"⚡ Bouton après bougie: ACTIVÉ\n"
     )
@@ -940,7 +987,7 @@ async def cmd_start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Continuer avec signal #{next_num} ⬇️"
         )
         
-        # ENSUITE LE BOUTON (COMME DANS LE CODE PRÉCÉDENT)
+        # ENSUITE LE BOUTON
         keyboard = [[InlineKeyboardButton(
             f"🎯 Générer Signal #{next_num}", 
             callback_data=f"gen_signal_{user_id}"
@@ -959,6 +1006,10 @@ async def cmd_start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_weekend = otc_provider.is_weekend()
     mode_text = "🏖️ OTC (Crypto)" if is_weekend else "📈 Forex"
     
+    if is_weekend:
+        crypto_details = f"🎯 Paires Crypto: {', '.join(CRYPTO_PAIRS)}"
+        mode_text += f"\n{crypto_details}"
+    
     # D'ABORD LE TEXTE DE SESSION DÉMARRÉE
     await update.message.reply_text(
         f"🚀 **SESSION DÉMARRÉE**\n"
@@ -971,7 +1022,7 @@ async def cmd_start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Cliquez sur le bouton pour commencer ⬇️"
     )
     
-    # ENSUITE LE BOUTON (COMME DANS LE CODE PRÉCÉDENT)
+    # ENSUITE LE BOUTON
     keyboard = [[InlineKeyboardButton(
         "🎯 Générer Signal #1", 
         callback_data=f"gen_signal_{user_id}"
@@ -1001,10 +1052,15 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
     
     session = session_manager.get_session(user_id)
     
+    # Déterminer mode
+    is_weekend = otc_provider.is_weekend()
+    mode_text = "🌙 Crypto" if is_weekend else "📈 Forex"
+    
     # Mettre à jour le message avec état
     await query.edit_message_text(
         f"🔄 **Génération du signal #{session['next_signal_number']}**\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"Mode: {mode_text}\n"
         f"Analyse rotation itérative en cours...\n"
         f"⏱️ Patientez quelques secondes..."
     )
@@ -1044,7 +1100,8 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
                     payload = json.loads(payload_json)
                     if 'rotation_info' in payload:
                         ri = payload['rotation_info']
-                        rotation_info = f"\n🔄 {ri['pairs_analyzed']} paires analysées"
+                        pair_type = "Crypto 🌙" if ri.get('is_weekend', False) else "Forex 📈"
+                        rotation_info = f"\n🔄 {ri['pairs_analyzed']} paires {pair_type} analysées"
                 except:
                     pass
             
@@ -1075,7 +1132,7 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
             await end_session_summary(user_id, context.application)
             return
         
-        # 🔥 PROGRAMMER LE BOUTON APRÈS LA BOUGIE (EXACTEMENT COMME DANS LE CODE PRÉCÉDENT)
+        # PROGRAMMER LE BOUTON APRÈS LA BOUGIE
         if signal:
             # Planifier l'envoi du bouton après la bougie
             button_task = asyncio.create_task(
@@ -1087,7 +1144,7 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
                 session['button_tasks'] = []
             session['button_tasks'].append(button_task)
         
-        # Message de confirmation (COMME DANS LE CODE PRÉCÉDENT)
+        # Message de confirmation
         confirmation_msg = (
             f"✅ **Signal #{session['signal_count']} généré!**\n"
             f"━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -1099,11 +1156,11 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
         await query.edit_message_text(confirmation_msg)
     else:
         # 🔥 AUCUN SIGNAL TROUVÉ - PAS DE FALLBACK
+        pair_type = "Crypto" if is_weekend else "Forex"
         error_msg = (
             f"❌ **Aucun signal valide trouvé**\n\n"
             f"Le système de rotation n'a trouvé aucun signal satisfaisant "
-            f"après analyse de toutes les paires.\n\n"
-            f"📊 Paires analysées: {len(ROTATION_PAIRS)}\n"
+            f"après analyse de toutes les paires {pair_type}.\n\n"
             f"🎯 Score minimum requis: {ROTATION_CONFIG['min_score_threshold']}\n\n"
             f"🔄 Essayez à nouveau dans 1 minute."
         )
@@ -1130,9 +1187,13 @@ async def cmd_session_status(update: Update, context: ContextTypes.DEFAULT_TYPE)
     duration = (get_haiti_now() - session['start_time']).total_seconds() / 60
     winrate = (session['wins'] / session['signal_count'] * 100) if session['signal_count'] > 0 else 0
     
+    is_weekend = otc_provider.is_weekend()
+    mode_text = "🌙 Mode Crypto (Week-end)" if is_weekend else "📈 Mode Forex"
+    
     msg = (
         "📊 **ÉTAT SESSION**\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"{mode_text}\n"
         f"⏱️ Durée: {duration:.1f} min\n"
         f"📈 Progression: {session['signal_count']}/{SIGNALS_PER_SESSION}\n\n"
         f"✅ Wins: {session['wins']}\n"
@@ -1208,11 +1269,20 @@ async def end_session_summary(user_id, app):
 async def cmd_rotation_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Affiche les statistiques de rotation"""
     stats = api_manager.get_stats()
+    is_weekend = otc_provider.is_weekend()
+    
+    if is_weekend:
+        crypto_section = f"🌙 **MODE WEEK-END ACTIF**\n• Rotation exclusive sur {len(CRYPTO_PAIRS)} paires Crypto\n• {', '.join(CRYPTO_PAIRS)}\n"
+        pairs_text = f"🎯 Paires Crypto: {len(CRYPTO_PAIRS)}"
+    else:
+        crypto_section = f"📈 **MODE FOREX ACTIF**\n• Rotation standard\n"
+        pairs_text = f"📊 Paires Forex: {len(ROTATION_PAIRS)}"
     
     msg = (
         f"🔄 **STATISTIQUES ROTATION**\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"📊 Paires totales: {len(ROTATION_PAIRS)}\n"
+        f"{crypto_section}\n"
+        f"{pairs_text}\n"
         f"🔄 Paires/batch: {ROTATION_CONFIG['pairs_per_batch']}\n"
         f"📦 Max batches: {ROTATION_CONFIG['max_batches_per_signal']}\n"
         f"🎯 Score minimum: {ROTATION_CONFIG['min_score_threshold']}\n"
@@ -1261,15 +1331,19 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         winrate = (wins/verified*100) if verified > 0 else 0
         
         rotation_stats = api_manager.get_stats()
+        is_weekend = otc_provider.is_weekend()
+        
+        mode_text = f"🌙 Week-end (Crypto)" if is_weekend else f"📈 Forex"
         
         msg = (
             f"📊 **Statistiques Globales**\n\n"
+            f"Mode actuel: {mode_text}\n"
             f"Total signaux: {total}\n"
             f"✅ Wins: {wins}\n"
             f"❌ Losses: {losses}\n"
             f"📈 Win rate: {winrate:.1f}%\n\n"
             f"🔄 **Rotation:**\n"
-            f"• Paires analysées: {len(ROTATION_PAIRS)}\n"
+            f"• Paires analysées: {len(CRYPTO_PAIRS) if is_weekend else len(ROTATION_PAIRS)}\n"
             f"• Appels API: {rotation_stats['daily_calls']}/{rotation_stats['max_daily']}\n\n"
             f"🎯 **Sessions actives:** {len(session_manager.active_sessions)}\n"
             f"🔄 **Bouton après bougie:** ✅ ACTIVÉ"
@@ -1289,7 +1363,7 @@ async def cmd_pairslist(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pairs_text += " • " + " | ".join(row) + "\n"
     
     msg = (
-        f"📋 **LISTE DES PAIRES ANALYSÉES**\n"
+        f"📋 **LISTE DES PAIRES FOREX**\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
         f"Source: config.py\n"
         f"Total: {len(ROTATION_PAIRS)} paires\n\n"
@@ -1297,7 +1371,36 @@ async def cmd_pairslist(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"🔄 Rotation: {ROTATION_CONFIG['pairs_per_batch']} paires/batch\n"
         f"📦 Max: {ROTATION_CONFIG['max_batches_per_signal']} batches/signal\n"
-        f"🎯 Score minimum: {ROTATION_CONFIG['min_score_threshold']}"
+        f"🎯 Score minimum: {ROTATION_CONFIG['min_score_threshold']}\n\n"
+        f"ℹ️ Utilisez /cryptolist pour voir les paires Crypto week-end"
+    )
+    
+    await update.message.reply_text(msg)
+
+async def cmd_cryptolist(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Affiche la liste des paires Crypto pour week-end"""
+    crypto_text = "\n".join([f"• {pair}" for pair in CRYPTO_PAIRS])
+    
+    is_weekend = otc_provider.is_weekend()
+    weekend_status = "✅ ACTIF" if is_weekend else "⏸️ INACTIF"
+    
+    msg = (
+        f"🌙 **LISTE DES PAIRES CRYPTO (WEEK-END)**\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"Mode week-end: {weekend_status}\n"
+        f"Total: {len(CRYPTO_PAIRS)} paires\n\n"
+        f"{crypto_text}\n\n"
+        f"🔧 **Fonctionnement:**\n"
+        f"• Le week-end (ven 22h - dim 22h UTC)\n"
+        f"• Toutes les paires Forex sont transformées en Crypto\n"
+        f"• Rotation exclusive sur ces {len(CRYPTO_PAIRS)} paires\n"
+        f"• Distribution équitable via hash MD5\n\n"
+        f"🎯 **Paires disponibles:**\n"
+        f"• BTC/USD - Bitcoin\n"
+        f"• ETH/USD - Ethereum\n"
+        f"• DOGE/USD - Dogecoin\n"
+        f"• SOL/USD - Solana\n"
+        f"• LTC/USD - Litecoin"
     )
     
     await update.message.reply_text(msg)
@@ -1327,11 +1430,14 @@ async def cmd_apistats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================= SERVEUR HTTP =================
 async def health_check(request):
     """Endpoint de santé"""
+    is_weekend = otc_provider.is_weekend()
     return web.json_response({
         'status': 'ok',
         'timestamp': get_haiti_now().isoformat(),
         'active_sessions': len(session_manager.active_sessions),
         'rotation_pairs': len(ROTATION_PAIRS),
+        'crypto_pairs': len(CRYPTO_PAIRS),
+        'weekend_mode': is_weekend,
         'button_timeout': BUTTON_TIMEOUT_MINUTES,
         'button_after_candle': 'active'
     })
@@ -1357,10 +1463,11 @@ async def main():
     print("\n" + "="*60)
     print("🤖 BOT SAINT GRAAL 4.5 - ROTATION ITÉRATIVE")
     print("🎯 8 SIGNAUX GARANTIS - BOUTON APRÈS BOUGIE")
-    print("🔄 BOUTON APPARAÎT APRÈS FIN BOUGIE M1")
+    print("🌙 ROTATION CRYPTO OPTIMISÉE WEEK-END")
     print("="*60)
     print(f"🎯 Stratégie: Saint Graal 4.5 avec Rotation Itérative")
-    print(f"📊 Paires analysées: {len(ROTATION_PAIRS)}")
+    print(f"📊 Paires Forex analysées: {len(ROTATION_PAIRS)}")
+    print(f"🌙 Paires Crypto week-end: {len(CRYPTO_PAIRS)}")
     print(f"🔄 Batch: {ROTATION_CONFIG['pairs_per_batch']} paires")
     print(f"📦 Max batches: {ROTATION_CONFIG['max_batches_per_signal']}")
     print(f"🎯 Score minimum: {ROTATION_CONFIG['min_score_threshold']}")
@@ -1389,8 +1496,9 @@ async def main():
     # Commandes rotation
     app.add_handler(CommandHandler('rotationstats', cmd_rotation_stats))
     app.add_handler(CommandHandler('buttonconfig', cmd_button_config))
-    app.add_handler(CommandHandler('pairslist', cmd_pairslist))  # ✅ CORRIGÉ
-    app.add_handler(CommandHandler('apistats', cmd_apistats))    # ✅ CORRIGÉ
+    app.add_handler(CommandHandler('pairslist', cmd_pairslist))
+    app.add_handler(CommandHandler('cryptolist', cmd_cryptolist))
+    app.add_handler(CommandHandler('apistats', cmd_apistats))
     
     # Callbacks
     app.add_handler(CallbackQueryHandler(callback_generate_signal, pattern=r'^gen_signal_'))
@@ -1401,8 +1509,15 @@ async def main():
 
     bot_info = await app.bot.get_me()
     print(f"✅ BOT ACTIF: @{bot_info.username}\n")
-    print(f"🔧 Mode: {'OTC (Crypto)' if otc_provider.is_weekend() else 'Forex'}")
-    print(f"📊 Paires: {len(ROTATION_PAIRS)}")
+    
+    is_weekend = otc_provider.is_weekend()
+    if is_weekend:
+        print(f"🌙 MODE WEEK-END ACTIF: Rotation exclusive Crypto")
+        print(f"🎯 Paires Crypto: {', '.join(CRYPTO_PAIRS)}")
+    else:
+        print(f"📈 MODE FOREX ACTIF: Rotation standard")
+        print(f"📊 Paires Forex: {len(ROTATION_PAIRS)}")
+    
     print(f"🔄 Bouton après bougie: ✅ ACTIVÉ")
     print(f"⏱️ Bouton timeout: {BUTTON_TIMEOUT_MINUTES} min")
 
