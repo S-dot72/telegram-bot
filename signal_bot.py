@@ -114,7 +114,7 @@ class SessionManager:
 # ================= CONFIGURATION ROTATION =================
 # Utilise directement PAIRS de config.py
 ROTATION_PAIRS = PAIRS if 'PAIRS' in globals() else [
-    'EUR/USD', 'GBP/USD', 'USD/JPY', 'AUD/USD', 'BTC/USD', 'ETH/USD',
+    'EUR/USD', 'GBP/USD', 'USD/JPY', 'AUD/USD',
     'USD/CAD', 'EUR/RUB', 'USD/CLP', 'AUD/CAD', 'AUD/NZD', 'CAD/CHF',
     'EUR/CHF', 'EUR/GBP', 'USD/THB', 'USD/COP', 'USD/EGP', 'AED/CNY', 'QAR/CNY'
 ]
@@ -302,8 +302,6 @@ def get_current_pair(pair):
             'GBP/USD': 'ETH/USD',
             'USD/JPY': 'TRX/USD',
             'AUD/USD': 'LTC/USD',
-            'BTC/USD': 'BTC/USD',
-            'ETH/USD': 'ETH/USD',
             'USD/CAD': 'BTC/USD',
             'EUR/RUB': 'ETH/USD',
             'USD/CLP': 'TRX/USD',
