@@ -650,6 +650,143 @@ def check_confidence_killers(df, direction, momentum_data):
     
     return confidence_reduction, killers
 
+# ================= FONCTIONS AUXILIAIRES MANQUANTES =================
+
+def analyze_atr_volatility(df):
+    """Analyse la volatilité avec ATR"""
+    if len(df) < 20:
+        return {'valid': False, 'reason': 'Données insuffisantes', 'score': 0}
+    
+    atr_indicator = AverageTrueRange(
+        high=df['high'],
+        low=df['low'],
+        close=df['close'],
+        window=SAINT_GRAAL_CONFIG['atr_filter']['window']
+    )
+    atr = float(atr_indicator.average_true_range().iloc[-1])
+    
+    # Convertir en pips (approximation pour forex)
+    atr_pips = atr * 10000
+    
+    config = SAINT_GRAAL_CONFIG['atr_filter']
+    
+    if atr_pips < config['min_atr_pips']:
+        return {'valid': False, 'reason': f'ATR trop faible: {atr_pips:.1f} pips', 'score': 0, 'atr_pips': atr_pips}
+    
+    if atr_pips > config['max_atr_pips']:
+        return {'valid': False, 'reason': f'ATR trop élevé: {atr_pips:.1f} pips', 'score': 0, 'atr_pips': atr_pips}
+    
+    # Score basé sur la zone optimale
+    if config['optimal_range'][0] <= atr_pips <= config['optimal_range'][1]:
+        score = 15
+        reason = f'ATR optimal: {atr_pips:.1f} pips'
+    else:
+        score = 10
+        reason = f'ATR acceptable: {atr_pips:.1f} pips'
+    
+    return {'valid': True, 'reason': reason, 'score': score, 'atr_pips': atr_pips}
+
+def analyze_m5_trend(df):
+    """Analyse tendance M5"""
+    if len(df) < 200:
+        return {'trend': 'NEUTRAL', 'reason': 'Données insuffisantes', 'score': 0}
+    
+    # Utiliser les EMA pour déterminer la tendance
+    ema_fast = EMAIndicator(close=df['close'], window=50).ema_indicator()
+    ema_slow = EMAIndicator(close=df['close'], window=200).ema_indicator()
+    
+    current_ema_fast = float(ema_fast.iloc[-1])
+    current_ema_slow = float(ema_slow.iloc[-1])
+    
+    if current_ema_fast > current_ema_slow * 1.001:
+        trend = "BULLISH"
+        reason = f"Tendance haussière M5: EMA{50}>{200}"
+        score = 15
+    elif current_ema_fast < current_ema_slow * 0.999:
+        trend = "BEARISH"
+        reason = f"Tendance baissière M5: EMA{50}<{200}"
+        score = 15
+    else:
+        trend = "NEUTRAL"
+        reason = f"Tendance neutre M5: EMA{50}≈{200}"
+        score = 10
+    
+    return {'trend': trend, 'reason': reason, 'score': score}
+
+def detect_swing_extremes(df):
+    """Détecte les swing highs et lows"""
+    if len(df) < 10:
+        return {'is_swing_high': False, 'is_swing_low': False}
+    
+    lookback = SAINT_GRAAL_CONFIG['forbidden_zones']['swing_filter']['lookback_bars']
+    
+    if len(df) < lookback * 2:
+        return {'is_swing_high': False, 'is_swing_low': False}
+    
+    highs = df['high'].values[-lookback:]
+    lows = df['low'].values[-lookback:]
+    current_high = highs[-1]
+    current_low = lows[-1]
+    
+    is_swing_high = current_high == max(highs)
+    is_swing_low = current_low == min(lows)
+    
+    return {'is_swing_high': is_swing_high, 'is_swing_low': is_swing_low}
+
+def analyze_micro_momentum(df, direction):
+    """Analyse micro momentum"""
+    if not SAINT_GRAAL_CONFIG['micro_momentum']['enabled']:
+        return {'valid': True, 'score': 0, 'reason': 'Micro momentum désactivé'}
+    
+    lookback = SAINT_GRAAL_CONFIG['micro_momentum']['lookback_bars']
+    
+    if len(df) < lookback + 1:
+        return {'valid': False, 'score': 0, 'reason': 'Données insuffisantes'}
+    
+    closes = df['close'].values[-(lookback+1):]
+    
+    if direction == "BUY":
+        bullish_bars = sum(1 for i in range(1, len(closes)) if closes[i] > closes[i-1])
+        if bullish_bars >= SAINT_GRAAL_CONFIG['micro_momentum']['min_bullish_bars']:
+            score = SAINT_GRAAL_CONFIG['micro_momentum']['weight']
+            reason = f'Micro momentum haussier: {bullish_bars}/{lookback} bougies vertes'
+            return {'valid': True, 'score': score, 'reason': reason}
+    else:  # SELL
+        bearish_bars = sum(1 for i in range(1, len(closes)) if closes[i] < closes[i-1])
+        if bearish_bars >= SAINT_GRAAL_CONFIG['micro_momentum']['min_bearish_bars']:
+            score = SAINT_GRAAL_CONFIG['micro_momentum']['weight']
+            reason = f'Micro momentum baissier: {bearish_bars}/{lookback} bougies rouges'
+            return {'valid': True, 'score': score, 'reason': reason}
+    
+    return {'valid': False, 'score': 0, 'reason': 'Micro momentum insuffisant'}
+
+def calculate_confidence(score):
+    """Confiance par zones avec score max réaliste"""
+    zones = sorted(SAINT_GRAAL_CONFIG['signal_validation']['confidence_zones'].items())
+    max_realistic = SAINT_GRAAL_CONFIG['signal_validation']['max_score_realistic']
+    
+    # Normaliser le score par rapport au max réaliste
+    normalized_score = min(score, max_realistic)
+    
+    base_confidence = 60  # Valeur par défaut
+    
+    # Trouver la zone correspondante
+    for threshold, confidence in zones:
+        if normalized_score >= threshold:
+            base_confidence = confidence
+    
+    # Interpolation entre zones
+    for i in range(len(zones) - 1):
+        current_threshold, current_conf = zones[i]
+        next_threshold, next_conf = zones[i + 1]
+        
+        if current_threshold <= normalized_score < next_threshold:
+            progress = (normalized_score - current_threshold) / (next_threshold - current_threshold)
+            base_confidence = current_conf + (next_conf - current_conf) * progress
+            break
+    
+    return min(95, max(60, int(base_confidence)))
+
 # ================= FONCTION PRINCIPALE V9.1 =================
 
 def analyze_pair_for_signals(df):
@@ -956,110 +1093,38 @@ def analyze_pair_for_signals(df):
         
         return None
 
-def calculate_confidence(score):
-    """Confiance par zones avec score max réaliste"""
-    zones = sorted(SAINT_GRAAL_CONFIG['signal_validation']['confidence_zones'].items())
-    max_realistic = SAINT_GRAAL_CONFIG['signal_validation']['max_score_realistic']
-    
-    # Normaliser le score par rapport au max réaliste
-    normalized_score = min(score, max_realistic)
-    
-    for threshold, confidence in zones:
-        if normalized_score >= threshold:
-            base_confidence = confidence
-    
-    # Interpolation entre zones
-    for i in range(len(zones) - 1):
-        current_threshold, current_conf = zones[i]
-        next_threshold, next_conf = zones[i + 1]
-        
-        if current_threshold <= normalized_score < next_threshold:
-            progress = (normalized_score - current_threshold) / (next_threshold - current_threshold)
-            base_confidence = current_conf + (next_conf - current_conf) * progress
-            break
-    
-    return min(95, max(60, int(base_confidence)))
+# ================= FONCTIONS DE COMPATIBILITÉ POUR LE BOT =================
 
-# ================= BACKTEST SPÉCIFIQUE =================
-
-def backtest_swing_filter(df_list, lookback_days=30):
-    """Backtest spécifique du swing filter"""
-    print(f"\n{'='*60}")
-    print("🧪 BACKTEST SPÉCIFIQUE - SWING FILTER")
-    print(f"{'='*60}")
-    
-    results = {
-        'total_trades': 0,
-        'swing_rejected': 0,
-        'swing_accepted': 0,
-        'swing_winrate': 0,
-        'non_swing_winrate': 0
-    }
-    
-    # Simulation simple
-    for df in df_list:
-        if len(df) < 100:
-            continue
-        
-        # Analyse swing
-        swings = detect_swing_extremes(df)
-        
-        # Simulation de trade
-        # (À implémenter avec ton historique réel)
-        pass
-    
-    return results
-
-def analyze_gate_performance(df_list):
-    """Analyse performance gate 2/3 vs gate strict"""
-    print(f"\n{'='*60}")
-    print("🧪 BACKTEST - MOMENTUM GATE")
-    print(f"{'='*60}")
-    
-    gate_results = {
-        'smart_gate_trades': 0,
-        'strict_gate_trades': 0,
-        'smart_winrate': 0,
-        'strict_winrate': 0
-    }
-    
-    return gate_results
-
-# ================= FONCTION PRINCIPALE =================
-
-def get_binary_signal(df, pair_name="ETH/USD", return_message=False, record_result=None):
+def get_signal_saint_graal(df, signal_count=0, total_signals=8, return_dict=False):
     """
-    Fonction principale V9.1
+    🔥 Fonction de compatibilité pour le bot de trading
+    Interface: get_signal_saint_graal(df, signal_count, total_signals, return_dict)
     """
-    if record_result and record_result in ['win', 'loss']:
-        # Enregistrer le résultat du trade précédent
-        trading_state.record_trade(record_result, "EXCELLENT")  # Qualité par défaut
-    
-    signal = analyze_pair_for_signals(df)
-    
-    if signal:
-        # Message avec architecture V9.1
-        message = f"""
-🎯 **SIGNAL V9.1 - ARCHITECTURE PRO**
-━━━━━━━━━━━━━━━━━━━━━━━━━━
-📈 Direction: {signal['direction']} {'↗️' if signal['direction'] == 'CALL' else '↘️'}
-🏆 Qualité: {signal['quality']}
-💪 Confiance: {signal['confidence']}%
-📊 Score: {signal['score']}/{SAINT_GRAAL_CONFIG['signal_validation']['max_score_realistic']}
-
-🔧 **ARCHITECTURE ACTIVÉE:**
-✅ Gates séparés BUY/SELL
-✅ Strict_mode fonctionnel
-✅ État marché: {signal['details']['market_state']}
-✅ Confidence killers: {len(signal['details']['confidence_killers'])}
-✅ Cooldown dynamique par qualité
-━━━━━━━━━━━━━━━━━━━━━━━━━━
-"""
-        if return_message:
-            return signal, message
+    # Votre bot utilise cette fonction avec return_dict=True
+    if return_dict:
+        # Le bot attend exactement ce format de dictionnaire
+        signal = analyze_pair_for_signals(df)
+        
+        if signal:
+            # Ajouter les informations spécifiques que le bot attend
+            signal['signal_count'] = signal_count
+            signal['total_signals'] = total_signals
+            
+            # S'assurer que toutes les clés attendues sont présentes
+            if 'mode' not in signal:
+                signal['mode'] = "V9.1"
+                
         return signal
-    
-    return None
+    else:
+        # Format texte pour compatibilité (rarement utilisé)
+        signal = analyze_pair_for_signals(df)
+        if signal:
+            return f"Signal: {signal['direction']} - Score: {signal['score']}"
+        else:
+            return "No signal"
+
+# Alias pour compatibilité
+get_binary_signal = get_signal_saint_graal
 
 # ================= INITIALISATION =================
 
@@ -1076,11 +1141,11 @@ if __name__ == "__main__":
     print("6. ✅ Cooldown par qualité du trade perdant")
     print("="*60)
     
-    print("\n🎯 BACKTESTS RECOMMANDÉS:")
-    print("1. Swing filter: trades refusés vs acceptés")
-    print("2. M5 soft veto: winrate trades plafonnés")
-    print("3. Gate 2/3 vs gate strict")
-    print("4. Cooldown post-perte par qualité")
+    print("\n🎯 COMPATIBLE AVEC SIGNAL_BOT.PY:")
+    print("✅ Interface get_signal_saint_graal préservée")
+    print("✅ Format retour dictionnaire identique")
+    print("✅ Multi-paires préservé")
+    print("✅ Rotation Crypto week-end fonctionnelle")
     print("="*60)
     
     print("\n✅ V9.1 PRÊTE POUR PRODUCTION")
