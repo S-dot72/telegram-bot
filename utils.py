@@ -498,8 +498,8 @@ def calculate_m5_filter(df_m1):
             'ema_slow': None
         }
     
-    # Resample en M5
-    df_m5 = df_m1.resample('5T').agg({
+    # CORRECTION ICI : '5T' → '5min'
+    df_m5 = df_m1.resample('5min').agg({
         'open': 'first',
         'high': 'max',
         'low': 'min',
