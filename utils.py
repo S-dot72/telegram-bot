@@ -1,5 +1,5 @@
 """
-utils.py - STRATÉGIE BINAIRE M1 PRO - VERSION 4.6 ULTIMATE PLUS COMPLÈTE
+utils.py - STRATÉGIE BINAIRE M1 PRO - VERSION 4.8 ULTIMATE PLUS COMPLÈTE (SANS VOLUME)
 """
 
 import pandas as pd
@@ -22,7 +22,7 @@ SAINT_GRAAL_CONFIG = {
         'min_bullish_bars': 2,
         'min_bearish_bars': 2,
         'require_price_alignment': True,
-        'require_volume_confirmation': False,
+        'require_volume_confirmation': False,  # DÉSACTIVÉ car pas de volume
         'weight': 15,
     },
     
@@ -498,13 +498,12 @@ def calculate_m5_filter(df_m1):
             'ema_slow': None
         }
     
-    # CORRECTION ICI : '5T' → '5min'
+    # CORRECTION: Suppression de la colonne volume
     df_m5 = df_m1.resample('5min').agg({
         'open': 'first',
         'high': 'max',
         'low': 'min',
-        'close': 'last',
-        'volume': 'sum' if 'volume' in df_m1.columns else 'sum'
+        'close': 'last'
     }).dropna()
     
     if len(df_m5) < SAINT_GRAAL_CONFIG['m5_filter']['min_required_m5_bars']:
@@ -951,12 +950,8 @@ def validate_candle_for_5min_buy(df):
     # Taille de la bougie (en pips)
     candle_size = abs(current_close - current_open) / 0.0001
     
-    # Volume (si disponible)
+    # NOTE: Volume désactivé - toujours OK
     volume_ok = True
-    if 'volume' in df.columns:
-        current_volume = float(current['volume']) if pd.notnull(current['volume']) else 0
-        avg_volume = df['volume'].tail(20).mean()
-        volume_ok = current_volume > avg_volume * 0.7
     
     # Configuration de bougie optimale
     pattern = "NORMAL"
@@ -1022,12 +1017,8 @@ def validate_candle_for_5min_sell(df):
     # Taille de la bougie
     candle_size = abs(current_close - current_open) / 0.0001
     
-    # Volume
+    # NOTE: Volume désactivé - toujours OK
     volume_ok = True
-    if 'volume' in df.columns:
-        current_volume = float(current['volume']) if pd.notnull(current['volume']) else 0
-        avg_volume = df['volume'].tail(20).mean()
-        volume_ok = current_volume > avg_volume * 0.7
     
     # Configuration de bougie
     pattern = "NORMAL"
@@ -1077,10 +1068,10 @@ def validate_candle_for_5min_sell(df):
 
 def rule_signal_saint_graal_5min_pro_v4(df, signal_count=0, total_signals_needed=6):
     """
-    🔥 VERSION 4.6 : AVEC CROISEMENT BANDE MÉDIANE BB + MICRO MOMENTUM + FILTRE ATR
+    🔥 VERSION 4.8 : AVEC CROISEMENT BANDE MÉDIANE BB + MICRO MOMENTUM + FILTRE ATR (SANS VOLUME)
     """
     print(f"\n{'='*70}")
-    print(f"🎯 BINAIRE 5 MIN V4.6 - Signal #{signal_count+1}/{total_signals_needed}")
+    print(f"🎯 BINAIRE 5 MIN V4.8 - Signal #{signal_count+1}/{total_signals_needed}")
     print(f"{'='*70}")
     
     if len(df) < 100:
@@ -1088,6 +1079,7 @@ def rule_signal_saint_graal_5min_pro_v4(df, signal_count=0, total_signals_needed
         return None
     
     current_price = float(df.iloc[-1]['close'])
+    print(f"💰 Prix actuel: {current_price:.5f}")
     
     # ===== 1. FILTRE M5 =====
     m5_filter = calculate_m5_filter(df)
@@ -1164,7 +1156,7 @@ def rule_signal_saint_graal_5min_pro_v4(df, signal_count=0, total_signals_needed
         buy_score_total += 15
         buy_details.append("Tendance alignée")
     
-    print(f"🎯 Scores avant micro: SELL {sell_score_total}/200 - BUY {buy_score_total}/200")
+    print(f"🎯 Scores avant micro: SELL {sell_score_total:.0f}/200 - BUY {buy_score_total:.0f}/200")
     
     # ===== 8. DÉCISION AVEC NOUVEAUX FILTRES =====
     direction = None
@@ -1288,7 +1280,7 @@ def rule_signal_saint_graal_5min_pro_v4(df, signal_count=0, total_signals_needed
 
 def get_signal_with_metadata_v2(df, signal_count=0, total_signals=6, pairs_analyzed=5, batches=1):
     """
-    🔥 VERSION CORRIGÉE avec calcul de confiance et message formaté
+    🔥 VERSION CORRIGÉE avec calcul de confiance et message formaté (SANS VOLUME)
     """
     try:
         if df is None or len(df) < 100:
@@ -1338,6 +1330,8 @@ def get_signal_with_metadata_v2(df, signal_count=0, total_signals=6, pairs_analy
         
     except Exception as e:
         print(f"❌ Erreur critique: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return None, None
 
 # ================= FONCTION DE COMPATIBILITÉ (pour code existant) =================
@@ -1352,11 +1346,11 @@ def get_signal_with_metadata(df, signal_count=0, total_signals=6):
 # ================= POINT D'ENTRÉE PRINCIPAL =================
 
 if __name__ == "__main__":
-    print("🎯 DESK PRO BINAIRE - VERSION 4.6 ULTIMATE PLUS COMPLÈTE")
+    print("🎯 DESK PRO BINAIRE - VERSION 4.8 ULTIMATE PLUS COMPLÈTE (SANS VOLUME)")
     print("🔥 FONCTIONS DISPONIBLES:")
     print("   1. get_signal_with_metadata_v2() - Nouvelle version avec message formaté")
     print("   2. get_signal_with_metadata()    - Compatibilité ancien code")
-    print("   3. rule_signal_saint_graal_5min_pro_v4() - Logique complète V4.6")
+    print("   3. rule_signal_saint_graal_5min_pro_v4() - Logique complète V4.8")
     print("\n✅ Toutes les fonctions sont intégrées et opérationnelles!")
     
     # Exemple d'utilisation
@@ -1364,7 +1358,7 @@ if __name__ == "__main__":
     print("""
     import pandas as pd
     
-    # Simuler des données
+    # Simuler des données SANS VOLUME
     data = {
         'open': [1.1000, 1.1010, 1.1020, 1.1015, 1.1005] * 50,
         'high': [1.1010, 1.1025, 1.1030, 1.1020, 1.1015] * 50,
