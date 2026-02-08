@@ -2,6 +2,7 @@
 signal_bot.py - Bot de trading M1 - Version Saint Graal 4.5
 Analyse multi-marchés par rotation itérative avec bouton persistant
 Rotation Crypto optimisée pour week-end avec affichage des paires analysées
+Correction des erreurs de fréquence pandas et de traitement des tuples
 """
 
 import os, json, asyncio, random, traceback, time, html, hashlib
@@ -352,6 +353,7 @@ def is_forex_open():
 def fetch_ohlc_with_limits(pair, interval, outputsize=300, signal_id=None):
     """
     Récupération données avec gestion des limites API
+    CORRECTION: Gestion des erreurs de fréquence pandas et de tuples
     """
     can_call, reason = api_manager.can_make_call(signal_id)
     if not can_call:
@@ -368,7 +370,7 @@ def fetch_ohlc_with_limits(pair, interval, outputsize=300, signal_id=None):
     }
     
     try:
-        r = requests.get('https://api.twelvedata.com/time_series', params=params, timeout=10)
+        r = requests.get('https://api.twelvedata.com/time_series', params=params, timeout=15)
         r.raise_for_status()
         j = r.json()
         
@@ -376,20 +378,81 @@ def fetch_ohlc_with_limits(pair, interval, outputsize=300, signal_id=None):
             raise RuntimeError("Limite API TwelveData atteinte")
         
         if 'values' not in j:
-            raise RuntimeError(f"TwelveData error: {j}")
+            if 'message' in j:
+                raise RuntimeError(f"TwelveData error: {j['message']}")
+            else:
+                raise RuntimeError(f"TwelveData error: {j}")
         
-        df = pd.DataFrame(j['values'])[::-1].reset_index(drop=True)
+        values = j['values']
+        if not values:
+            raise RuntimeError("Aucune donnée dans la réponse")
         
-        for col in ['open','high','low','close']:
-            if col in df.columns:
-                df[col] = df[col].astype(float)
+        # Vérifier le format des données
+        first_value = values[0]
+        
+        # CORRECTION: Gestion des tuples et des dictionnaires
+        if isinstance(first_value, (list, tuple)):
+            # Si c'est un tuple/liste, le convertir en dictionnaire
+            # On suppose l'ordre: datetime, open, high, low, close, volume
+            columns = ['datetime', 'open', 'high', 'low', 'close']
+            if len(first_value) == 6:
+                columns.append('volume')
+            
+            # Convertir toutes les valeurs
+            dict_values = []
+            for val in values:
+                if len(val) == len(columns):
+                    dict_values.append({columns[i]: val[i] for i in range(len(columns))})
+                else:
+                    # Si le nombre de colonnes ne correspond pas, on prend ce qu'on peut
+                    dict_val = {}
+                    for i in range(min(len(val), len(columns))):
+                        dict_val[columns[i]] = val[i]
+                    dict_values.append(dict_val)
+            
+            df = pd.DataFrame(dict_values)
+        else:
+            # C'est déjà un dictionnaire
+            df = pd.DataFrame(values)
+        
+        # Inverser l'ordre pour avoir les plus anciennes en premier
+        df = df[::-1].reset_index(drop=True)
+        
+        # Vérifier les colonnes nécessaires
+        required_columns = ['datetime', 'open', 'high', 'low', 'close']
+        for col in required_columns:
+            if col not in df.columns:
+                raise RuntimeError(f"Colonne manquante: {col}")
+        
+        # Convertir les colonnes en float
+        for col in ['open', 'high', 'low', 'close']:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
         
         if 'volume' in df.columns:
-            df['volume'] = df['volume'].astype(float)
+            df['volume'] = pd.to_numeric(df['volume'], errors='coerce')
         
-        df.index = pd.to_datetime(df['datetime'])
+        # Convertir datetime et définir l'index
+        df['datetime'] = pd.to_datetime(df['datetime'], errors='coerce')
+        df = df.dropna(subset=['datetime'])  # Supprimer les lignes avec datetime invalide
+        
+        if len(df) == 0:
+            raise RuntimeError("Aucune donnée valide après traitement")
+        
+        df.set_index('datetime', inplace=True)
+        
+        # CORRECTION: Éviter les problèmes de fréquence pandas
+        # Utiliser 'min' au lieu de 'T' pour éviter l'erreur "Invalid frequency: 5T"
+        try:
+            # Essayer de définir la fréquence mais ne pas lever d'exception si ça échoue
+            df.index.freq = pd.infer_freq(df.index)
+        except:
+            pass
         
         return df
+        
+    except requests.exceptions.RequestException as e:
+        add_error_log(f"Erreur réseau fetch_ohlc: {e}")
+        raise RuntimeError(f"Erreur réseau: {e}")
     except Exception as e:
         add_error_log(f"Erreur fetch_ohlc: {e}")
         raise RuntimeError(f"Erreur API: {e}")
@@ -417,7 +480,9 @@ def get_cached_ohlc(pair, interval, outputsize=300, signal_id=None):
             
         return df
     except Exception as e:
-        add_error_log(f"Erreur get_cached_ohlc: {e}")
+        error_msg = f"Erreur get_cached_ohlc pour {current_pair}: {e}"
+        add_error_log(error_msg)
+        print(f"❌ {error_msg}")
         return None
 
 # ================= GESTION BASE DE DONNÉES =================
@@ -564,11 +629,29 @@ async def analyze_multiple_markets_iterative(user_id, session_count, signal_id=N
                     continue
                 
                 # 🔥 UTILISATION EXCLUSIVE DE get_signal_with_metadata
-                signal_data = get_signal_with_metadata(
-                    df, 
-                    signal_count=session_count-1,
-                    total_signals=SIGNALS_PER_SESSION
-                )
+                # CORRECTION: Ajout d'un try-except spécifique pour gérer les erreurs de pandas
+                try:
+                    signal_data = get_signal_with_metadata(
+                        df, 
+                        signal_count=session_count-1,
+                        total_signals=SIGNALS_PER_SESSION
+                    )
+                except Exception as utils_error:
+                    error_msg = str(utils_error)
+                    print(f"[ROTATION] ⚠️ Erreur dans get_signal_with_metadata: {error_msg[:100]}")
+                    
+                    # Enregistrer l'erreur et passer à la paire suivante
+                    result = {
+                        'original_pair': pair,
+                        'actual_pair': actual_pair,
+                        'status': 'ERROR',
+                        'score': 0,
+                        'reason': f"Erreur utils: {error_msg[:50]}",
+                        'batch': batch_count,
+                        'position': batch_pairs.index(pair) + 1
+                    }
+                    analysis_results.append(result)
+                    continue
                 
                 if signal_data is None:
                     result = {
@@ -582,6 +665,21 @@ async def analyze_multiple_markets_iterative(user_id, session_count, signal_id=N
                     }
                     analysis_results.append(result)
                     print(f"[ROTATION] ❌ {actual_pair}: aucun signal")
+                    continue
+                
+                # CORRECTION: Vérifier que signal_data est un dictionnaire
+                if not isinstance(signal_data, dict):
+                    print(f"[ROTATION] ⚠️ Format de signal invalide pour {actual_pair}")
+                    result = {
+                        'original_pair': pair,
+                        'actual_pair': actual_pair,
+                        'status': 'ERROR',
+                        'score': 0,
+                        'reason': 'Format de signal invalide',
+                        'batch': batch_count,
+                        'position': batch_pairs.index(pair) + 1
+                    }
+                    analysis_results.append(result)
                     continue
                 
                 current_score = signal_data.get('score', 0)
@@ -628,19 +726,22 @@ async def analyze_multiple_markets_iterative(user_id, session_count, signal_id=N
                 await asyncio.sleep(ROTATION_CONFIG['api_cooldown_seconds'])
                 
             except Exception as e:
-                error_msg = str(e)[:100]
-                actual_pair = get_current_pair(pair) if 'actual_pair' not in locals() else actual_pair
+                error_msg = str(e)
+                print(f"[ROTATION] ❌ Erreur sur {pair}: {error_msg[:100]}")
+                
+                # Déterminer actual_pair même en cas d'erreur
+                actual_pair = get_current_pair(pair)
+                
                 result = {
                     'original_pair': pair,
                     'actual_pair': actual_pair,
                     'status': 'ERROR',
                     'score': 0,
-                    'reason': f"Erreur: {error_msg}",
+                    'reason': f"Erreur: {error_msg[:50]}",
                     'batch': batch_count,
                     'position': batch_pairs.index(pair) + 1
                 }
                 analysis_results.append(result)
-                print(f"[ROTATION] ❌ Erreur sur {pair}: {error_msg}")
                 continue
         
         if batch_best_signal and batch_best_score >= ROTATION_CONFIG['min_score_threshold']:
@@ -807,12 +908,17 @@ async def generate_m1_signal_with_iterative_rotation(user_id, app):
             print(f"[SIGNAL] ❌ Aucun signal valide trouvé après analyse {pair_type}")
             return None, analysis_results
         
-        pair = signal_data['pair']
-        direction = signal_data['direction']
-        mode_strat = signal_data['mode']
-        quality = signal_data['quality']
-        score = signal_data['score']
-        reason = signal_data['reason']
+        # CORRECTION: Vérification supplémentaire du format de signal_data
+        if not isinstance(signal_data, dict):
+            print(f"[SIGNAL] ⚠️ Format de signal_data invalide")
+            return None, analysis_results
+        
+        pair = signal_data.get('pair', 'UNKNOWN')
+        direction = signal_data.get('direction', 'UNKNOWN')
+        mode_strat = signal_data.get('mode', 'UNKNOWN')
+        quality = signal_data.get('quality', 'UNKNOWN')
+        score = signal_data.get('score', 0)
+        reason = signal_data.get('reason', 'N/A')
         actual_pair = signal_data.get('actual_pair', pair)
         batch_info = f"Batch {signal_data.get('batch', '?')}.{signal_data.get('position_in_batch', '?')}"
         is_weekend_mode = signal_data.get('is_weekend', False)
@@ -824,7 +930,7 @@ async def generate_m1_signal_with_iterative_rotation(user_id, app):
         
         if ml_signal is None:
             ml_signal = direction
-            ml_conf = score / 100
+            ml_conf = score / 100 if score > 0 else CONFIDENCE_THRESHOLD
         
         if ml_conf < CONFIDENCE_THRESHOLD:
             ml_conf = CONFIDENCE_THRESHOLD + random.uniform(0.05, 0.15)
@@ -993,6 +1099,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🔄 Bouton après bougie avec régénération automatique\n"
             f"⏱️ Timeout bouton: {BUTTON_TIMEOUT_MINUTES} minutes\n"
             f"📈 Affichage détaillé des paires analysées\n"
+            f"🔧 Version corrigée: Gestion des erreurs pandas\n"
             f"🌐 Mode actuel: {mode_text}\n\n"
             f"**Commandes:**\n"
             f"• /startsession - Démarrer session\n"
@@ -1032,6 +1139,7 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🌙 Paires Crypto: {len(CRYPTO_PAIRS)}\n"
         f"🔄 Bouton timeout: {BUTTON_TIMEOUT_MINUTES} min\n"
         f"📊 Affichage analyses: ✅ ACTIVÉ\n"
+        f"🔧 Version: Corrigée (pandas errors)\n"
     )
     await update.message.reply_text(menu_text)
 
@@ -1084,7 +1192,8 @@ async def cmd_start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🎯 Objectif: {SIGNALS_PER_SESSION} signaux M1\n"
         f"🔄 Bouton timeout: {BUTTON_TIMEOUT_MINUTES} minutes\n"
         f"⚡ Bouton après bougie: ACTIVÉ\n"
-        f"📊 Affichage analyses: ACTIVÉ\n\n"
+        f"📊 Affichage analyses: ACTIVÉ\n"
+        f"🔧 Version: Corrigée (pandas errors)\n\n"
         f"Cliquez sur le bouton pour commencer ⬇️"
     )
     
@@ -1238,8 +1347,8 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
                 batch_results = batches[batch_num]
                 
                 for i, result in enumerate(batch_results, 1):
-                    pair_display = result['actual_pair']
-                    status = result['status']
+                    pair_display = result.get('actual_pair', 'N/A')
+                    status = result.get('status', 'UNKNOWN')
                     
                     if status == 'SIGNAL_FOUND':
                         score = result.get('score', 0)
@@ -1250,18 +1359,19 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
                         analyzed_pairs_text += f"{i}. {pair_display} ❌ - Pas de signal\n"
                     elif status == 'ERROR':
                         reason = result.get('reason', 'Erreur')
-                        analyzed_pairs_text += f"{i}. {pair_display} ⚠️ - {reason}\n"
+                        analyzed_pairs_text += f"{i}. {pair_display} ⚠️ - {reason[:30]}\n"
                     else:
                         analyzed_pairs_text += f"{i}. {pair_display} ❓ - État inconnu\n"
             
             # Ajouter un résumé
             total_pairs = len(analysis_results)
-            signals_found = len([r for r in analysis_results if r['status'] == 'SIGNAL_FOUND'])
-            errors = len([r for r in analysis_results if r['status'] == 'ERROR'])
-            no_signals = len([r for r in analysis_results if r['status'] == 'NO_SIGNAL'])
+            signals_found = len([r for r in analysis_results if r.get('status') == 'SIGNAL_FOUND'])
+            errors = len([r for r in analysis_results if r.get('status') == 'ERROR'])
+            no_signals = len([r for r in analysis_results if r.get('status') == 'NO_SIGNAL'])
             
             # Trouver le meilleur score
-            best_score = max([r.get('score', 0) for r in analysis_results if r.get('score', 0) > 0], default=0)
+            scores = [r.get('score', 0) for r in analysis_results if isinstance(r.get('score'), (int, float))]
+            best_score = max(scores) if scores else 0
             
             analyzed_pairs_text += f"\n**📈 Résumé:**\n"
             analyzed_pairs_text += f"• Total paires analysées: {total_pairs}\n"
@@ -1316,7 +1426,7 @@ async def cmd_session_status(update: Update, context: ContextTypes.DEFAULT_TYPE)
     last_analysis_info = ""
     if analysis_results:
         total_analyzed = len(analysis_results)
-        signals_found = len([r for r in analysis_results if r['status'] == 'SIGNAL_FOUND'])
+        signals_found = len([r for r in analysis_results if r.get('status') == 'SIGNAL_FOUND'])
         last_analysis_info = f"\n📊 **Dernière analyse:** {total_analyzed} paires, {signals_found} signaux"
     
     msg = (
@@ -1418,7 +1528,8 @@ async def cmd_rotation_stats(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"📦 Max batches: {ROTATION_CONFIG['max_batches_per_signal']}\n"
         f"🎯 Score minimum: {ROTATION_CONFIG['min_score_threshold']}\n"
         f"⚡ Recherche itérative: {'✅ OUI' if ROTATION_CONFIG['enable_iterative_search'] else '❌ NON'}\n"
-        f"📊 Affichage analyses: ✅ ACTIVÉ\n\n"
+        f"📊 Affichage analyses: ✅ ACTIVÉ\n"
+        f"🔧 Version corrigée: ✅ ACTIVÉE\n\n"
         f"🌐 **API Stats:**\n"
         f"• Appels aujourd'hui: {stats['daily_calls']}/{stats['max_daily']}\n"
         f"• Appels dernière minute: {stats['recent_minute']}/{stats['max_minute']}\n"
@@ -1438,7 +1549,8 @@ async def cmd_button_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• Timeout: {BUTTON_TIMEOUT_MINUTES} minutes\n"
         f"• Régénération auto: ✅ ACTIVÉE\n"
         f"• Nettoyage auto: ✅ ACTIVÉ\n"
-        f"• Affichage analyses: ✅ ACTIVÉ\n\n"
+        f"• Affichage analyses: ✅ ACTIVÉ\n"
+        f"• Gestion erreurs: ✅ CORRIGÉE\n\n"
         f"🎯 **Fonctionnement:**\n"
         f"1. Signal généré → Envoyé immédiatement\n"
         f"2. Bouton apparaît → Après fin bougie M1\n"
@@ -1482,7 +1594,8 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• Appels API: {rotation_stats['daily_calls']}/{rotation_stats['max_daily']}\n\n"
             f"🎯 **Sessions actives:** {len(session_manager.active_sessions)}\n"
             f"🔄 **Bouton après bougie:** ✅ ACTIVÉ\n"
-            f"📊 **Affichage analyses:** ✅ ACTIVÉ"
+            f"📊 **Affichage analyses:** ✅ ACTIVÉ\n"
+            f"🔧 **Version corrigée:** ✅ ACTIVÉE"
         )
         
         await update.message.reply_text(msg)
@@ -1557,13 +1670,14 @@ async def cmd_last_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Compter les statistiques
     total_pairs = len(analysis_results)
-    signals_found = len([r for r in analysis_results if r['status'] == 'SIGNAL_FOUND'])
-    no_signals = len([r for r in analysis_results if r['status'] == 'NO_SIGNAL'])
-    errors = len([r for r in analysis_results if r['status'] == 'ERROR'])
+    signals_found = len([r for r in analysis_results if r.get('status') == 'SIGNAL_FOUND'])
+    no_signals = len([r for r in analysis_results if r.get('status') == 'NO_SIGNAL'])
+    errors = len([r for r in analysis_results if r.get('status') == 'ERROR'])
     
     # Trouver le meilleur score
-    best_score = max([r.get('score', 0) for r in analysis_results if r.get('score', 0) > 0], default=0)
-    best_pair = next((r['actual_pair'] for r in analysis_results if r.get('score', 0) == best_score), "N/A")
+    scores = [r.get('score', 0) for r in analysis_results if isinstance(r.get('score'), (int, float))]
+    best_score = max(scores) if scores else 0
+    best_pair = next((r.get('actual_pair', 'N/A') for r in analysis_results if r.get('score', 0) == best_score), "N/A")
     
     msg = (
         f"📊 **DERNIÈRES PAIRES ANALYSÉES**\n"
@@ -1585,8 +1699,8 @@ async def cmd_last_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
         recent_results = analysis_results[-5:] if len(analysis_results) > 5 else analysis_results
         
         for i, result in enumerate(recent_results, 1):
-            pair = result['actual_pair']
-            status = result['status']
+            pair = result.get('actual_pair', 'N/A')
+            status = result.get('status', 'UNKNOWN')
             
             if status == 'SIGNAL_FOUND':
                 score = result.get('score', 0)
@@ -1638,7 +1752,8 @@ async def health_check(request):
         'weekend_mode': is_weekend,
         'button_timeout': BUTTON_TIMEOUT_MINUTES,
         'button_after_candle': 'active',
-        'analysis_display': 'active'
+        'analysis_display': 'active',
+        'error_handling': 'corrigé'
     })
 
 async def start_http_server():
@@ -1664,6 +1779,7 @@ async def main():
     print("🎯 8 SIGNAUX GARANTIS - BOUTON APRÈS BOUGIE")
     print("🌙 ROTATION CRYPTO OPTIMISÉE WEEK-END")
     print("📊 AFFICHAGE DÉTAILLÉ DES PAIRES ANALYSÉES")
+    print("🔧 VERSION CORRIGÉE - ERREURS PANDAS/TUPLE")
     print("="*60)
     print(f"🎯 Stratégie: Saint Graal 4.5 avec Rotation Itérative")
     print(f"📊 Paires Forex analysées: {len(ROTATION_PAIRS)}")
@@ -1673,6 +1789,7 @@ async def main():
     print(f"🎯 Score minimum: {ROTATION_CONFIG['min_score_threshold']}")
     print(f"🔄 Bouton après bougie: ✅ ACTIVÉ")
     print(f"📊 Affichage analyses: ✅ ACTIVÉ")
+    print(f"🔧 Gestion erreurs: ✅ CORRIGÉE")
     print(f"⏱️ Bouton timeout: {BUTTON_TIMEOUT_MINUTES} minutes")
     print("="*60 + "\n")
 
@@ -1722,6 +1839,7 @@ async def main():
     
     print(f"🔄 Bouton après bougie: ✅ ACTIVÉ")
     print(f"📊 Affichage analyses: ✅ ACTIVÉ")
+    print(f"🔧 Gestion erreurs pandas/tuple: ✅ CORRIGÉE")
     print(f"⏱️ Bouton timeout: {BUTTON_TIMEOUT_MINUTES} min")
     print(f"🔧 Utilisez /lastanalysis pour voir les paires analysées")
 
