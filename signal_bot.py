@@ -1,8 +1,8 @@
 """
-signal_bot.py - Bot de trading M1 - Version Saint Graal 4.5
+signal_bot.py - Bot de trading M1 - Version Saint Graal 5.0
 Analyse multi-marchés par rotation itérative avec bouton persistant
 Rotation Crypto optimisée pour week-end avec affichage des paires analysées
-Correction des erreurs de fréquence pandas et de traitement des tuples
+CORRIGÉ : Utilisation de get_signal_saint_graal avec return_dict=True
 """
 
 import os, json, asyncio, random, traceback, time, html, hashlib
@@ -23,9 +23,9 @@ from aiohttp import web
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
-# Import des modules externes - CRITIQUE : pas de fallback
-from utils import get_signal_with_metadata
-print("✅ Utils importé avec succès - Fonction: get_signal_with_metadata")
+# Import des modules externes - CORRIGÉ : utilise get_signal_saint_graal
+from utils import get_signal_saint_graal
+print("✅ Utils importé avec succès - Fonction: get_signal_saint_graal")
 
 from config import *
 print("✅ Config importé avec succès")
@@ -441,9 +441,7 @@ def fetch_ohlc_with_limits(pair, interval, outputsize=300, signal_id=None):
         df.set_index('datetime', inplace=True)
         
         # CORRECTION: Éviter les problèmes de fréquence pandas
-        # Utiliser 'min' au lieu de 'T' pour éviter l'erreur "Invalid frequency: 5T"
         try:
-            # Essayer de définir la fréquence mais ne pas lever d'exception si ça échoue
             df.index.freq = pd.infer_freq(df.index)
         except:
             pass
@@ -561,7 +559,7 @@ async def analyze_multiple_markets_iterative(user_id, session_count, signal_id=N
     """
     Analyse itérative de plusieurs marchés
     Rotation Crypto optimisée pour week-end
-    RETOURNE: (signal_data, total_pairs_analyzed, total_batches, analysis_results)
+    CORRIGÉ : Utilisation de get_signal_saint_graal avec return_dict=True
     """
     print(f"\n[ROTATION] 🔄 Analyse itérative pour signal #{session_count}")
     
@@ -580,7 +578,7 @@ async def analyze_multiple_markets_iterative(user_id, session_count, signal_id=N
     best_score = 0
     total_analyzed = 0
     batch_count = 0
-    analysis_results = []  # Stocke les résultats d'analyse de chaque paire
+    analysis_results = []
     
     for batch_start in range(0, len(shuffled_pairs), ROTATION_CONFIG['pairs_per_batch']):
         batch_count += 1
@@ -628,19 +626,18 @@ async def analyze_multiple_markets_iterative(user_id, session_count, signal_id=N
                     print(f"[ROTATION] ❌ {actual_pair}: données insuffisantes")
                     continue
                 
-                # 🔥 UTILISATION EXCLUSIVE DE get_signal_with_metadata
-                # CORRECTION: Ajout d'un try-except spécifique pour gérer les erreurs de pandas
+                # 🔥 CORRIGÉ : Utilisation de get_signal_saint_graal avec return_dict=True
                 try:
-                    signal_data = get_signal_with_metadata(
+                    signal_data = get_signal_saint_graal(
                         df, 
                         signal_count=session_count-1,
-                        total_signals=SIGNALS_PER_SESSION
+                        total_signals=SIGNALS_PER_SESSION,
+                        return_dict=True  # ← CORRECTION CRITIQUE
                     )
                 except Exception as utils_error:
                     error_msg = str(utils_error)
-                    print(f"[ROTATION] ⚠️ Erreur dans get_signal_with_metadata: {error_msg[:100]}")
+                    print(f"[ROTATION] ⚠️ Erreur dans get_signal_saint_graal: {error_msg[:100]}")
                     
-                    # Enregistrer l'erreur et passer à la paire suivante
                     result = {
                         'original_pair': pair,
                         'actual_pair': actual_pair,
@@ -667,15 +664,30 @@ async def analyze_multiple_markets_iterative(user_id, session_count, signal_id=N
                     print(f"[ROTATION] ❌ {actual_pair}: aucun signal")
                     continue
                 
-                # CORRECTION: Vérifier que signal_data est un dictionnaire
+                # Vérification du format (doit être un dictionnaire)
                 if not isinstance(signal_data, dict):
-                    print(f"[ROTATION] ⚠️ Format de signal invalide pour {actual_pair}")
+                    print(f"[ROTATION] ⚠️ Format de signal invalide pour {actual_pair}: {type(signal_data)}")
                     result = {
                         'original_pair': pair,
                         'actual_pair': actual_pair,
                         'status': 'ERROR',
                         'score': 0,
-                        'reason': 'Format de signal invalide',
+                        'reason': f'Format invalide: {type(signal_data)}',
+                        'batch': batch_count,
+                        'position': batch_pairs.index(pair) + 1
+                    }
+                    analysis_results.append(result)
+                    continue
+                
+                # Vérifier les clés essentielles
+                if 'score' not in signal_data:
+                    print(f"[ROTATION] ⚠️ Clé 'score' manquante pour {actual_pair}")
+                    result = {
+                        'original_pair': pair,
+                        'actual_pair': actual_pair,
+                        'status': 'ERROR',
+                        'score': 0,
+                        'reason': "Clé 'score' manquante",
                         'batch': batch_count,
                         'position': batch_pairs.index(pair) + 1
                     }
@@ -729,7 +741,6 @@ async def analyze_multiple_markets_iterative(user_id, session_count, signal_id=N
                 error_msg = str(e)
                 print(f"[ROTATION] ❌ Erreur sur {pair}: {error_msg[:100]}")
                 
-                # Déterminer actual_pair même en cas d'erreur
                 actual_pair = get_current_pair(pair)
                 
                 result = {
@@ -769,10 +780,7 @@ async def analyze_multiple_markets_iterative(user_id, session_count, signal_id=N
 
 # ================= GESTION BOUTON PERSISTANT =================
 async def create_signal_button(user_id: int, app, message_id: int = None) -> int:
-    """
-    Crée ou met à jour un bouton pour générer le prochain signal
-    Retourne l'ID du message contenant le bouton
-    """
+    """Crée ou met à jour un bouton pour générer le prochain signal"""
     session = session_manager.get_session(user_id)
     if not session:
         return None
@@ -785,7 +793,6 @@ async def create_signal_button(user_id: int, app, message_id: int = None) -> int
     
     try:
         if message_id:
-            # Mettre à jour le message existant
             await app.bot.edit_message_reply_markup(
                 chat_id=user_id,
                 message_id=message_id,
@@ -793,7 +800,6 @@ async def create_signal_button(user_id: int, app, message_id: int = None) -> int
             )
             return message_id
         else:
-            # Créer un nouveau message avec bouton
             message = await app.bot.send_message(
                 chat_id=user_id,
                 text=f"🔄 **Bouton actif pour le signal #{next_signal_num}**\n"
@@ -803,7 +809,6 @@ async def create_signal_button(user_id: int, app, message_id: int = None) -> int
                 reply_markup=reply_markup
             )
             
-            # Planifier la régénération automatique
             asyncio.create_task(schedule_button_regeneration(user_id, app, message.message_id))
             
             return message.message_id
@@ -812,14 +817,10 @@ async def create_signal_button(user_id: int, app, message_id: int = None) -> int
         return None
 
 async def schedule_button_regeneration(user_id: int, app, message_id: int):
-    """
-    Planifie la régénération automatique du bouton après timeout
-    """
+    """Planifie la régénération automatique du bouton après timeout"""
     try:
-        # Attendre le timeout
         await asyncio.sleep(BUTTON_TIMEOUT_MINUTES * 60)
         
-        # Vérifier si la session est toujours active
         session = session_manager.get_session(user_id)
         if not session or session['status'] != 'active':
             return
@@ -829,11 +830,9 @@ async def schedule_button_regeneration(user_id: int, app, message_id: int):
         
         print(f"🔄 Régénération automatique du bouton pour l'utilisateur {user_id}")
         
-        # Régénérer le bouton
         new_message_id = await create_signal_button(user_id, app, message_id)
         
         if new_message_id:
-            # Mettre à jour la session
             if 'active_buttons' not in session:
                 session['active_buttons'] = []
             
@@ -849,30 +848,23 @@ async def schedule_button_regeneration(user_id: int, app, message_id: int):
         print(f"❌ Erreur régénération bouton: {e}")
 
 async def cleanup_old_buttons(user_id: int, app):
-    """
-    Nettoie les anciens boutons
-    """
+    """Nettoie les anciens boutons"""
     session = session_manager.get_session(user_id)
     if not session or 'active_buttons' not in session:
         return
     
-    for message_id in session['active_buttons'][:-1]:  # Garder seulement le dernier
+    for message_id in session['active_buttons'][:-1]:
         try:
             await app.bot.delete_message(chat_id=user_id, message_id=message_id)
         except:
             pass
     
-    # Garder seulement le dernier bouton
     if session['active_buttons']:
         session['active_buttons'] = [session['active_buttons'][-1]]
 
 # ================= GÉNÉRATION DE SIGNAL =================
 async def generate_m1_signal_with_iterative_rotation(user_id, app):
-    """
-    Génère un signal avec rotation itérative - PAS DE FALLBACK
-    Rotation Crypto optimisée pour week-end
-    RETOURNE: (signal_id, analysis_results) ou (None, analysis_results)
-    """
+    """Génère un signal avec rotation itérative"""
     global current_signal_id
     
     try:
@@ -887,28 +879,23 @@ async def generate_m1_signal_with_iterative_rotation(user_id, app):
         
         print(f"\n[SIGNAL] 🔄 Génération signal #{session_count}")
         
-        # Vérifier mode week-end
         is_weekend = otc_provider.is_weekend()
         if is_weekend:
             print(f"[SIGNAL] 🌙 MODE WEEK-END: Rotation exclusive sur 5 paires Crypto")
         
-        # Analyse multi-marchés - PAS DE FALLBACK
         signal_data, total_pairs_analyzed, total_batches, analysis_results = await analyze_multiple_markets_iterative(
             user_id, 
             session_count,
             signal_id=signal_tracking_id
         )
         
-        # Stocker les résultats d'analyse dans la session
         session_manager.store_analysis_results(user_id, analysis_results)
         
-        # 🔥 AUCUN FALLBACK - SI PAS DE SIGNAL, RETOURNER None
         if signal_data is None:
             pair_type = "Crypto" if is_weekend else "Forex"
             print(f"[SIGNAL] ❌ Aucun signal valide trouvé après analyse {pair_type}")
             return None, analysis_results
         
-        # CORRECTION: Vérification supplémentaire du format de signal_data
         if not isinstance(signal_data, dict):
             print(f"[SIGNAL] ⚠️ Format de signal_data invalide")
             return None, analysis_results
@@ -925,7 +912,6 @@ async def generate_m1_signal_with_iterative_rotation(user_id, app):
         
         print(f"[SIGNAL] 🎯 Meilleur signal: {pair} -> {direction} (Score: {score:.1f})")
         
-        # Machine Learning
         ml_signal, ml_conf = ml_predictor.predict_signal(None, direction)
         
         if ml_signal is None:
@@ -936,7 +922,6 @@ async def generate_m1_signal_with_iterative_rotation(user_id, app):
             ml_conf = CONFIDENCE_THRESHOLD + random.uniform(0.05, 0.15)
             print(f"[SIGNAL] ⚡ Confiance ML ajustée: {ml_conf:.1%}")
         
-        # Calcul des temps
         now_haiti = get_haiti_now()
         now_utc = get_utc_now()
         
@@ -949,7 +934,6 @@ async def generate_m1_signal_with_iterative_rotation(user_id, app):
         
         print(f"[SIGNAL_TIMING] ⏰ Heure entrée: {entry_time_haiti.strftime('%H:%M:%S')}")
         
-        # Persistence
         payload = {
             'pair': actual_pair,
             'direction': ml_signal, 
@@ -962,7 +946,7 @@ async def generate_m1_signal_with_iterative_rotation(user_id, app):
                 'actual_pair': actual_pair,
                 'user_id': user_id, 
                 'mode': 'Rotation Itérative Multi-Marchés',
-                'strategy': 'Saint Graal 4.5 avec Rotation Itérative',
+                'strategy': 'Saint Graal 5.0 avec Rotation Itérative',
                 'strategy_mode': mode_strat,
                 'strategy_quality': quality,
                 'strategy_score': score,
@@ -977,7 +961,7 @@ async def generate_m1_signal_with_iterative_rotation(user_id, app):
                     'api_stats': api_manager.get_stats(),
                     'is_weekend': is_weekend_mode,
                     'crypto_pairs': CRYPTO_PAIRS if is_weekend_mode else [],
-                    'analysis_results': analysis_results  # Ajout des résultats détaillés
+                    'analysis_results': analysis_results
                 },
                 'session_count': session_count,
                 'session_total': SIGNALS_PER_SESSION,
@@ -989,7 +973,7 @@ async def generate_m1_signal_with_iterative_rotation(user_id, app):
             }),
             'max_gales': 0,
             'timeframe': 1,
-            'button_message_id': None  # À remplir après création du bouton
+            'button_message_id': None
         }
         
         signal_id = persist_signal(user_id, payload)
@@ -1006,44 +990,34 @@ async def generate_m1_signal_with_iterative_rotation(user_id, app):
 
 # ================= FONCTION POUR BOUTON APRÈS BOUGIE =================
 async def schedule_button_after_candle(signal_id, user_id, app, entry_time):
-    """
-    Programme l'envoi du bouton APRÈS la fin de la bougie M1
-    """
+    """Programme l'envoi du bouton APRÈS la fin de la bougie M1"""
     try:
         print(f"[BOUGIE-BOUTON] ⏰ Programmation bouton pour signal #{signal_id}")
         
-        # Calculer la fin de la bougie M1 (1 minute après l'entrée)
         candle_end_time = entry_time + timedelta(minutes=1)
         now_utc = get_utc_now()
         
-        # Attendre EXACTEMENT la fin de la bougie
         wait_seconds = max(0, (candle_end_time - now_utc).total_seconds())
         
         if wait_seconds > 0:
             print(f"[BOUGIE-BOUTON] ⏳ Attente de {wait_seconds:.0f}s pour fin de bougie")
             await asyncio.sleep(wait_seconds)
         
-        # ENVOYER LE BOUTON IMMÉDIATEMENT APRÈS FIN BOUGIE
         print(f"[BOUGIE-BOUTON] ✅ Bougie terminée, envoi bouton IMMÉDIAT pour signal #{signal_id}")
         
-        # Créer le bouton
         session = session_manager.get_session(user_id)
         if not session:
             return
         
-        # Nettoyer les anciens boutons
         await cleanup_old_buttons(user_id, app)
         
-        # Créer un nouveau bouton
         new_message_id = await create_signal_button(user_id, app)
         
         if new_message_id:
-            # Mettre à jour la session
             if 'active_buttons' not in session:
                 session['active_buttons'] = []
             session['active_buttons'].append(new_message_id)
             
-            # Envoyer un message d'information
             try:
                 info_msg = (
                     f"🔄 **Bougie terminée**\n"
@@ -1092,14 +1066,14 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             mode_text += f"\n🎯 Paires Crypto: {', '.join(CRYPTO_PAIRS)}"
         
         await update.message.reply_text(
-            f"✅ **Bienvenue au Bot Trading Saint Graal 4.5 !**\n\n"
+            f"✅ **Bienvenue au Bot Trading Saint Graal 5.0 !**\n\n"
             f"🎯 Rotation Itérative Multi-Marchés\n"
             f"📊 {len(ROTATION_PAIRS)} paires disponibles\n"
             f"🌙 {len(CRYPTO_PAIRS)} paires Crypto week-end\n"
             f"🔄 Bouton après bougie avec régénération automatique\n"
             f"⏱️ Timeout bouton: {BUTTON_TIMEOUT_MINUTES} minutes\n"
             f"📈 Affichage détaillé des paires analysées\n"
-            f"🔧 Version corrigée: Gestion des erreurs pandas\n"
+            f"🔧 Version 5.0: get_signal_saint_graal avec return_dict=True\n"
             f"🌐 Mode actuel: {mode_text}\n\n"
             f"**Commandes:**\n"
             f"• /startsession - Démarrer session\n"
@@ -1119,7 +1093,7 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         crypto_section = f"📈 **MODE FOREX:**\n• Rotation standard\n• {len(ROTATION_PAIRS)} paires analysées\n"
     
     menu_text = (
-        f"📋 **MENU SAINT GRAAL 4.5**\n"
+        f"📋 **MENU SAINT GRAAL 5.0**\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         f"{crypto_section}\n"
         "**📊 Session:**\n"
@@ -1139,7 +1113,7 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🌙 Paires Crypto: {len(CRYPTO_PAIRS)}\n"
         f"🔄 Bouton timeout: {BUTTON_TIMEOUT_MINUTES} min\n"
         f"📊 Affichage analyses: ✅ ACTIVÉ\n"
-        f"🔧 Version: Corrigée (pandas errors)\n"
+        f"🔧 Version: 5.0 (return_dict=True)\n"
     )
     await update.message.reply_text(menu_text)
 
@@ -1151,7 +1125,6 @@ async def cmd_start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if session and session['status'] == 'active':
         next_num = session['next_signal_number']
         
-        # D'ABORD LE TEXTE
         await update.message.reply_text(
             f"⚠️ Session déjà active !\n\n"
             f"📊 Progression: {session['signal_count']}/{SIGNALS_PER_SESSION}\n"
@@ -1160,7 +1133,6 @@ async def cmd_start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Continuer avec signal #{next_num} ⬇️"
         )
         
-        # ENSUITE LE BOUTON
         keyboard = [[InlineKeyboardButton(
             f"🎯 Générer Signal #{next_num}", 
             callback_data=f"gen_signal_{user_id}"
@@ -1173,7 +1145,6 @@ async def cmd_start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    # Créer nouvelle session
     session = session_manager.create_session(user_id)
     
     is_weekend = otc_provider.is_weekend()
@@ -1183,7 +1154,6 @@ async def cmd_start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
         crypto_details = f"🎯 Paires Crypto: {', '.join(CRYPTO_PAIRS)}"
         mode_text += f"\n{crypto_details}"
     
-    # D'ABORD LE TEXTE DE SESSION DÉMARRÉE
     await update.message.reply_text(
         f"🚀 **SESSION DÉMARRÉE**\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -1193,11 +1163,10 @@ async def cmd_start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🔄 Bouton timeout: {BUTTON_TIMEOUT_MINUTES} minutes\n"
         f"⚡ Bouton après bougie: ACTIVÉ\n"
         f"📊 Affichage analyses: ACTIVÉ\n"
-        f"🔧 Version: Corrigée (pandas errors)\n\n"
+        f"🔧 Version 5.0: get_signal_saint_graal avec return_dict=True\n\n"
         f"Cliquez sur le bouton pour commencer ⬇️"
     )
     
-    # ENSUITE LE BOUTON
     keyboard = [[InlineKeyboardButton(
         "🎯 Générer Signal #1", 
         callback_data=f"gen_signal_{user_id}"
@@ -1219,7 +1188,6 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
     
     user_id = int(query.data.split('_')[2])
     
-    # Vérifier si la session est active
     can_generate, reason = session_manager.can_generate_signal(user_id)
     if not can_generate:
         await query.edit_message_text(f"❌ {reason}\n\nUtilisez /startsession")
@@ -1227,11 +1195,9 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
     
     session = session_manager.get_session(user_id)
     
-    # Déterminer mode
     is_weekend = otc_provider.is_weekend()
     mode_text = "🌙 Crypto" if is_weekend else "📈 Forex"
     
-    # Mettre à jour le message avec état
     await query.edit_message_text(
         f"🔄 **Génération du signal #{session['next_signal_number']}**\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -1240,15 +1206,12 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
         f"⏱️ Patientez quelques secondes..."
     )
     
-    # Générer le signal - PAS DE FALLBACK
     signal_id, analysis_results = await generate_m1_signal_with_iterative_rotation(user_id, context.application)
     
     if signal_id:
-        # Mettre à jour la session
         session_manager.update_signal_count(user_id)
         session['pending_signals'] += 1
         
-        # Récupérer les infos du signal
         with engine.connect() as conn:
             signal = conn.execute(
                 text("SELECT pair, direction, confidence, payload_json, ts_enter FROM signals WHERE id = :sid"),
@@ -1268,7 +1231,6 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
             direction_text = "BUY ↗️" if direction == "CALL" else "SELL ↘️"
             entry_time_formatted = entry_time.strftime('%H:%M')
             
-            # Info rotation avec résultats d'analyse
             rotation_info = ""
             if analysis_results:
                 analyzed_count = len(analysis_results)
@@ -1276,7 +1238,6 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
                 pair_type = "Crypto 🌙" if is_weekend else "Forex 📈"
                 rotation_info = f"\n🔄 {analyzed_count} paires {pair_type} analysées ({successful_analysis} avec signal)"
             
-            # Envoyer le signal
             signal_msg = (
                 f"🎯 **SIGNAL #{session['signal_count']} - ROTATION ITÉRATIVE**\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -1295,27 +1256,21 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
             except Exception as e:
                 print(f"[SIGNAL] ❌ Erreur envoi: {e}")
         
-        # Nettoyer les anciens boutons
         await cleanup_old_buttons(user_id, context.application)
         
-        # Vérifier si la session est terminée
         if session['signal_count'] >= SIGNALS_PER_SESSION:
             await end_session_summary(user_id, context.application)
             return
         
-        # PROGRAMMER LE BOUTON APRÈS LA BOUGIE
         if signal:
-            # Planifier l'envoi du bouton après la bougie
             button_task = asyncio.create_task(
                 schedule_button_after_candle(signal_id, user_id, context.application, entry_time_utc)
             )
             
-            # Stocker la tâche dans la session
             if 'button_tasks' not in session:
                 session['button_tasks'] = []
             session['button_tasks'].append(button_task)
         
-        # Message de confirmation
         confirmation_msg = (
             f"✅ **Signal #{session['signal_count']} généré!**\n"
             f"━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -1326,13 +1281,10 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
         
         await query.edit_message_text(confirmation_msg)
     else:
-        # 🔥 AUCUN SIGNAL TROUVÉ - AFFICHAGE DÉTAILLÉ DES PAIRES ANALYSÉES
         pair_type = "Crypto" if is_weekend else "Forex"
         
-        # Préparer la liste des paires analysées
         analyzed_pairs_text = ""
         if analysis_results:
-            # Grouper par batch
             batches = {}
             for result in analysis_results:
                 batch_num = result.get('batch', 0)
@@ -1363,13 +1315,11 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
                     else:
                         analyzed_pairs_text += f"{i}. {pair_display} ❓ - État inconnu\n"
             
-            # Ajouter un résumé
             total_pairs = len(analysis_results)
             signals_found = len([r for r in analysis_results if r.get('status') == 'SIGNAL_FOUND'])
             errors = len([r for r in analysis_results if r.get('status') == 'ERROR'])
             no_signals = len([r for r in analysis_results if r.get('status') == 'NO_SIGNAL'])
             
-            # Trouver le meilleur score
             scores = [r.get('score', 0) for r in analysis_results if isinstance(r.get('score'), (int, float))]
             best_score = max(scores) if scores else 0
             
@@ -1383,7 +1333,6 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
         else:
             analyzed_pairs_text = "❌ Aucune paire n'a pu être analysée."
         
-        # Message d'erreur détaillé
         error_msg = (
             f"❌ **Aucun signal valide trouvé**\n"
             f"━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -1398,7 +1347,6 @@ async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT
         
         await query.edit_message_text(error_msg)
         
-        # Recréer un bouton pour réessayer
         new_message_id = await create_signal_button(user_id, context.application)
         
         if new_message_id:
@@ -1421,7 +1369,6 @@ async def cmd_session_status(update: Update, context: ContextTypes.DEFAULT_TYPE)
     is_weekend = otc_provider.is_weekend()
     mode_text = "🌙 Mode Crypto (Week-end)" if is_weekend else "📈 Mode Forex"
     
-    # Récupérer les dernières analyses
     analysis_results = session_manager.get_last_analysis_results(user_id)
     last_analysis_info = ""
     if analysis_results:
@@ -1529,7 +1476,7 @@ async def cmd_rotation_stats(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"🎯 Score minimum: {ROTATION_CONFIG['min_score_threshold']}\n"
         f"⚡ Recherche itérative: {'✅ OUI' if ROTATION_CONFIG['enable_iterative_search'] else '❌ NON'}\n"
         f"📊 Affichage analyses: ✅ ACTIVÉ\n"
-        f"🔧 Version corrigée: ✅ ACTIVÉE\n\n"
+        f"🔧 Version 5.0: ✅ get_signal_saint_graal avec return_dict=True\n\n"
         f"🌐 **API Stats:**\n"
         f"• Appels aujourd'hui: {stats['daily_calls']}/{stats['max_daily']}\n"
         f"• Appels dernière minute: {stats['recent_minute']}/{stats['max_minute']}\n"
@@ -1550,7 +1497,7 @@ async def cmd_button_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• Régénération auto: ✅ ACTIVÉE\n"
         f"• Nettoyage auto: ✅ ACTIVÉ\n"
         f"• Affichage analyses: ✅ ACTIVÉ\n"
-        f"• Gestion erreurs: ✅ CORRIGÉE\n\n"
+        f"• Version fonction: 5.0 ✅\n\n"
         f"🎯 **Fonctionnement:**\n"
         f"1. Signal généré → Envoyé immédiatement\n"
         f"2. Bouton apparaît → Après fin bougie M1\n"
@@ -1595,7 +1542,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🎯 **Sessions actives:** {len(session_manager.active_sessions)}\n"
             f"🔄 **Bouton après bougie:** ✅ ACTIVÉ\n"
             f"📊 **Affichage analyses:** ✅ ACTIVÉ\n"
-            f"🔧 **Version corrigée:** ✅ ACTIVÉE"
+            f"🔧 **Version 5.0:** ✅ get_signal_saint_graal avec return_dict=True"
         )
         
         await update.message.reply_text(msg)
@@ -1664,17 +1611,14 @@ async def cmd_last_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("ℹ️ Aucune analyse disponible.\nGénérez un signal avec le bouton pour voir les résultats.")
         return
     
-    # Préparer le message
     is_weekend = otc_provider.is_weekend()
     pair_type = "Crypto" if is_weekend else "Forex"
     
-    # Compter les statistiques
     total_pairs = len(analysis_results)
     signals_found = len([r for r in analysis_results if r.get('status') == 'SIGNAL_FOUND'])
     no_signals = len([r for r in analysis_results if r.get('status') == 'NO_SIGNAL'])
     errors = len([r for r in analysis_results if r.get('status') == 'ERROR'])
     
-    # Trouver le meilleur score
     scores = [r.get('score', 0) for r in analysis_results if isinstance(r.get('score'), (int, float))]
     best_score = max(scores) if scores else 0
     best_pair = next((r.get('actual_pair', 'N/A') for r in analysis_results if r.get('score', 0) == best_score), "N/A")
@@ -1693,7 +1637,6 @@ async def cmd_last_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🎯 Score minimum requis: {ROTATION_CONFIG['min_score_threshold']}"
     )
     
-    # Ajouter les 5 dernières paires analysées
     if analysis_results:
         msg += f"\n\n📋 **5 dernières analyses:**\n"
         recent_results = analysis_results[-5:] if len(analysis_results) > 5 else analysis_results
@@ -1753,7 +1696,9 @@ async def health_check(request):
         'button_timeout': BUTTON_TIMEOUT_MINUTES,
         'button_after_candle': 'active',
         'analysis_display': 'active',
-        'error_handling': 'corrigé'
+        'signal_function': 'get_signal_saint_graal',
+        'signal_return_type': 'dict',
+        'version': '5.0'
     })
 
 async def start_http_server():
@@ -1775,13 +1720,13 @@ async def start_http_server():
 # ================= POINT D'ENTRÉE =================
 async def main():
     print("\n" + "="*60)
-    print("🤖 BOT SAINT GRAAL 4.5 - ROTATION ITÉRATIVE")
+    print("🤖 BOT SAINT GRAAL 5.0 - ROTATION ITÉRATIVE")
     print("🎯 8 SIGNAUX GARANTIS - BOUTON APRÈS BOUGIE")
     print("🌙 ROTATION CRYPTO OPTIMISÉE WEEK-END")
     print("📊 AFFICHAGE DÉTAILLÉ DES PAIRES ANALYSÉES")
-    print("🔧 VERSION CORRIGÉE - ERREURS PANDAS/TUPLE")
+    print("🔧 VERSION 5.0 - get_signal_saint_graal avec return_dict=True")
     print("="*60)
-    print(f"🎯 Stratégie: Saint Graal 4.5 avec Rotation Itérative")
+    print(f"🎯 Stratégie: Saint Graal 5.0 avec Rotation Itérative")
     print(f"📊 Paires Forex analysées: {len(ROTATION_PAIRS)}")
     print(f"🌙 Paires Crypto week-end: {len(CRYPTO_PAIRS)}")
     print(f"🔄 Batch: {ROTATION_CONFIG['pairs_per_batch']} paires")
@@ -1789,20 +1734,16 @@ async def main():
     print(f"🎯 Score minimum: {ROTATION_CONFIG['min_score_threshold']}")
     print(f"🔄 Bouton après bougie: ✅ ACTIVÉ")
     print(f"📊 Affichage analyses: ✅ ACTIVÉ")
-    print(f"🔧 Gestion erreurs: ✅ CORRIGÉE")
+    print(f"🔧 Fonction signal: get_signal_saint_graal avec return_dict=True")
     print(f"⏱️ Bouton timeout: {BUTTON_TIMEOUT_MINUTES} minutes")
     print("="*60 + "\n")
 
-    # Initialiser la base de données
     ensure_db()
 
-    # Démarrer le serveur HTTP
     http_runner = await start_http_server()
 
-    # Configurer l'application Telegram
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     
-    # Commandes principales
     app.add_handler(CommandHandler('start', cmd_start))
     app.add_handler(CommandHandler('menu', cmd_menu))
     app.add_handler(CommandHandler('startsession', cmd_start_session))
@@ -1811,7 +1752,6 @@ async def main():
     app.add_handler(CommandHandler('forceend', cmd_force_end))
     app.add_handler(CommandHandler('stats', cmd_stats))
     
-    # Commandes rotation et analyse
     app.add_handler(CommandHandler('rotationstats', cmd_rotation_stats))
     app.add_handler(CommandHandler('buttonconfig', cmd_button_config))
     app.add_handler(CommandHandler('pairslist', cmd_pairslist))
@@ -1819,7 +1759,6 @@ async def main():
     app.add_handler(CommandHandler('lastanalysis', cmd_last_analysis))
     app.add_handler(CommandHandler('apistats', cmd_apistats))
     
-    # Callbacks
     app.add_handler(CallbackQueryHandler(callback_generate_signal, pattern=r'^gen_signal_'))
     
     await app.initialize()
@@ -1839,7 +1778,7 @@ async def main():
     
     print(f"🔄 Bouton après bougie: ✅ ACTIVÉ")
     print(f"📊 Affichage analyses: ✅ ACTIVÉ")
-    print(f"🔧 Gestion erreurs pandas/tuple: ✅ CORRIGÉE")
+    print(f"🔧 Fonction signal: get_signal_saint_graal avec return_dict=True")
     print(f"⏱️ Bouton timeout: {BUTTON_TIMEOUT_MINUTES} min")
     print(f"🔧 Utilisez /lastanalysis pour voir les paires analysées")
 
