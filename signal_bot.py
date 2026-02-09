@@ -152,7 +152,7 @@ ROTATION_CONFIG = {
     'min_data_points': 100,
     'api_cooldown_seconds': 2,
     'batch_cooldown_seconds': 1,
-    'min_score_threshold': 85,
+    'min_score_threshold': 70,
     'max_api_calls_per_signal': 12,
     'enable_iterative_search': True,
     'continue_if_no_signal': True,
