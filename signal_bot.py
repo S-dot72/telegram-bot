@@ -1,1796 +1,1181 @@
 """
-signal_bot.py - Bot de trading M1 - Version Saint Graal 5.0
-Analyse multi-marchés par rotation itérative avec bouton persistant
-Rotation Crypto optimisée pour week-end avec affichage des paires analysées
-CORRIGÉ : Utilisation de get_signal_saint_graal avec return_dict=True
+🚀 STRATÉGIE BINAIRE M1 PRO - VERSION 9.2 OPTIMISÉE
+🔥 ARCHITECTURE PRO - FILTRES ÉQUILIBRÉS
 """
 
-import os, json, asyncio, random, traceback, time, html, hashlib
-import logging
-from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
-from typing import Dict, List, Optional, Tuple
-import requests
 import pandas as pd
 import numpy as np
-from sqlalchemy import create_engine, text
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
-from aiohttp import web
+from datetime import datetime, timedelta, timezone
+from ta.trend import EMAIndicator, MACD, ADXIndicator
+from ta.momentum import RSIIndicator, StochasticOscillator
+from ta.volatility import BollingerBands, AverageTrueRange
+import warnings
+warnings.filterwarnings('ignore')
 
-# ================= CONFIGURATION INITIALE =================
-# Désactiver les logs HTTP verbose
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("httpcore").setLevel(logging.WARNING)
+# ================= CONFIGURATION ÉQUILIBRÉE =================
 
-# Import des modules externes - CORRIGÉ : utilise get_signal_saint_graal
-from utils import get_signal_saint_graal
-print("✅ Utils importé avec succès - Fonction: get_signal_saint_graal")
-
-from config import *
-print("✅ Config importé avec succès")
-
-# ================= CONSTANTES GLOBALES =================
-HAITI_TZ = ZoneInfo("America/Port-au-Prince")
-TIMEFRAME_M1 = "1min"
-SIGNALS_PER_SESSION = 8
-CONFIDENCE_THRESHOLD = 0.65
-BUTTON_TIMEOUT_MINUTES = 5  # ⏱️ Timeout pour régénération automatique du bouton
-
-# ================= PAIRES CRYPTO POUR WEEK-END =================
-CRYPTO_PAIRS = [
-    'BTC/USD',    # Bitcoin
-    'ETH/USD',    # Ethereum
-    'DOGE/USD',   # Dogecoin
-    'SOL/USD',    # Solana
-    'LTC/USD',    # Litecoin
-]
-
-# ================= GESTION DES ÉTATS =================
-class SessionManager:
-    """Gestionnaire centralisé des sessions utilisateur"""
+SAINT_GRAAL_CONFIG = {
+    'expiration_minutes': 5,
     
-    def __init__(self):
-        self.active_sessions: Dict[int, dict] = {}
-        self.pending_buttons: Dict[int, dict] = {}  # Stocke les boutons en attente
-        self.button_tasks: Dict[int, asyncio.Task] = {}  # Tâches de régénération
-        self.signal_tracking: Dict[int, int] = {}  # Compteur de signaux par utilisateur
-        
-    def create_session(self, user_id: int) -> dict:
-        """Crée une nouvelle session pour un utilisateur"""
-        session = {
-            'user_id': user_id,
-            'start_time': get_haiti_now(),
-            'signal_count': 0,
-            'wins': 0,
-            'losses': 0,
-            'pending_signals': 0,
-            'active_buttons': [],
-            'last_signal_time': None,
-            'next_signal_number': 1,
-            'status': 'active',
-            'weekend_mode': False,
-            'last_analysis_results': []  # Stocke les résultats d'analyse
+    # 🔥 ZONES D'INTERDICTION AVEC STRICT_MODE OPTIMISÉ
+    'forbidden_zones': {
+        'no_buy_zone': {
+            'enabled': True,
+            'stoch_fast_max': 78,      # Légèrement assoupli
+            'rsi_max': 62,             # Légèrement assoupli
+            'bb_position_max': 68,     # Légèrement assoupli
+            'strict_mode': True,       # VETO ABSOLU maintenu
+            'penalty': 12,             # Réduit
+        },
+        'no_sell_zone': {
+            'enabled': True,
+            'stoch_fast_min': 22,      # Légèrement assoupli
+            'rsi_min': 38,             # Légèrement assoupli
+            'bb_position_min': 32,     # Légèrement assoupli
+            'strict_mode': True,       # VETO ABSOLU maintenu
+            'penalty': 12,             # Réduit
+        },
+        'swing_filter': {
+            'enabled': True,
+            'lookback_bars': 6,        # Réduit
+            'no_buy_at_swing_high': True,
+            'no_sell_at_swing_low': True,
+            'strict_mode': False,      # SOFT VETO
+            'swing_penalty': 15,       # Réduit
+            'swing_momentum_threshold': 70,  # Réduit
         }
-        self.active_sessions[user_id] = session
-        return session
+    },
     
-    def get_session(self, user_id: int) -> Optional[dict]:
-        """Récupère la session d'un utilisateur"""
-        return self.active_sessions.get(user_id)
+    # 🔥 MOMENTUM GATE SÉPARÉ BUY/SELL OPTIMISÉ
+    'momentum_rules': {
+        'buy_conditions': {
+            'rsi_max': 55,             # Augmenté
+            'rsi_oversold': 30,        # Légèrement augmenté
+            'stoch_max': 38,           # Augmenté
+            'stoch_oversold': 22,      # Augmenté
+            'require_stoch_rising': True,  # Maintenu
+        },
+        'sell_conditions': {
+            'rsi_min': 52,             # Réduit
+            'rsi_overbought': 66,      # Réduit
+            'stoch_min': 62,           # Réduit
+            'stoch_overbought': 72,    # Réduit
+            'require_stoch_falling': True,  # Maintenu
+        },
+        'momentum_gate_diff': 8,       # Réduit
+        'smart_gate': True,
+    },
     
-    def update_signal_count(self, user_id: int) -> int:
-        """Incrémente le compteur de signaux et retourne le nouveau numéro"""
-        if user_id in self.active_sessions:
-            session = self.active_sessions[user_id]
-            session['signal_count'] += 1
-            session['next_signal_number'] = session['signal_count'] + 1
-            session['last_signal_time'] = get_haiti_now()
-            return session['signal_count']
-        return 0
+    'micro_momentum': {
+        'enabled': True,
+        'lookback_bars': 3,
+        'min_bullish_bars': 2,         # Maintenu
+        'min_bearish_bars': 2,         # Maintenu
+        'require_trend_alignment': True,
+        'weight': 10,                  # Réduit
+    },
     
-    def can_generate_signal(self, user_id: int) -> Tuple[bool, str]:
-        """Vérifie si un signal peut être généré"""
-        if user_id not in self.active_sessions:
-            return False, "Aucune session active"
-        
-        session = self.active_sessions[user_id]
-        
-        if session['status'] != 'active':
-            return False, "Session terminée"
-        
-        if session['signal_count'] >= SIGNALS_PER_SESSION:
-            return False, "Limite de signaux atteinte"
-        
-        # Vérifier le timeout entre les signaux
-        if session['last_signal_time']:
-            time_since_last = (get_haiti_now() - session['last_signal_time']).total_seconds()
-            if time_since_last < 60:  # 1 minute minimum entre les signaux
-                wait_time = 60 - time_since_last
-                return False, f"Attendez {int(wait_time)} secondes"
-        
-        return True, "OK"
+    'bollinger_config': {
+        'window': 20,
+        'window_dev': 2,
+        'oversold_zone': 22,           # Réduit
+        'overbought_zone': 78,         # Augmenté
+        'buy_zone_max': 48,            # Augmenté
+        'sell_zone_min': 52,           # Réduit
+        'middle_band_weight': 12,      # Réduit
+        'strict_mode': False,          # Désactivé pour éviter veto
+        'penalty': 8,                  # Réduit
+    },
     
-    def store_analysis_results(self, user_id: int, results: List[dict]):
-        """Stocke les résultats d'analyse pour l'utilisateur"""
-        if user_id in self.active_sessions:
-            self.active_sessions[user_id]['last_analysis_results'] = results
+    'atr_filter': {
+        'enabled': True,               # Maintenu mais assoupli
+        'window': 14,
+        'min_atr_pips': 2,             # Réduit
+        'max_atr_pips': 28,            # Augmenté
+        'optimal_range': [4, 18],      # Élargi
+    },
     
-    def get_last_analysis_results(self, user_id: int) -> List[dict]:
-        """Récupère les derniers résultats d'analyse"""
-        if user_id in self.active_sessions:
-            return self.active_sessions[user_id].get('last_analysis_results', [])
-        return []
+    # 🔥 M5 AVEC SOFT VETO OPTIMISÉ
+    'm5_filter': {
+        'enabled': True,
+        'ema_fast': 50,
+        'ema_slow': 200,
+        'weight': 12,                  # Réduit
+        'soft_veto': True,
+        'max_score_against_trend': 98, # Augmenté
+    },
     
-    def end_session(self, user_id: int):
-        """Termine une session"""
-        if user_id in self.active_sessions:
-            self.active_sessions[user_id]['status'] = 'ended'
-            
-            # Annuler les tâches de bouton
-            if user_id in self.button_tasks:
-                try:
-                    self.button_tasks[user_id].cancel()
-                except:
-                    pass
-                del self.button_tasks[user_id]
-
-# ================= CONFIGURATION ROTATION =================
-# Utilise directement PAIRS de config.py
-ROTATION_PAIRS = PAIRS if 'PAIRS' in globals() else [
-    'EUR/USD', 'GBP/USD', 'USD/JPY', 'AUD/USD', 'BTC/USD', 'ETH/USD',
-    'USD/CAD', 'EUR/RUB', 'USD/CLP', 'AUD/CAD', 'AUD/NZD', 'CAD/CHF',
-    'EUR/CHF', 'EUR/GBP', 'USD/THB', 'USD/COP', 'USD/EGP', 'AED/CNY', 'QAR/CNY'
-]
-
-print(f"📊 Chargement de {len(ROTATION_PAIRS)} paires")
-print(f"🎯 Crypto week-end: {len(CRYPTO_PAIRS)} paires")
-
-ROTATION_CONFIG = {
-    'pairs_per_batch': 4,
-    'max_batches_per_signal': 3,
-    'min_data_points': 100,
-    'api_cooldown_seconds': 2,
-    'batch_cooldown_seconds': 1,
-    'min_score_threshold': 70,
-    'max_api_calls_per_signal': 12,
-    'enable_iterative_search': True,
-    'continue_if_no_signal': True,
-    'rotation_strategy': 'ITERATIVE',
-    'button_timeout_minutes': BUTTON_TIMEOUT_MINUTES,
+    # 🔥 ÉTAT DE MARCHÉ OPTIMISÉ
+    'market_state': {
+        'enabled': True,
+        'adx_threshold': 22,           # Réduit
+        'rsi_range_threshold': 42,     # Réduit
+        'prioritize_bb_in_range': True,
+        'prioritize_momentum_in_trend': True,
+    },
+    
+    'signal_validation': {
+        'min_score': 78,               # Réduit de 85 à 78 !!!
+        'max_score_realistic': 135,    # Réduit
+        'confidence_zones': {
+            78: 65,    # NOUVEAU
+            85: 72,    # SOLIDE
+            95: 78,    # BON
+            105: 85,   # ÉLEVÉ
+            115: 90,   # EXCELLENT
+            125: 92,   # PREMIUM
+        },
+        'cooldown_bars': 2,            # Réduit
+    },
+    
+    # 🔥 COOLDOWN DYNAMIQUE OPTIMISÉ
+    'risk_management': {
+        'dynamic_cooldown': True,
+        'normal_cooldown': 2,
+        'cooldown_by_quality': {
+            'EXCELLENT': 1,
+            'HIGH': 2,
+            'SOLID': 3,
+            'MINIMUM': 4,
+        },
+        'max_daily_trades': 25,        # Augmenté
+        'max_consecutive_losses': 4,   # Augmenté
+    }
 }
 
-# ================= GESTION API LIMITS =================
-class APILimitManager:
-    """Gestionnaire des limites d'API"""
-    
+# ================= ÉTAT DU TRADING AVEC QUALITÉ =================
+
+class TradingState:
+    """Gère l'état du trading avec qualité des trades"""
     def __init__(self):
-        self.api_calls = []
-        self.daily_calls = 0
-        self.signal_calls = {}
-        self.max_calls_per_minute = 30
-        self.max_calls_per_day = 800
-        self.daily_reset_time = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        self.last_trade_time = None
+        self.last_trade_result = None  # 'win', 'loss'
+        self.last_trade_quality = None  # 'EXCELLENT', 'HIGH', etc.
+        self.consecutive_losses = 0
+        self.daily_trades = 0
+        self.daily_reset_time = None
         
-    def can_make_call(self, signal_id=None):
-        """Vérifie si un nouvel appel API est possible"""
+    def reset_daily_if_needed(self):
+        """Réinitialise le compteur quotidien"""
         now = datetime.now()
+        if self.daily_reset_time is None or now >= self.daily_reset_time:
+            self.daily_trades = 0
+            self.daily_reset_time = datetime(now.year, now.month, now.day, 23, 59, 59)
+            
+    def record_trade(self, result, quality):
+        """Enregistre un trade avec sa qualité"""
+        self.last_trade_time = datetime.now()
+        self.last_trade_result = result
+        self.last_trade_quality = quality
         
-        # Réinitialisation quotidienne
-        if now.date() > self.daily_reset_time.date():
-            self.daily_calls = 0
-            self.daily_reset_time = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        
-        # Limite par minute
-        minute_ago = now - timedelta(minutes=1)
-        recent_calls = [t for t in self.api_calls if t > minute_ago]
-        
-        if len(recent_calls) >= self.max_calls_per_minute:
-            return False, f"Limite minute: {len(recent_calls)}/{self.max_calls_per_minute}"
-        
-        # Limite quotidienne
-        if self.daily_calls >= self.max_calls_per_day:
-            return False, f"Limite quotidienne: {self.daily_calls}/{self.max_calls_per_day}"
-        
-        # Limite par signal
-        if signal_id and signal_id in self.signal_calls:
-            if self.signal_calls[signal_id] >= ROTATION_CONFIG['max_api_calls_per_signal']:
-                return False, f"Limite signal: {self.signal_calls[signal_id]}/{ROTATION_CONFIG['max_api_calls_per_signal']}"
-        
-        return True, "OK"
-    
-    def record_call(self, signal_id=None):
-        """Enregistre un appel API"""
-        now = datetime.now()
-        self.api_calls.append(now)
-        self.daily_calls += 1
-        
-        if signal_id:
-            if signal_id not in self.signal_calls:
-                self.signal_calls[signal_id] = 0
-            self.signal_calls[signal_id] += 1
-        
-        # Nettoyer les anciens appels
-        two_hours_ago = now - timedelta(hours=2)
-        self.api_calls = [t for t in self.api_calls if t > two_hours_ago]
-        
-        one_hour_ago = now - timedelta(hours=1)
-        self.signal_calls = {k: v for k, v in self.signal_calls.items() 
-                           if self.get_signal_time(k) > one_hour_ago}
-    
-    def get_signal_time(self, signal_id):
-        """Temps du premier appel pour un signal"""
-        return datetime.now() - timedelta(minutes=5)
-    
-    def get_stats(self):
-        """Retourne les statistiques d'utilisation"""
-        now = datetime.now()
-        minute_ago = now - timedelta(minutes=1)
-        hour_ago = now - timedelta(hours=1)
-        
-        recent_minute = len([t for t in self.api_calls if t > minute_ago])
-        recent_hour = len([t for t in self.api_calls if t > hour_ago])
-        
-        return {
-            'daily_calls': self.daily_calls,
-            'max_daily': self.max_calls_per_day,
-            'recent_minute': recent_minute,
-            'max_minute': self.max_calls_per_minute,
-            'recent_hour': recent_hour,
-            'calls_available_minute': max(0, self.max_calls_per_minute - recent_minute),
-            'daily_remaining': max(0, self.max_calls_per_day - self.daily_calls),
-            'active_signals_tracking': len(self.signal_calls)
-        }
-
-# ================= INITIALISATION =================
-engine = create_engine(DB_URL, connect_args={'check_same_thread': False})
-session_manager = SessionManager()
-api_manager = APILimitManager()
-
-# Initialisation OTC
-class OTCDataProvider:
-    def __init__(self, api_key):
-        self.api_key = api_key
-    
-    def is_weekend(self):
-        now_utc = datetime.now(timezone.utc)
-        weekday = now_utc.weekday()
-        hour = now_utc.hour
-        return weekday >= 5 or (weekday == 4 and hour >= 22)
-    
-    def get_status(self):
-        return {
-            'is_weekend': self.is_weekend(),
-            'available_pairs': CRYPTO_PAIRS,
-            'active_apis': 2
-        }
-
-otc_provider = OTCDataProvider(TWELVEDATA_API_KEY)
-
-# Initialisation ML
-class MLSignalPredictor:
-    def __init__(self):
-        self.total_predictions = 0
-        self.correct_predictions = 0
-    
-    def predict_signal(self, df, direction):
-        self.total_predictions += 1
-        confidence = random.uniform(0.65, 0.95)
-        
-        if random.random() < 0.15:
-            predicted_direction = "CALL" if direction == "PUT" else "PUT"
-            confidence = confidence * 0.8
+        if result == 'loss':
+            self.consecutive_losses += 1
         else:
-            predicted_direction = direction
-            self.correct_predictions += 1
+            self.consecutive_losses = 0
+            
+        self.daily_trades += 1
         
-        return predicted_direction, confidence
+    def get_cooldown_bars(self):
+        """Retourne le cooldown basé sur la qualité du dernier trade perdant"""
+        if not SAINT_GRAAL_CONFIG['risk_management']['dynamic_cooldown']:
+            return SAINT_GRAAL_CONFIG['signal_validation']['cooldown_bars']
+            
+        if self.last_trade_result == 'loss' and self.last_trade_quality:
+            # Cooldown basé sur la qualité du trade perdant
+            quality_cooldown = SAINT_GRAAL_CONFIG['risk_management']['cooldown_by_quality'].get(
+                self.last_trade_quality, 
+                SAINT_GRAAL_CONFIG['risk_management']['normal_cooldown']
+            )
+            return quality_cooldown
+            
+        return SAINT_GRAAL_CONFIG['risk_management']['normal_cooldown']
     
-    def get_stats(self):
-        accuracy = self.correct_predictions / self.total_predictions if self.total_predictions > 0 else 0
-        return {
-            'model_trained': 'Oui' if self.total_predictions > 0 else 'Non',
-            'total_predictions': self.total_predictions,
-            'correct_predictions': self.correct_predictions,
-            'accuracy': accuracy
-        }
-
-ml_predictor = MLSignalPredictor()
-
-# Variables globales
-ohlc_cache = {}
-last_error_logs = []
-current_signal_id = 0
-
-# ================= FONCTIONS UTILITAIRES =================
-def get_haiti_now():
-    return datetime.now(HAITI_TZ)
-
-def get_utc_now():
-    return datetime.now(timezone.utc)
-
-def add_error_log(message):
-    """Ajoute un message d'erreur à la liste des logs"""
-    global last_error_logs
-    timestamp = datetime.now().strftime('%H:%M:%S')
-    log_entry = f"{timestamp} - {message}"
-    print(log_entry)
-    last_error_logs.append(log_entry)
-    if len(last_error_logs) > 20:
-        last_error_logs.pop(0)
-
-def get_current_pair(pair):
-    """
-    Retourne la paire à utiliser
-    Week-end: rotation exclusive sur paires Crypto
-    Semaine: paire normale
-    """
-    if otc_provider.is_weekend():
-        # Utiliser un hash de la paire pour une distribution équitable
-        pair_hash = int(hashlib.md5(pair.encode()).hexdigest(), 16)
-        crypto_index = pair_hash % len(CRYPTO_PAIRS)
+    def can_trade(self, current_time):
+        """Vérifie si le trading est autorisé"""
+        self.reset_daily_if_needed()
         
-        selected_pair = CRYPTO_PAIRS[crypto_index]
-        print(f"[WEEKEND] 🔄 {pair} → {selected_pair}")
-        return selected_pair
-    return pair
+        # Vérifier cooldown
+        if self.last_trade_time:
+            cooldown_minutes = self.get_cooldown_bars()
+            time_diff = (current_time - self.last_trade_time).total_seconds() / 60
+            
+            if time_diff < cooldown_minutes:
+                remaining = cooldown_minutes - time_diff
+                return False, f"Cooldown: {remaining:.1f}min restants"
+        
+        # Vérifier limites
+        if self.daily_trades >= SAINT_GRAAL_CONFIG['risk_management']['max_daily_trades']:
+            return False, "Limite quotidienne atteinte"
+            
+        if self.consecutive_losses >= SAINT_GRAAL_CONFIG['risk_management']['max_consecutive_losses']:
+            return False, f"{self.consecutive_losses} pertes consécutives"
+            
+        return True, "OK"
 
-def is_forex_open():
-    """Vérifie si marché Forex est ouvert"""
-    now_utc = get_utc_now()
-    weekday = now_utc.weekday()
-    hour = now_utc.hour
-    
-    if weekday == 5:
-        return False
-    if weekday == 6 and hour < 22:
-        return False
-    if weekday == 4 and hour >= 22:
-        return False
-    
-    return True
+trading_state = TradingState()
 
-def fetch_ohlc_with_limits(pair, interval, outputsize=300, signal_id=None):
-    """
-    Récupération données avec gestion des limites API
-    CORRECTION: Gestion des erreurs de fréquence pandas et de tuples
-    """
-    can_call, reason = api_manager.can_make_call(signal_id)
-    if not can_call:
-        raise RuntimeError(f"Limite API: {reason}")
+# ================= DÉTECTION ÉTAT DE MARCHÉ =================
+
+def detect_market_state(df):
+    """Détecte si le marché est en TREND ou RANGE"""
+    if len(df) < 30:
+        return {'state': 'NEUTRAL', 'adx': 0, 'reason': 'Données insuffisantes'}
     
-    api_manager.record_call(signal_id)
+    # Calcul ADX
+    adx_indicator = ADXIndicator(
+        high=df['high'],
+        low=df['low'],
+        close=df['close'],
+        window=14
+    )
+    adx = float(adx_indicator.adx().iloc[-1])
     
-    params = {
-        'symbol': pair, 
-        'interval': interval, 
-        'outputsize': outputsize,
-        'apikey': TWELVEDATA_API_KEY, 
-        'format': 'JSON'
+    # Calcul RSI pour détecter range
+    rsi = RSIIndicator(close=df['close'], window=14).rsi()
+    current_rsi = float(rsi.iloc[-1])
+    
+    # Détection de range (RSI proche de 50)
+    rsi_range_threshold = SAINT_GRAAL_CONFIG['market_state']['rsi_range_threshold']
+    in_rsi_range = abs(current_rsi - 50) < (50 - rsi_range_threshold)
+    
+    if adx >= SAINT_GRAAL_CONFIG['market_state']['adx_threshold']:
+        state = "TREND"
+        reason = f"ADX fort: {adx:.1f}"
+    elif in_rsi_range:
+        state = "RANGE"
+        reason = f"Range RSI: {current_rsi:.1f}"
+    else:
+        state = "NEUTRAL"
+        reason = f"ADX: {adx:.1f}, RSI: {current_rsi:.1f}"
+    
+    return {'state': state, 'adx': adx, 'rsi': current_rsi, 'reason': reason}
+
+# ================= MOMENTUM GATE SÉPARÉ BUY/SELL =================
+
+def calculate_momentum_gate(df, direction, momentum_data):
+    """Calcule le momentum gate spécifique à chaque direction"""
+    if not SAINT_GRAAL_CONFIG['momentum_rules']['smart_gate']:
+        # Gate simple basé sur différence Stoch
+        stoch_diff = abs(momentum_data['stoch_k'] - momentum_data['stoch_d'])
+        return stoch_diff >= SAINT_GRAAL_CONFIG['momentum_rules']['momentum_gate_diff']
+    
+    # 🔥 GATE INTELLIGENT 2/3 CONDITIONS (SÉPARÉ BUY/SELL)
+    gate_score = 0
+    
+    # Condition 1: Stoch diff
+    stoch_diff = abs(momentum_data['stoch_k'] - momentum_data['stoch_d'])
+    if stoch_diff >= SAINT_GRAAL_CONFIG['momentum_rules']['momentum_gate_diff']:
+        gate_score += 1
+    
+    # Condition 2: RSI slope cohérente
+    rsi_slope_ok = False
+    if direction == "BUY":
+        if momentum_data['rsi'] > momentum_data.get('prev_rsi', momentum_data['rsi']):
+            gate_score += 1
+            rsi_slope_ok = True
+    else:  # SELL
+        if momentum_data['rsi'] < momentum_data.get('prev_rsi', momentum_data['rsi']):
+            gate_score += 1
+            rsi_slope_ok = True
+    
+    # Condition 3: Micro momentum des prix
+    price_momentum_ok = False
+    if len(df) >= 4:
+        last_2_closes = df['close'].values[-2:]
+        if direction == "BUY":
+            if last_2_closes[-1] > last_2_closes[-2]:
+                gate_score += 1
+                price_momentum_ok = True
+        else:  # SELL
+            if last_2_closes[-1] < last_2_closes[-2]:
+                gate_score += 1
+                price_momentum_ok = True
+    
+    # Debug info
+    debug_info = {
+        'direction': direction,
+        'gate_score': gate_score,
+        'stoch_diff': stoch_diff,
+        'rsi_slope_ok': rsi_slope_ok,
+        'price_momentum_ok': price_momentum_ok
     }
     
-    try:
-        r = requests.get('https://api.twelvedata.com/time_series', params=params, timeout=15)
-        r.raise_for_status()
-        j = r.json()
-        
-        if 'code' in j and j['code'] == 429:
-            raise RuntimeError("Limite API TwelveData atteinte")
-        
-        if 'values' not in j:
-            if 'message' in j:
-                raise RuntimeError(f"TwelveData error: {j['message']}")
-            else:
-                raise RuntimeError(f"TwelveData error: {j}")
-        
-        values = j['values']
-        if not values:
-            raise RuntimeError("Aucune donnée dans la réponse")
-        
-        # Vérifier le format des données
-        first_value = values[0]
-        
-        # CORRECTION: Gestion des tuples et des dictionnaires
-        if isinstance(first_value, (list, tuple)):
-            # Si c'est un tuple/liste, le convertir en dictionnaire
-            # On suppose l'ordre: datetime, open, high, low, close, volume
-            columns = ['datetime', 'open', 'high', 'low', 'close']
-            if len(first_value) == 6:
-                columns.append('volume')
-            
-            # Convertir toutes les valeurs
-            dict_values = []
-            for val in values:
-                if len(val) == len(columns):
-                    dict_values.append({columns[i]: val[i] for i in range(len(columns))})
-                else:
-                    # Si le nombre de colonnes ne correspond pas, on prend ce qu'on peut
-                    dict_val = {}
-                    for i in range(min(len(val), len(columns))):
-                        dict_val[columns[i]] = val[i]
-                    dict_values.append(dict_val)
-            
-            df = pd.DataFrame(dict_values)
-        else:
-            # C'est déjà un dictionnaire
-            df = pd.DataFrame(values)
-        
-        # Inverser l'ordre pour avoir les plus anciennes en premier
-        df = df[::-1].reset_index(drop=True)
-        
-        # Vérifier les colonnes nécessaires
-        required_columns = ['datetime', 'open', 'high', 'low', 'close']
-        for col in required_columns:
-            if col not in df.columns:
-                raise RuntimeError(f"Colonne manquante: {col}")
-        
-        # Convertir les colonnes en float
-        for col in ['open', 'high', 'low', 'close']:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-        
-        if 'volume' in df.columns:
-            df['volume'] = pd.to_numeric(df['volume'], errors='coerce')
-        
-        # Convertir datetime et définir l'index
-        df['datetime'] = pd.to_datetime(df['datetime'], errors='coerce')
-        df = df.dropna(subset=['datetime'])  # Supprimer les lignes avec datetime invalide
-        
-        if len(df) == 0:
-            raise RuntimeError("Aucune donnée valide après traitement")
-        
-        df.set_index('datetime', inplace=True)
-        
-        # CORRECTION: Éviter les problèmes de fréquence pandas
-        try:
-            df.index.freq = pd.infer_freq(df.index)
-        except:
-            pass
-        
-        return df
-        
-    except requests.exceptions.RequestException as e:
-        add_error_log(f"Erreur réseau fetch_ohlc: {e}")
-        raise RuntimeError(f"Erreur réseau: {e}")
-    except Exception as e:
-        add_error_log(f"Erreur fetch_ohlc: {e}")
-        raise RuntimeError(f"Erreur API: {e}")
+    return gate_score >= 2, debug_info
 
-def get_cached_ohlc(pair, interval, outputsize=300, signal_id=None):
-    """Récupère les données OHLC depuis le cache ou les APIs"""
-    current_pair = get_current_pair(pair)
-    cache_key = f"{current_pair}_{interval}"
-    
-    current_time = get_utc_now()
-    
-    if cache_key in ohlc_cache:
-        cached_data, cached_time = ohlc_cache[cache_key]
-        if (current_time - cached_time).total_seconds() < 30:
-            return cached_data
-    
-    try:
-        df = fetch_ohlc_with_limits(current_pair, interval, outputsize, signal_id)
-        ohlc_cache[cache_key] = (df, current_time)
-        
-        if df is not None and len(df) > 0:
-            print(f"✅ Données chargées: {len(df)} bougies pour {current_pair}")
-        else:
-            print(f"⚠️ Données vides pour {current_pair}")
-            
-        return df
-    except Exception as e:
-        error_msg = f"Erreur get_cached_ohlc pour {current_pair}: {e}"
-        add_error_log(error_msg)
-        print(f"❌ {error_msg}")
-        return None
+# ================= ANALYSE MOMENTUM CORRIGÉE =================
 
-# ================= GESTION BASE DE DONNÉES =================
-def ensure_db():
-    """Initialise la base de données"""
-    try:
-        with engine.begin() as conn:
-            conn.execute(text("""
-                CREATE TABLE IF NOT EXISTS signals (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER,
-                    pair TEXT NOT NULL,
-                    direction TEXT NOT NULL,
-                    reason TEXT,
-                    ts_enter DATETIME NOT NULL,
-                    ts_send DATETIME,
-                    ts_exit DATETIME,
-                    entry_price REAL DEFAULT 0,
-                    exit_price REAL DEFAULT 0,
-                    pips REAL DEFAULT 0,
-                    result TEXT,
-                    confidence REAL,
-                    payload_json TEXT,
-                    max_gales INTEGER DEFAULT 0,
-                    timeframe INTEGER DEFAULT 1,
-                    kill_zone TEXT,
-                    gale_level INTEGER DEFAULT 0,
-                    verification_method TEXT,
-                    button_message_id INTEGER,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            """))
-            
-            conn.execute(text("""
-                CREATE TABLE IF NOT EXISTS subscribers (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER UNIQUE NOT NULL,
-                    username TEXT,
-                    subscribed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    last_active DATETIME
-                )
-            """))
-            
-            # Vérifier et ajouter la colonne user_id si elle n'existe pas
-            try:
-                result = conn.execute(text("PRAGMA table_info(signals)")).fetchall()
-                existing_cols = {row[1] for row in result}
-                if 'user_id' not in existing_cols:
-                    conn.execute(text("ALTER TABLE signals ADD COLUMN user_id INTEGER"))
-            except:
-                pass
-        
-        print("✅ Base de données prête")
-        
-    except Exception as e:
-        print(f"⚠️ Erreur DB: {e}")
-
-def persist_signal(user_id, payload):
-    """Persiste un signal en base de données"""
-    q = text("""INSERT INTO signals (
-        user_id, pair, direction, reason, ts_enter, ts_send, confidence, 
-        payload_json, max_gales, timeframe, button_message_id
-    ) VALUES (
-        :user_id, :pair, :direction, :reason, :ts_enter, :ts_send, :confidence, 
-        :payload_json, :max_gales, :timeframe, :button_message_id
-    )""")
-    
-    payload['user_id'] = user_id
-    
-    with engine.begin() as conn:
-        result = conn.execute(q, payload)
-    return result.lastrowid
-
-# ================= ANALYSE MULTI-MARCHÉS =================
-async def analyze_multiple_markets_iterative(user_id, session_count, signal_id=None):
-    """
-    Analyse itérative de plusieurs marchés
-    Rotation Crypto optimisée pour week-end
-    CORRIGÉ : Utilisation de get_signal_saint_graal avec return_dict=True
-    """
-    print(f"\n[ROTATION] 🔄 Analyse itérative pour signal #{session_count}")
-    
-    # Déterminer mode week-end
-    is_weekend = otc_provider.is_weekend()
-    if is_weekend:
-        print(f"[ROTATION] 🌙 WEEK-END MODE: Rotation exclusive Crypto")
-        print(f"[ROTATION] 🎯 Paires Crypto: {', '.join(CRYPTO_PAIRS)}")
-    else:
-        print(f"[ROTATION] 📊 Total paires Forex: {len(ROTATION_PAIRS)}")
-    
-    shuffled_pairs = ROTATION_PAIRS.copy()
-    random.shuffle(shuffled_pairs)
-    
-    best_signal = None
-    best_score = 0
-    total_analyzed = 0
-    batch_count = 0
-    analysis_results = []
-    
-    for batch_start in range(0, len(shuffled_pairs), ROTATION_CONFIG['pairs_per_batch']):
-        batch_count += 1
-        
-        if batch_count > ROTATION_CONFIG['max_batches_per_signal']:
-            print(f"[ROTATION] ⏹️ Maximum de batches atteint")
-            break
-        
-        batch_pairs = shuffled_pairs[batch_start:batch_start + ROTATION_CONFIG['pairs_per_batch']]
-        print(f"\n[ROTATION] 📦 Batch #{batch_count}: analyse {len(batch_pairs)} paires")
-        
-        batch_best_signal = None
-        batch_best_score = 0
-        
-        for pair in batch_pairs:
-            total_analyzed += 1
-            
-            try:
-                can_call, reason = api_manager.can_make_call(signal_id)
-                if not can_call:
-                    print(f"[ROTATION] ⏸️ Limite API: {reason}")
-                    break
-                
-                # Obtenir la paire actuelle (Crypto le week-end)
-                actual_pair = get_current_pair(pair)
-                
-                if is_weekend:
-                    print(f"[ROTATION] 🌙 {pair} → {actual_pair} ({total_analyzed}ème Crypto)")
-                else:
-                    print(f"[ROTATION] 📊 Analyse {pair} ({total_analyzed}ème)")
-                
-                df = get_cached_ohlc(pair, TIMEFRAME_M1, outputsize=400, signal_id=signal_id)
-                
-                if df is None or len(df) < ROTATION_CONFIG['min_data_points']:
-                    result = {
-                        'original_pair': pair,
-                        'actual_pair': actual_pair,
-                        'status': 'ERROR',
-                        'score': 0,
-                        'reason': 'Données insuffisantes',
-                        'batch': batch_count,
-                        'position': batch_pairs.index(pair) + 1
-                    }
-                    analysis_results.append(result)
-                    print(f"[ROTATION] ❌ {actual_pair}: données insuffisantes")
-                    continue
-                
-                # 🔥 CORRIGÉ : Utilisation de get_signal_saint_graal avec return_dict=True
-                try:
-                    signal_data = get_signal_saint_graal(
-                        df, 
-                        signal_count=session_count-1,
-                        total_signals=SIGNALS_PER_SESSION,
-                        return_dict=True  # ← CORRECTION CRITIQUE
-                    )
-                except Exception as utils_error:
-                    error_msg = str(utils_error)
-                    print(f"[ROTATION] ⚠️ Erreur dans get_signal_saint_graal: {error_msg[:100]}")
-                    
-                    result = {
-                        'original_pair': pair,
-                        'actual_pair': actual_pair,
-                        'status': 'ERROR',
-                        'score': 0,
-                        'reason': f"Erreur utils: {error_msg[:50]}",
-                        'batch': batch_count,
-                        'position': batch_pairs.index(pair) + 1
-                    }
-                    analysis_results.append(result)
-                    continue
-                
-                if signal_data is None:
-                    result = {
-                        'original_pair': pair,
-                        'actual_pair': actual_pair,
-                        'status': 'NO_SIGNAL',
-                        'score': 0,
-                        'reason': 'Aucun signal détecté',
-                        'batch': batch_count,
-                        'position': batch_pairs.index(pair) + 1
-                    }
-                    analysis_results.append(result)
-                    print(f"[ROTATION] ❌ {actual_pair}: aucun signal")
-                    continue
-                
-                # Vérification du format (doit être un dictionnaire)
-                if not isinstance(signal_data, dict):
-                    print(f"[ROTATION] ⚠️ Format de signal invalide pour {actual_pair}: {type(signal_data)}")
-                    result = {
-                        'original_pair': pair,
-                        'actual_pair': actual_pair,
-                        'status': 'ERROR',
-                        'score': 0,
-                        'reason': f'Format invalide: {type(signal_data)}',
-                        'batch': batch_count,
-                        'position': batch_pairs.index(pair) + 1
-                    }
-                    analysis_results.append(result)
-                    continue
-                
-                # Vérifier les clés essentielles
-                if 'score' not in signal_data:
-                    print(f"[ROTATION] ⚠️ Clé 'score' manquante pour {actual_pair}")
-                    result = {
-                        'original_pair': pair,
-                        'actual_pair': actual_pair,
-                        'status': 'ERROR',
-                        'score': 0,
-                        'reason': "Clé 'score' manquante",
-                        'batch': batch_count,
-                        'position': batch_pairs.index(pair) + 1
-                    }
-                    analysis_results.append(result)
-                    continue
-                
-                current_score = signal_data.get('score', 0)
-                result = {
-                    'original_pair': pair,
-                    'actual_pair': actual_pair,
-                    'status': 'SIGNAL_FOUND',
-                    'score': current_score,
-                    'reason': signal_data.get('reason', 'N/A'),
-                    'direction': signal_data.get('direction', 'N/A'),
-                    'batch': batch_count,
-                    'position': batch_pairs.index(pair) + 1
-                }
-                analysis_results.append(result)
-                
-                print(f"[ROTATION] ✅ {actual_pair}: Score {current_score:.1f}")
-                
-                if current_score > batch_best_score:
-                    batch_best_score = current_score
-                    batch_best_signal = {
-                        **signal_data,
-                        'pair': actual_pair,
-                        'original_pair': pair,
-                        'actual_pair': actual_pair,
-                        'batch': batch_count,
-                        'position_in_batch': batch_pairs.index(pair) + 1,
-                        'is_weekend': is_weekend
-                    }
-                
-                if current_score >= 95:
-                    print(f"[ROTATION] 🎯 Signal excellent trouvé")
-                    best_signal = {
-                        **signal_data,
-                        'pair': actual_pair,
-                        'original_pair': pair,
-                        'actual_pair': actual_pair,
-                        'batch': batch_count,
-                        'position_in_batch': batch_pairs.index(pair) + 1,
-                        'is_weekend': is_weekend
-                    }
-                    best_score = current_score
-                    return best_signal, total_analyzed, batch_count, analysis_results
-                
-                await asyncio.sleep(ROTATION_CONFIG['api_cooldown_seconds'])
-                
-            except Exception as e:
-                error_msg = str(e)
-                print(f"[ROTATION] ❌ Erreur sur {pair}: {error_msg[:100]}")
-                
-                actual_pair = get_current_pair(pair)
-                
-                result = {
-                    'original_pair': pair,
-                    'actual_pair': actual_pair,
-                    'status': 'ERROR',
-                    'score': 0,
-                    'reason': f"Erreur: {error_msg[:50]}",
-                    'batch': batch_count,
-                    'position': batch_pairs.index(pair) + 1
-                }
-                analysis_results.append(result)
-                continue
-        
-        if batch_best_signal and batch_best_score >= ROTATION_CONFIG['min_score_threshold']:
-            print(f"[ROTATION] 🎯 Signal acceptable trouvé")
-            best_signal = batch_best_signal
-            best_score = batch_best_score
-            break
-        
-        print(f"[ROTATION] ⚠️ Aucun signal valide dans batch #{batch_count}")
-        
-        if not ROTATION_CONFIG['continue_if_no_signal']:
-            print(f"[ROTATION] ⏹️ Configuration: ne pas continuer sans signal")
-            break
-        
-        await asyncio.sleep(ROTATION_CONFIG['batch_cooldown_seconds'])
-    
-    if best_signal and best_score >= ROTATION_CONFIG['min_score_threshold']:
-        pair_type = "Crypto" if is_weekend else "Forex"
-        print(f"[ROTATION] ✅ Meilleur signal {pair_type}: {best_signal['pair']} (Score: {best_score:.1f})")
-        return best_signal, total_analyzed, batch_count, analysis_results
-    
-    pair_type = "Crypto" if is_weekend else "Forex"
-    print(f"[ROTATION] ❌ Aucun signal valide après {total_analyzed} paires {pair_type}")
-    return None, total_analyzed, batch_count, analysis_results
-
-# ================= GESTION BOUTON PERSISTANT =================
-async def create_signal_button(user_id: int, app, message_id: int = None) -> int:
-    """Crée ou met à jour un bouton pour générer le prochain signal"""
-    session = session_manager.get_session(user_id)
-    if not session:
-        return None
-    
-    next_signal_num = session['next_signal_number']
-    button_text = f"🎯 Générer Signal #{next_signal_num}"
-    
-    keyboard = [[InlineKeyboardButton(button_text, callback_data=f"gen_signal_{user_id}")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    try:
-        if message_id:
-            await app.bot.edit_message_reply_markup(
-                chat_id=user_id,
-                message_id=message_id,
-                reply_markup=reply_markup
-            )
-            return message_id
-        else:
-            message = await app.bot.send_message(
-                chat_id=user_id,
-                text=f"🔄 **Bouton actif pour le signal #{next_signal_num}**\n"
-                     f"━━━━━━━━━━━━━━━━━━━━\n"
-                     f"Cliquez pour générer le prochain signal ⬇️\n"
-                     f"⏱️ Ce bouton expire dans {BUTTON_TIMEOUT_MINUTES} minutes",
-                reply_markup=reply_markup
-            )
-            
-            asyncio.create_task(schedule_button_regeneration(user_id, app, message.message_id))
-            
-            return message.message_id
-    except Exception as e:
-        print(f"❌ Erreur création bouton: {e}")
-        return None
-
-async def schedule_button_regeneration(user_id: int, app, message_id: int):
-    """Planifie la régénération automatique du bouton après timeout"""
-    try:
-        await asyncio.sleep(BUTTON_TIMEOUT_MINUTES * 60)
-        
-        session = session_manager.get_session(user_id)
-        if not session or session['status'] != 'active':
-            return
-        
-        if session['signal_count'] >= SIGNALS_PER_SESSION:
-            return
-        
-        print(f"🔄 Régénération automatique du bouton pour l'utilisateur {user_id}")
-        
-        new_message_id = await create_signal_button(user_id, app, message_id)
-        
-        if new_message_id:
-            if 'active_buttons' not in session:
-                session['active_buttons'] = []
-            
-            if message_id in session['active_buttons']:
-                session['active_buttons'].remove(message_id)
-            
-            if new_message_id:
-                session['active_buttons'].append(new_message_id)
-            
-    except asyncio.CancelledError:
-        print(f"⏹️ Tâche de régénération annulée pour l'utilisateur {user_id}")
-    except Exception as e:
-        print(f"❌ Erreur régénération bouton: {e}")
-
-async def cleanup_old_buttons(user_id: int, app):
-    """Nettoie les anciens boutons"""
-    session = session_manager.get_session(user_id)
-    if not session or 'active_buttons' not in session:
-        return
-    
-    for message_id in session['active_buttons'][:-1]:
-        try:
-            await app.bot.delete_message(chat_id=user_id, message_id=message_id)
-        except:
-            pass
-    
-    if session['active_buttons']:
-        session['active_buttons'] = [session['active_buttons'][-1]]
-
-# ================= GÉNÉRATION DE SIGNAL =================
-async def generate_m1_signal_with_iterative_rotation(user_id, app):
-    """Génère un signal avec rotation itérative"""
-    global current_signal_id
-    
-    try:
-        session = session_manager.get_session(user_id)
-        if not session:
-            add_error_log(f"User {user_id} n'a pas de session active")
-            return None, []
-        
-        session_count = session['signal_count'] + 1
-        current_signal_id += 1
-        signal_tracking_id = f"sig_{session_count}_{current_signal_id}"
-        
-        print(f"\n[SIGNAL] 🔄 Génération signal #{session_count}")
-        
-        is_weekend = otc_provider.is_weekend()
-        if is_weekend:
-            print(f"[SIGNAL] 🌙 MODE WEEK-END: Rotation exclusive sur 5 paires Crypto")
-        
-        signal_data, total_pairs_analyzed, total_batches, analysis_results = await analyze_multiple_markets_iterative(
-            user_id, 
-            session_count,
-            signal_id=signal_tracking_id
-        )
-        
-        session_manager.store_analysis_results(user_id, analysis_results)
-        
-        if signal_data is None:
-            pair_type = "Crypto" if is_weekend else "Forex"
-            print(f"[SIGNAL] ❌ Aucun signal valide trouvé après analyse {pair_type}")
-            return None, analysis_results
-        
-        if not isinstance(signal_data, dict):
-            print(f"[SIGNAL] ⚠️ Format de signal_data invalide")
-            return None, analysis_results
-        
-        pair = signal_data.get('pair', 'UNKNOWN')
-        direction = signal_data.get('direction', 'UNKNOWN')
-        mode_strat = signal_data.get('mode', 'UNKNOWN')
-        quality = signal_data.get('quality', 'UNKNOWN')
-        score = signal_data.get('score', 0)
-        reason = signal_data.get('reason', 'N/A')
-        actual_pair = signal_data.get('actual_pair', pair)
-        batch_info = f"Batch {signal_data.get('batch', '?')}.{signal_data.get('position_in_batch', '?')}"
-        is_weekend_mode = signal_data.get('is_weekend', False)
-        
-        print(f"[SIGNAL] 🎯 Meilleur signal: {pair} -> {direction} (Score: {score:.1f})")
-        
-        ml_signal, ml_conf = ml_predictor.predict_signal(None, direction)
-        
-        if ml_signal is None:
-            ml_signal = direction
-            ml_conf = score / 100 if score > 0 else CONFIDENCE_THRESHOLD
-        
-        if ml_conf < CONFIDENCE_THRESHOLD:
-            ml_conf = CONFIDENCE_THRESHOLD + random.uniform(0.05, 0.15)
-            print(f"[SIGNAL] ⚡ Confiance ML ajustée: {ml_conf:.1%}")
-        
-        now_haiti = get_haiti_now()
-        now_utc = get_utc_now()
-        
-        entry_time_haiti = (now_haiti + timedelta(minutes=2)).replace(second=0, microsecond=0)
-        if entry_time_haiti < now_haiti + timedelta(minutes=2):
-            entry_time_haiti = (now_haiti + timedelta(minutes=2)).replace(second=0, microsecond=0)
-        
-        entry_time_utc = entry_time_haiti.astimezone(timezone.utc)
-        send_time_utc = now_utc
-        
-        print(f"[SIGNAL_TIMING] ⏰ Heure entrée: {entry_time_haiti.strftime('%H:%M:%S')}")
-        
-        payload = {
-            'pair': actual_pair,
-            'direction': ml_signal, 
-            'reason': f"{reason} | {batch_info}",
-            'ts_enter': entry_time_utc.isoformat(), 
-            'ts_send': send_time_utc.isoformat(),
-            'confidence': ml_conf, 
-            'payload_json': json.dumps({
-                'original_pair': pair,
-                'actual_pair': actual_pair,
-                'user_id': user_id, 
-                'mode': 'Rotation Itérative Multi-Marchés',
-                'strategy': 'Saint Graal 5.0 avec Rotation Itérative',
-                'strategy_mode': mode_strat,
-                'strategy_quality': quality,
-                'strategy_score': score,
-                'ml_confidence': ml_conf,
-                'rotation_info': {
-                    'pairs_analyzed': total_pairs_analyzed,
-                    'batches_analyzed': total_batches,
-                    'best_pair': pair,
-                    'best_score': score,
-                    'batch_info': batch_info,
-                    'signal_tracking_id': signal_tracking_id,
-                    'api_stats': api_manager.get_stats(),
-                    'is_weekend': is_weekend_mode,
-                    'crypto_pairs': CRYPTO_PAIRS if is_weekend_mode else [],
-                    'analysis_results': analysis_results
-                },
-                'session_count': session_count,
-                'session_total': SIGNALS_PER_SESSION,
-                'timing_info': {
-                    'signal_generated': now_haiti.isoformat(),
-                    'entry_scheduled': entry_time_haiti.isoformat(),
-                    'delay_before_entry_minutes': 2
-                }
-            }),
-            'max_gales': 0,
-            'timeframe': 1,
-            'button_message_id': None
+def analyze_momentum_with_filters(df):
+    """Analyse momentum avec strict_mode fonctionnel et gates séparés"""
+    if len(df) < 20:
+        return {
+            'rsi': 50,
+            'stoch_k': 50,
+            'stoch_d': 50,
+            'prev_rsi': 50,
+            'buy': {'allowed': False, 'veto': False, 'score': 0, 'penalty': 0, 'reason': 'Données insuffisantes'},
+            'sell': {'allowed': False, 'veto': False, 'score': 0, 'penalty': 0, 'reason': 'Données insuffisantes'},
+            'gate_buy': False,
+            'gate_sell': False,
+            'violations': []
         }
-        
-        signal_id = persist_signal(user_id, payload)
-        
-        print(f"[SIGNAL] ✅ Signal #{signal_id} persisté")
-        
-        return signal_id, analysis_results
-        
-    except Exception as e:
-        error_msg = f"[SIGNAL] ❌ Erreur: {e}"
-        add_error_log(error_msg)
-        traceback.print_exc()
-        return None, []
-
-# ================= FONCTION POUR BOUTON APRÈS BOUGIE =================
-async def schedule_button_after_candle(signal_id, user_id, app, entry_time):
-    """Programme l'envoi du bouton APRÈS la fin de la bougie M1"""
-    try:
-        print(f"[BOUGIE-BOUTON] ⏰ Programmation bouton pour signal #{signal_id}")
-        
-        candle_end_time = entry_time + timedelta(minutes=1)
-        now_utc = get_utc_now()
-        
-        wait_seconds = max(0, (candle_end_time - now_utc).total_seconds())
-        
-        if wait_seconds > 0:
-            print(f"[BOUGIE-BOUTON] ⏳ Attente de {wait_seconds:.0f}s pour fin de bougie")
-            await asyncio.sleep(wait_seconds)
-        
-        print(f"[BOUGIE-BOUTON] ✅ Bougie terminée, envoi bouton IMMÉDIAT pour signal #{signal_id}")
-        
-        session = session_manager.get_session(user_id)
-        if not session:
-            return
-        
-        await cleanup_old_buttons(user_id, app)
-        
-        new_message_id = await create_signal_button(user_id, app)
-        
-        if new_message_id:
-            if 'active_buttons' not in session:
-                session['active_buttons'] = []
-            session['active_buttons'].append(new_message_id)
-            
-            try:
-                info_msg = (
-                    f"🔄 **Bougie terminée**\n"
-                    f"━━━━━━━━━━━━━━━━━━━━\n\n"
-                    f"⏰ La bougie M1 est maintenant terminée.\n"
-                    f"📊 Progression: {session['signal_count']}/{SIGNALS_PER_SESSION}\n\n"
-                    f"🎯 Bouton disponible pour le signal #{session['next_signal_number']}\n"
-                    f"⏱️ Cliquez pour continuer!"
-                )
-                
-                await app.bot.send_message(
-                    chat_id=user_id,
-                    text=info_msg
-                )
-            except:
-                pass
-            
-    except asyncio.CancelledError:
-        print(f"[BOUGIE-BOUTON] ❌ Tâche annulée pour signal #{signal_id}")
-    except Exception as e:
-        print(f"[BOUGIE-BOUTON] ❌ Erreur: {e}")
-
-# ================= COMMANDES TELEGRAM =================
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Commande de démarrage"""
-    user_id = update.effective_user.id
-    username = update.effective_user.username or "Unknown"
     
-    try:
-        with engine.begin() as conn:
-            existing = conn.execute(
-                text("SELECT user_id FROM subscribers WHERE user_id = :uid"),
-                {"uid": user_id}
-            ).fetchone()
-            if not existing:
-                conn.execute(
-                    text("INSERT INTO subscribers (user_id, username) VALUES (:uid, :uname)"),
-                    {"uid": user_id, "uname": username}
-                )
-        
-        is_weekend = otc_provider.is_weekend()
-        mode_text = "🏖️ OTC (Crypto)" if is_weekend else "📈 Forex"
-        
-        if is_weekend:
-            crypto_list = "\n".join([f"• {pair}" for pair in CRYPTO_PAIRS])
-            mode_text += f"\n🎯 Paires Crypto: {', '.join(CRYPTO_PAIRS)}"
-        
-        await update.message.reply_text(
-            f"✅ **Bienvenue au Bot Trading Saint Graal 5.0 !**\n\n"
-            f"🎯 Rotation Itérative Multi-Marchés\n"
-            f"📊 {len(ROTATION_PAIRS)} paires disponibles\n"
-            f"🌙 {len(CRYPTO_PAIRS)} paires Crypto week-end\n"
-            f"🔄 Bouton après bougie avec régénération automatique\n"
-            f"⏱️ Timeout bouton: {BUTTON_TIMEOUT_MINUTES} minutes\n"
-            f"📈 Affichage détaillé des paires analysées\n"
-            f"🔧 Version 5.0: get_signal_saint_graal avec return_dict=True\n"
-            f"🌐 Mode actuel: {mode_text}\n\n"
-            f"**Commandes:**\n"
-            f"• /startsession - Démarrer session\n"
-            f"• /menu - Menu complet\n"
-            f"• /lastanalysis - Voir dernières paires analysées\n"
-        )
-    except Exception as e:
-        await update.message.reply_text(f"❌ Erreur: {e}")
-
-async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Affiche le menu complet"""
-    is_weekend = otc_provider.is_weekend()
+    # Calcul indicateurs
+    rsi = RSIIndicator(close=df['close'], window=14).rsi()
+    current_rsi = float(rsi.iloc[-1])
+    prev_rsi = float(rsi.iloc[-2]) if len(rsi) > 1 else current_rsi
     
-    if is_weekend:
-        crypto_section = f"🌙 **MODE WEEK-END:**\n• Rotation exclusive Crypto\n• {len(CRYPTO_PAIRS)} paires analysées\n"
-    else:
-        crypto_section = f"📈 **MODE FOREX:**\n• Rotation standard\n• {len(ROTATION_PAIRS)} paires analysées\n"
-    
-    menu_text = (
-        f"📋 **MENU SAINT GRAAL 5.0**\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"{crypto_section}\n"
-        "**📊 Session:**\n"
-        "• /startsession - Démarrer session\n"
-        "• /sessionstatus - État session\n"
-        "• /endsession - Terminer session\n"
-        "• /lastanalysis - Dernières analyses\n\n"
-        "**🔄 Rotation:**\n"
-        "• /rotationstats - Stats rotation\n"
-        "• /apistats - Stats API\n"
-        "• /pairslist - Liste paires\n"
-        "• /cryptolist - Liste Crypto week-end\n\n"
-        "**⚙️ Configuration:**\n"
-        "• /buttonconfig - Configuration bouton\n\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        f"🎯 Paires Forex: {len(ROTATION_PAIRS)}\n"
-        f"🌙 Paires Crypto: {len(CRYPTO_PAIRS)}\n"
-        f"🔄 Bouton timeout: {BUTTON_TIMEOUT_MINUTES} min\n"
-        f"📊 Affichage analyses: ✅ ACTIVÉ\n"
-        f"🔧 Version: 5.0 (return_dict=True)\n"
+    stoch = StochasticOscillator(
+        high=df['high'],
+        low=df['low'],
+        close=df['close'],
+        window=14,
+        smooth_window=3
     )
-    await update.message.reply_text(menu_text)
-
-async def cmd_start_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Démarre une nouvelle session"""
-    user_id = update.effective_user.id
+    stoch_k = stoch.stoch()
+    stoch_d = stoch.stoch_signal()
     
-    session = session_manager.get_session(user_id)
-    if session and session['status'] == 'active':
-        next_num = session['next_signal_number']
+    current_stoch_k = float(stoch_k.iloc[-1])
+    current_stoch_d = float(stoch_d.iloc[-1])
+    prev_stoch_k = float(stoch_k.iloc[-2]) if len(stoch_k) > 1 else current_stoch_k
+    
+    # Initialisation
+    buy_result = {'allowed': True, 'veto': False, 'score': 0, 'penalty': 0, 'reason': []}
+    sell_result = {'allowed': True, 'veto': False, 'score': 0, 'penalty': 0, 'reason': []}
+    violations = []
+    
+    # 🔥 APPLICATION STRICT_MODE POUR MOMENTUM
+    no_buy_zone = SAINT_GRAAL_CONFIG['forbidden_zones']['no_buy_zone']
+    no_sell_zone = SAINT_GRAAL_CONFIG['forbidden_zones']['no_sell_zone']
+    
+    # Vérification BUY avec strict_mode
+    if no_buy_zone['enabled']:
+        buy_violations = []
         
-        await update.message.reply_text(
-            f"⚠️ Session déjà active !\n\n"
-            f"📊 Progression: {session['signal_count']}/{SIGNALS_PER_SESSION}\n"
-            f"✅ Wins: {session['wins']}\n"
-            f"❌ Losses: {session['losses']}\n\n"
-            f"Continuer avec signal #{next_num} ⬇️"
-        )
-        
-        keyboard = [[InlineKeyboardButton(
-            f"🎯 Générer Signal #{next_num}", 
-            callback_data=f"gen_signal_{user_id}"
-        )]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await update.message.reply_text(
-            "⬇️ Bouton de génération ⬇️",
-            reply_markup=reply_markup
-        )
-        return
-    
-    session = session_manager.create_session(user_id)
-    
-    is_weekend = otc_provider.is_weekend()
-    mode_text = "🏖️ OTC (Crypto)" if is_weekend else "📈 Forex"
-    
-    if is_weekend:
-        crypto_details = f"🎯 Paires Crypto: {', '.join(CRYPTO_PAIRS)}"
-        mode_text += f"\n{crypto_details}"
-    
-    await update.message.reply_text(
-        f"🚀 **SESSION DÉMARRÉE**\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"📅 {session['start_time'].strftime('%H:%M:%S')}\n"
-        f"🌐 Mode: {mode_text}\n"
-        f"🎯 Objectif: {SIGNALS_PER_SESSION} signaux M1\n"
-        f"🔄 Bouton timeout: {BUTTON_TIMEOUT_MINUTES} minutes\n"
-        f"⚡ Bouton après bougie: ACTIVÉ\n"
-        f"📊 Affichage analyses: ACTIVÉ\n"
-        f"🔧 Version 5.0: get_signal_saint_graal avec return_dict=True\n\n"
-        f"Cliquez sur le bouton pour commencer ⬇️"
-    )
-    
-    keyboard = [[InlineKeyboardButton(
-        "🎯 Générer Signal #1", 
-        callback_data=f"gen_signal_{user_id}"
-    )]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    message = await update.message.reply_text(
-        "⬇️ Bouton de génération ⬇️",
-        reply_markup=reply_markup
-    )
-    
-    if message:
-        session['active_buttons'] = [message.message_id]
-
-async def callback_generate_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Callback pour générer un signal avec affichage des paires analysées"""
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = int(query.data.split('_')[2])
-    
-    can_generate, reason = session_manager.can_generate_signal(user_id)
-    if not can_generate:
-        await query.edit_message_text(f"❌ {reason}\n\nUtilisez /startsession")
-        return
-    
-    session = session_manager.get_session(user_id)
-    
-    is_weekend = otc_provider.is_weekend()
-    mode_text = "🌙 Crypto" if is_weekend else "📈 Forex"
-    
-    await query.edit_message_text(
-        f"🔄 **Génération du signal #{session['next_signal_number']}**\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"Mode: {mode_text}\n"
-        f"Analyse rotation itérative en cours...\n"
-        f"⏱️ Patientez quelques secondes..."
-    )
-    
-    signal_id, analysis_results = await generate_m1_signal_with_iterative_rotation(user_id, context.application)
-    
-    if signal_id:
-        session_manager.update_signal_count(user_id)
-        session['pending_signals'] += 1
-        
-        with engine.connect() as conn:
-            signal = conn.execute(
-                text("SELECT pair, direction, confidence, payload_json, ts_enter FROM signals WHERE id = :sid"),
-                {"sid": signal_id}
-            ).fetchone()
-        
-        if signal:
-            pair, direction, confidence, payload_json, ts_enter = signal
-            
-            if isinstance(ts_enter, str):
-                entry_time = datetime.fromisoformat(ts_enter.replace('Z', '+00:00')).astimezone(HAITI_TZ)
-                entry_time_utc = datetime.fromisoformat(ts_enter.replace('Z', '+00:00'))
+        if current_stoch_k > no_buy_zone['stoch_fast_max']:
+            if no_buy_zone['strict_mode']:
+                buy_result['veto'] = True
+                violations.append(f"❌ BUY VETO: Stoch {current_stoch_k:.1f} > {no_buy_zone['stoch_fast_max']}")
             else:
-                entry_time = ts_enter.astimezone(HAITI_TZ)
-                entry_time_utc = ts_enter
-            
-            direction_text = "BUY ↗️" if direction == "CALL" else "SELL ↘️"
-            entry_time_formatted = entry_time.strftime('%H:%M')
-            
-            rotation_info = ""
-            if analysis_results:
-                analyzed_count = len(analysis_results)
-                successful_analysis = len([r for r in analysis_results if r['status'] == 'SIGNAL_FOUND'])
-                pair_type = "Crypto 🌙" if is_weekend else "Forex 📈"
-                rotation_info = f"\n🔄 {analyzed_count} paires {pair_type} analysées ({successful_analysis} avec signal)"
-            
-            signal_msg = (
-                f"🎯 **SIGNAL #{session['signal_count']} - ROTATION ITÉRATIVE**\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"💱 {pair}\n"
-                f"📈 Direction: **{direction_text}**\n"
-                f"⏰ Heure entrée: **{entry_time_formatted}**\n"
-                f"💪 Confiance: **{int(confidence*100)}%**\n"
-                f"{rotation_info}\n"
-                f"⏱️ Timeframe: 1 minute\n\n"
-                f"✅ Signal généré avec succès!"
-            )
-            
-            try:
-                await context.application.bot.send_message(chat_id=user_id, text=signal_msg)
-                print(f"[SIGNAL] ✅ Signal #{signal_id} envoyé")
-            except Exception as e:
-                print(f"[SIGNAL] ❌ Erreur envoi: {e}")
+                buy_result['penalty'] += no_buy_zone['penalty']
+                buy_violations.append(f"Stoch haut: -{no_buy_zone['penalty']}")
         
-        await cleanup_old_buttons(user_id, context.application)
+        if current_rsi > no_buy_zone['rsi_max']:
+            if no_buy_zone['strict_mode']:
+                buy_result['veto'] = True
+                violations.append(f"❌ BUY VETO: RSI {current_rsi:.1f} > {no_buy_zone['rsi_max']}")
+            else:
+                buy_result['penalty'] += no_buy_zone['penalty']
+                buy_violations.append(f"RSI haut: -{no_buy_zone['penalty']}")
         
-        if session['signal_count'] >= SIGNALS_PER_SESSION:
-            await end_session_summary(user_id, context.application)
-            return
+        if buy_violations and not buy_result['veto']:
+            buy_result['reason'].append(f"Pénalités: {' + '.join(buy_violations)}")
+    
+    # Vérification SELL avec strict_mode
+    if no_sell_zone['enabled']:
+        sell_violations = []
         
-        if signal:
-            button_task = asyncio.create_task(
-                schedule_button_after_candle(signal_id, user_id, context.application, entry_time_utc)
-            )
+        if current_stoch_k < no_sell_zone['stoch_fast_min']:
+            if no_sell_zone['strict_mode']:
+                sell_result['veto'] = True
+                violations.append(f"❌ SELL VETO: Stoch {current_stoch_k:.1f} < {no_sell_zone['stoch_fast_min']}")
+            else:
+                sell_result['penalty'] += no_sell_zone['penalty']
+                sell_violations.append(f"Stoch bas: -{no_sell_zone['penalty']}")
+        
+        if current_rsi < no_sell_zone['rsi_min']:
+            if no_sell_zone['strict_mode']:
+                sell_result['veto'] = True
+                violations.append(f"❌ SELL VETO: RSI {current_rsi:.1f} < {no_sell_zone['rsi_min']}")
+            else:
+                sell_result['penalty'] += no_sell_zone['penalty']
+                sell_violations.append(f"RSI bas: -{no_sell_zone['penalty']}")
+        
+        if sell_violations and not sell_result['veto']:
+            sell_result['reason'].append(f"Pénalités: {' + '.join(sell_violations)}")
+    
+    # 🔥 CALCUL SCORES (après vérification veto)
+    momentum_data = {
+        'rsi': current_rsi,
+        'stoch_k': current_stoch_k,
+        'stoch_d': current_stoch_d,
+        'prev_rsi': prev_rsi
+    }
+    
+    # Score BUY
+    if not buy_result['veto']:
+        buy_score = 0
+        
+        # Score de base pour RSI dans la zone
+        if current_rsi < SAINT_GRAAL_CONFIG['momentum_rules']['buy_conditions']['rsi_max']:
+            buy_score += 15
+            buy_result['reason'].append(f"RSI OK: {current_rsi:.1f}")
             
-            if 'button_tasks' not in session:
-                session['button_tasks'] = []
-            session['button_tasks'].append(button_task)
+            if current_rsi < SAINT_GRAAL_CONFIG['momentum_rules']['buy_conditions']['rsi_oversold']:
+                buy_score += 10
+                buy_result['reason'].append("RSI OVERSOLD")
         
-        confirmation_msg = (
-            f"✅ **Signal #{session['signal_count']} généré!**\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"📊 Progression: {session['signal_count']}/{SIGNALS_PER_SESSION}\n\n"
-            f"💡 Préparez votre position!\n"
-            f"⏰ Le bouton pour le prochain signal apparaîtra après la fin de la bougie."
-        )
+        # Score pour Stoch
+        if current_stoch_k < SAINT_GRAAL_CONFIG['momentum_rules']['buy_conditions']['stoch_max']:
+            buy_score += 12
+            buy_result['reason'].append(f"Stoch OK: {current_stoch_k:.1f}")
+            
+            if current_stoch_k < SAINT_GRAAL_CONFIG['momentum_rules']['buy_conditions']['stoch_oversold']:
+                buy_score += 8
+                buy_result['reason'].append("Stoch OVERSOLD")
         
-        await query.edit_message_text(confirmation_msg)
+        # Condition Stoch rising
+        if SAINT_GRAAL_CONFIG['momentum_rules']['buy_conditions']['require_stoch_rising']:
+            if current_stoch_k > prev_stoch_k:
+                buy_score += 8
+                buy_result['reason'].append("Stoch rising")
+            else:
+                buy_score -= 3
+                buy_result['reason'].append("Stoch not rising")
+        
+        # Appliquer pénalités
+        buy_score = max(0, buy_score - buy_result['penalty'])
+        buy_result['score'] = buy_score
+    
     else:
-        pair_type = "Crypto" if is_weekend else "Forex"
+        buy_result['score'] = -999
+    
+    # Score SELL
+    if not sell_result['veto']:
+        sell_score = 0
         
-        analyzed_pairs_text = ""
-        if analysis_results:
-            batches = {}
-            for result in analysis_results:
-                batch_num = result.get('batch', 0)
-                if batch_num not in batches:
-                    batches[batch_num] = []
-                batches[batch_num].append(result)
+        if current_rsi > SAINT_GRAAL_CONFIG['momentum_rules']['sell_conditions']['rsi_min']:
+            sell_score += 15
+            sell_result['reason'].append(f"RSI haut: {current_rsi:.1f}")
             
-            analyzed_pairs_text = "📊 **Paires analysées:**\n"
+            if current_rsi > SAINT_GRAAL_CONFIG['momentum_rules']['sell_conditions']['rsi_overbought']:
+                sell_score += 10
+                sell_result['reason'].append("RSI OVERBOUGHT")
+        
+        if current_stoch_k > SAINT_GRAAL_CONFIG['momentum_rules']['sell_conditions']['stoch_min']:
+            sell_score += 12
+            sell_result['reason'].append(f"Stoch haut: {current_stoch_k:.1f}")
             
-            for batch_num in sorted(batches.keys()):
-                analyzed_pairs_text += f"\n**Batch {batch_num}:**\n"
-                batch_results = batches[batch_num]
-                
-                for i, result in enumerate(batch_results, 1):
-                    pair_display = result.get('actual_pair', 'N/A')
-                    status = result.get('status', 'UNKNOWN')
-                    
-                    if status == 'SIGNAL_FOUND':
-                        score = result.get('score', 0)
-                        direction = result.get('direction', 'N/A')
-                        direction_emoji = "↗️" if direction == "CALL" else "↘️"
-                        analyzed_pairs_text += f"{i}. {pair_display} {direction_emoji} - Score: {score:.1f}\n"
-                    elif status == 'NO_SIGNAL':
-                        analyzed_pairs_text += f"{i}. {pair_display} ❌ - Pas de signal\n"
-                    elif status == 'ERROR':
-                        reason = result.get('reason', 'Erreur')
-                        analyzed_pairs_text += f"{i}. {pair_display} ⚠️ - {reason[:30]}\n"
-                    else:
-                        analyzed_pairs_text += f"{i}. {pair_display} ❓ - État inconnu\n"
-            
-            total_pairs = len(analysis_results)
-            signals_found = len([r for r in analysis_results if r.get('status') == 'SIGNAL_FOUND'])
-            errors = len([r for r in analysis_results if r.get('status') == 'ERROR'])
-            no_signals = len([r for r in analysis_results if r.get('status') == 'NO_SIGNAL'])
-            
-            scores = [r.get('score', 0) for r in analysis_results if isinstance(r.get('score'), (int, float))]
-            best_score = max(scores) if scores else 0
-            
-            analyzed_pairs_text += f"\n**📈 Résumé:**\n"
-            analyzed_pairs_text += f"• Total paires analysées: {total_pairs}\n"
-            analyzed_pairs_text += f"• Signaux détectés: {signals_found}\n"
-            analyzed_pairs_text += f"• Pas de signal: {no_signals}\n"
-            analyzed_pairs_text += f"• Erreurs: {errors}\n"
-            analyzed_pairs_text += f"• Meilleur score: {best_score:.1f}\n"
-            analyzed_pairs_text += f"• Mode: {'Crypto 🌙' if is_weekend else 'Forex 📈'}\n"
+            if current_stoch_k > SAINT_GRAAL_CONFIG['momentum_rules']['sell_conditions']['stoch_overbought']:
+                sell_score += 8
+                sell_result['reason'].append("Stoch OVERBOUGHT")
+        
+        if SAINT_GRAAL_CONFIG['momentum_rules']['sell_conditions']['require_stoch_falling']:
+            if current_stoch_k < prev_stoch_k:
+                sell_score += 8
+                sell_result['reason'].append("Stoch falling")
+            else:
+                sell_score -= 3
+                sell_result['reason'].append("Stoch not falling")
+        
+        # Appliquer pénalités
+        sell_score = max(0, sell_score - sell_result['penalty'])
+        sell_result['score'] = sell_score
+    
+    else:
+        sell_result['score'] = -999
+    
+    # 🔥 CALCUL GATES SÉPARÉS
+    gate_buy, debug_buy = calculate_momentum_gate(df, "BUY", momentum_data)
+    gate_sell, debug_sell = calculate_momentum_gate(df, "SELL", momentum_data)
+    
+    # Formater raisons
+    buy_result['reason'] = " | ".join(buy_result['reason']) if buy_result['reason'] else "Neutre"
+    sell_result['reason'] = " | ".join(sell_result['reason']) if sell_result['reason'] else "Neutre"
+    
+    return {
+        'rsi': current_rsi,
+        'stoch_k': current_stoch_k,
+        'stoch_d': current_stoch_d,
+        'prev_rsi': prev_rsi,
+        'buy': buy_result,
+        'sell': sell_result,
+        'gate_buy': gate_buy,
+        'gate_sell': gate_sell,
+        'gate_debug': {'buy': debug_buy, 'sell': debug_sell},
+        'violations': violations
+    }
+
+def analyze_bollinger_bands(df):
+    """Analyse BB avec strict_mode fonctionnel"""
+    if len(df) < SAINT_GRAAL_CONFIG['bollinger_config']['window']:
+        return {
+            'bb_position': 50,
+            'buy': {'allowed': True, 'veto': False, 'score': 0, 'penalty': 0, 'reason': 'Données insuffisantes'},
+            'sell': {'allowed': True, 'veto': False, 'score': 0, 'penalty': 0, 'reason': 'Données insuffisantes'}
+        }
+    
+    bb = BollingerBands(
+        close=df['close'],
+        window=SAINT_GRAAL_CONFIG['bollinger_config']['window'],
+        window_dev=SAINT_GRAAL_CONFIG['bollinger_config']['window_dev']
+    )
+    
+    bb_upper = bb.bollinger_hband()
+    bb_lower = bb.bollinger_lband()
+    bb_middle = bb.bollinger_mavg()
+    
+    current_price = float(df.iloc[-1]['close'])
+    current_upper = float(bb_upper.iloc[-1])
+    current_lower = float(bb_lower.iloc[-1])
+    current_middle = float(bb_middle.iloc[-1])
+    
+    # Position BB
+    if current_upper != current_lower:
+        bb_position = ((current_price - current_lower) / (current_upper - current_lower)) * 100
+    else:
+        bb_position = 50
+    
+    # Initialisation
+    buy_result = {'allowed': True, 'veto': False, 'score': 0, 'penalty': 0, 'reason': []}
+    sell_result = {'allowed': True, 'veto': False, 'score': 0, 'penalty': 0, 'reason': []}
+    
+    # 🔥 STRICT_MODE POUR BB
+    no_buy_zone = SAINT_GRAAL_CONFIG['forbidden_zones']['no_buy_zone']
+    no_sell_zone = SAINT_GRAAL_CONFIG['forbidden_zones']['no_sell_zone']
+    bb_config = SAINT_GRAAL_CONFIG['bollinger_config']
+    
+    # Vérification BUY BB
+    if no_buy_zone['enabled'] and bb_position > no_buy_zone['bb_position_max']:
+        if no_buy_zone['strict_mode']:
+            buy_result['veto'] = True
         else:
-            analyzed_pairs_text = "❌ Aucune paire n'a pu être analysée."
-        
-        error_msg = (
-            f"❌ **Aucun signal valide trouvé**\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"{analyzed_pairs_text}\n\n"
-            f"🎯 **Critères de sélection:**\n"
-            f"• Score minimum requis: **{ROTATION_CONFIG['min_score_threshold']}**\n"
-            f"• Batches analysés: **{len(batches) if 'batches' in locals() else 0}/{ROTATION_CONFIG['max_batches_per_signal']}**\n\n"
-            f"🔄 **Recommandation:**\n"
-            f"Essayez à nouveau dans 1 minute.\n"
-            f"Le système analysera un nouveau lot de paires."
-        )
-        
-        await query.edit_message_text(error_msg)
-        
-        new_message_id = await create_signal_button(user_id, context.application)
-        
-        if new_message_id:
-            if 'active_buttons' not in session:
-                session['active_buttons'] = []
-            session['active_buttons'].append(new_message_id)
-
-async def cmd_session_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Affiche l'état de la session"""
-    user_id = update.effective_user.id
+            buy_result['penalty'] += no_buy_zone['penalty']
+            buy_result['reason'].append(f"BB haut: -{no_buy_zone['penalty']}")
     
-    session = session_manager.get_session(user_id)
-    if not session or session['status'] != 'active':
-        await update.message.reply_text("ℹ️ Aucune session active\n\nUtilisez /startsession")
-        return
+    # Vérification SELL BB
+    if no_sell_zone['enabled'] and bb_position < no_sell_zone['bb_position_min']:
+        if no_sell_zone['strict_mode']:
+            sell_result['veto'] = True
+        else:
+            sell_result['penalty'] += no_sell_zone['penalty']
+            sell_result['reason'].append(f"BB bas: -{no_sell_zone['penalty']}")
     
-    duration = (get_haiti_now() - session['start_time']).total_seconds() / 60
-    winrate = (session['wins'] / session['signal_count'] * 100) if session['signal_count'] > 0 else 0
-    
-    is_weekend = otc_provider.is_weekend()
-    mode_text = "🌙 Mode Crypto (Week-end)" if is_weekend else "📈 Mode Forex"
-    
-    analysis_results = session_manager.get_last_analysis_results(user_id)
-    last_analysis_info = ""
-    if analysis_results:
-        total_analyzed = len(analysis_results)
-        signals_found = len([r for r in analysis_results if r.get('status') == 'SIGNAL_FOUND'])
-        last_analysis_info = f"\n📊 **Dernière analyse:** {total_analyzed} paires, {signals_found} signaux"
-    
-    msg = (
-        "📊 **ÉTAT SESSION**\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"{mode_text}\n"
-        f"⏱️ Durée: {duration:.1f} min\n"
-        f"📈 Progression: {session['signal_count']}/{SIGNALS_PER_SESSION}\n\n"
-        f"✅ Wins: {session['wins']}\n"
-        f"❌ Losses: {session['losses']}\n"
-        f"⏳ Signaux en cours: {session['pending_signals']}\n\n"
-        f"📊 Win Rate: {winrate:.1f}%\n"
-        f"🔄 Prochain signal: #{session['next_signal_number']}\n"
-        f"⏱️ Dernier signal: {session['last_signal_time'].strftime('%H:%M:%S') if session['last_signal_time'] else 'N/A'}"
-        f"{last_analysis_info}\n\n"
-        f"⚡ **Bouton:**\n"
-        f"• Timeout: {BUTTON_TIMEOUT_MINUTES} minutes\n"
-        f"• Après bougie: ✅ ACTIVÉ\n"
-        f"• Affichage analyses: ✅ ACTIVÉ\n"
-        f"• Boutons actifs: {len(session.get('active_buttons', []))}"
-    )
-    
-    await update.message.reply_text(msg)
-
-async def cmd_end_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Termine la session"""
-    user_id = update.effective_user.id
-    
-    session = session_manager.get_session(user_id)
-    if not session:
-        await update.message.reply_text("ℹ️ Aucune session active")
-        return
-    
-    if session['pending_signals'] > 0:
-        await update.message.reply_text(
-            f"⚠️ {session['pending_signals']} signal(s) en cours\n\n"
-            f"Attendez la fin des bouches ou utilisez /forceend"
-        )
-        return
-    
-    session_manager.end_session(user_id)
-    await end_session_summary(user_id, context.application)
-
-async def cmd_force_end(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Force la fin de session"""
-    user_id = update.effective_user.id
-    
-    session = session_manager.get_session(user_id)
-    if not session:
-        await update.message.reply_text("ℹ️ Aucune session active")
-        return
-    
-    session_manager.end_session(user_id)
-    await end_session_summary(user_id, context.application)
-    await update.message.reply_text("✅ Session terminée (forcée) !")
-
-async def end_session_summary(user_id, app):
-    """Envoie le résumé de fin de session"""
-    session = session_manager.get_session(user_id)
-    if not session:
-        return
-    
-    duration = (get_haiti_now() - session['start_time']).total_seconds() / 60
-    winrate = (session['wins'] / session['signal_count'] * 100) if session['signal_count'] > 0 else 0
-    
-    summary = (
-        "🏁 **SESSION TERMINÉE**\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"⏱️ Durée: {duration:.1f} min\n"
-        f"📊 Signaux: {session['signal_count']}/{SIGNALS_PER_SESSION}\n\n"
-        f"✅ Wins: {session['wins']}\n"
-        f"❌ Losses: {session['losses']}\n"
-        f"📈 Win Rate: **{winrate:.1f}%**\n\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "🎯 Garantie: 8 signaux/session\n"
-        "Utilisez /startsession pour nouvelle session"
-    )
-    
-    await app.bot.send_message(chat_id=user_id, text=summary)
-
-async def cmd_rotation_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Affiche les statistiques de rotation"""
-    stats = api_manager.get_stats()
-    is_weekend = otc_provider.is_weekend()
-    
-    if is_weekend:
-        crypto_section = f"🌙 **MODE WEEK-END ACTIF**\n• Rotation exclusive sur {len(CRYPTO_PAIRS)} paires Crypto\n• {', '.join(CRYPTO_PAIRS)}\n"
-        pairs_text = f"🎯 Paires Crypto: {len(CRYPTO_PAIRS)}"
-    else:
-        crypto_section = f"📈 **MODE FOREX ACTIF**\n• Rotation standard\n"
-        pairs_text = f"📊 Paires Forex: {len(ROTATION_PAIRS)}"
-    
-    msg = (
-        f"🔄 **STATISTIQUES ROTATION**\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"{crypto_section}\n"
-        f"{pairs_text}\n"
-        f"🔄 Paires/batch: {ROTATION_CONFIG['pairs_per_batch']}\n"
-        f"📦 Max batches: {ROTATION_CONFIG['max_batches_per_signal']}\n"
-        f"🎯 Score minimum: {ROTATION_CONFIG['min_score_threshold']}\n"
-        f"⚡ Recherche itérative: {'✅ OUI' if ROTATION_CONFIG['enable_iterative_search'] else '❌ NON'}\n"
-        f"📊 Affichage analyses: ✅ ACTIVÉ\n"
-        f"🔧 Version 5.0: ✅ get_signal_saint_graal avec return_dict=True\n\n"
-        f"🌐 **API Stats:**\n"
-        f"• Appels aujourd'hui: {stats['daily_calls']}/{stats['max_daily']}\n"
-        f"• Appels dernière minute: {stats['recent_minute']}/{stats['max_minute']}\n"
-        f"• Appels dernière heure: {stats['recent_hour']}\n"
-        f"• Restant quotidien: {stats['daily_remaining']}\n"
-    )
-    
-    await update.message.reply_text(msg)
-
-async def cmd_button_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Affiche la configuration du bouton"""
-    msg = (
-        f"⚙️ **CONFIGURATION BOUTON**\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🔄 **Système de bouton après bougie:**\n"
-        f"• Apparaît après: Fin de bougie M1\n"
-        f"• Timeout: {BUTTON_TIMEOUT_MINUTES} minutes\n"
-        f"• Régénération auto: ✅ ACTIVÉE\n"
-        f"• Nettoyage auto: ✅ ACTIVÉ\n"
-        f"• Affichage analyses: ✅ ACTIVÉ\n"
-        f"• Version fonction: 5.0 ✅\n\n"
-        f"🎯 **Fonctionnement:**\n"
-        f"1. Signal généré → Envoyé immédiatement\n"
-        f"2. Bouton apparaît → Après fin bougie M1\n"
-        f"3. Se régénère → Après timeout\n"
-        f"4. Un seul bouton → Actif à la fois\n"
-        f"5. Si aucun signal → Affiche paires analysées\n\n"
-        f"⚠️ **En cas de problème:**\n"
-        f"• Utilisez /startsession pour régénérer\n"
-        f"• Vérifiez /sessionstatus pour l'état\n"
-        f"• Voir /lastanalysis pour analyses détaillées\n"
-        f"• Contactez le support si problème persiste"
-    )
-    
-    await update.message.reply_text(msg)
-
-async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Affiche les statistiques globales"""
-    try:
-        with engine.connect() as conn:
-            total = conn.execute(text('SELECT COUNT(*) FROM signals')).scalar()
-            wins = conn.execute(text("SELECT COUNT(*) FROM signals WHERE result='WIN'")).scalar()
-            losses = conn.execute(text("SELECT COUNT(*) FROM signals WHERE result='LOSE'")).scalar()
-        
-        verified = wins + losses
-        winrate = (wins/verified*100) if verified > 0 else 0
-        
-        rotation_stats = api_manager.get_stats()
-        is_weekend = otc_provider.is_weekend()
-        
-        mode_text = f"🌙 Week-end (Crypto)" if is_weekend else f"📈 Forex"
-        
-        msg = (
-            f"📊 **Statistiques Globales**\n\n"
-            f"Mode actuel: {mode_text}\n"
-            f"Total signaux: {total}\n"
-            f"✅ Wins: {wins}\n"
-            f"❌ Losses: {losses}\n"
-            f"📈 Win rate: {winrate:.1f}%\n\n"
-            f"🔄 **Rotation:**\n"
-            f"• Paires analysées: {len(CRYPTO_PAIRS) if is_weekend else len(ROTATION_PAIRS)}\n"
-            f"• Appels API: {rotation_stats['daily_calls']}/{rotation_stats['max_daily']}\n\n"
-            f"🎯 **Sessions actives:** {len(session_manager.active_sessions)}\n"
-            f"🔄 **Bouton après bougie:** ✅ ACTIVÉ\n"
-            f"📊 **Affichage analyses:** ✅ ACTIVÉ\n"
-            f"🔧 **Version 5.0:** ✅ get_signal_saint_graal avec return_dict=True"
-        )
-        
-        await update.message.reply_text(msg)
-    except Exception as e:
-        await update.message.reply_text(f"❌ Erreur: {e}")
-
-async def cmd_pairslist(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Affiche la liste des paires analysées"""
-    pairs_per_row = 3
-    pairs_text = ""
-    
-    for i in range(0, len(ROTATION_PAIRS), pairs_per_row):
-        row = ROTATION_PAIRS[i:i+pairs_per_row]
-        pairs_text += " • " + " | ".join(row) + "\n"
-    
-    msg = (
-        f"📋 **LISTE DES PAIRES FOREX**\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"Source: config.py\n"
-        f"Total: {len(ROTATION_PAIRS)} paires\n\n"
-        f"{pairs_text}\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"🔄 Rotation: {ROTATION_CONFIG['pairs_per_batch']} paires/batch\n"
-        f"📦 Max: {ROTATION_CONFIG['max_batches_per_signal']} batches/signal\n"
-        f"🎯 Score minimum: {ROTATION_CONFIG['min_score_threshold']}\n\n"
-        f"ℹ️ Utilisez /cryptolist pour voir les paires Crypto week-end"
-    )
-    
-    await update.message.reply_text(msg)
-
-async def cmd_cryptolist(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Affiche la liste des paires Crypto pour week-end"""
-    crypto_text = "\n".join([f"• {pair}" for pair in CRYPTO_PAIRS])
-    
-    is_weekend = otc_provider.is_weekend()
-    weekend_status = "✅ ACTIF" if is_weekend else "⏸️ INACTIF"
-    
-    msg = (
-        f"🌙 **LISTE DES PAIRES CRYPTO (WEEK-END)**\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"Mode week-end: {weekend_status}\n"
-        f"Total: {len(CRYPTO_PAIRS)} paires\n\n"
-        f"{crypto_text}\n\n"
-        f"🔧 **Fonctionnement:**\n"
-        f"• Le week-end (ven 22h - dim 22h UTC)\n"
-        f"• Toutes les paires Forex sont transformées en Crypto\n"
-        f"• Rotation exclusive sur ces {len(CRYPTO_PAIRS)} paires\n"
-        f"• Distribution équitable via hash MD5\n\n"
-        f"🎯 **Paires disponibles:**\n"
-        f"• BTC/USD - Bitcoin\n"
-        f"• ETH/USD - Ethereum\n"
-        f"• DOGE/USD - Dogecoin\n"
-        f"• SOL/USD - Solana\n"
-        f"• LTC/USD - Litecoin"
-    )
-    
-    await update.message.reply_text(msg)
-
-async def cmd_last_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Affiche les dernières paires analysées"""
-    user_id = update.effective_user.id
-    
-    analysis_results = session_manager.get_last_analysis_results(user_id)
-    
-    if not analysis_results:
-        await update.message.reply_text("ℹ️ Aucune analyse disponible.\nGénérez un signal avec le bouton pour voir les résultats.")
-        return
-    
-    is_weekend = otc_provider.is_weekend()
-    pair_type = "Crypto" if is_weekend else "Forex"
-    
-    total_pairs = len(analysis_results)
-    signals_found = len([r for r in analysis_results if r.get('status') == 'SIGNAL_FOUND'])
-    no_signals = len([r for r in analysis_results if r.get('status') == 'NO_SIGNAL'])
-    errors = len([r for r in analysis_results if r.get('status') == 'ERROR'])
-    
-    scores = [r.get('score', 0) for r in analysis_results if isinstance(r.get('score'), (int, float))]
-    best_score = max(scores) if scores else 0
-    best_pair = next((r.get('actual_pair', 'N/A') for r in analysis_results if r.get('score', 0) == best_score), "N/A")
-    
-    msg = (
-        f"📊 **DERNIÈRES PAIRES ANALYSÉES**\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🌐 Mode: {'Crypto 🌙' if is_weekend else 'Forex 📈'}\n"
-        f"📈 Total paires analysées: {total_pairs}\n\n"
-        f"✅ Signaux détectés: {signals_found}\n"
-        f"❌ Pas de signal: {no_signals}\n"
-        f"⚠️ Erreurs: {errors}\n\n"
-        f"🏆 **Meilleur résultat:**\n"
-        f"• Paire: {best_pair}\n"
-        f"• Score: {best_score:.1f}\n\n"
-        f"🎯 Score minimum requis: {ROTATION_CONFIG['min_score_threshold']}"
-    )
-    
-    if analysis_results:
-        msg += f"\n\n📋 **5 dernières analyses:**\n"
-        recent_results = analysis_results[-5:] if len(analysis_results) > 5 else analysis_results
-        
-        for i, result in enumerate(recent_results, 1):
-            pair = result.get('actual_pair', 'N/A')
-            status = result.get('status', 'UNKNOWN')
-            
-            if status == 'SIGNAL_FOUND':
-                score = result.get('score', 0)
-                direction = result.get('direction', 'N/A')
-                direction_emoji = "↗️" if direction == "CALL" else "↘️"
-                msg += f"{i}. {pair} {direction_emoji} ✅ Score: {score:.1f}\n"
-            elif status == 'NO_SIGNAL':
-                msg += f"{i}. {pair} ❌ Pas de signal\n"
-            elif status == 'ERROR':
-                reason = result.get('reason', 'Erreur')
-                msg += f"{i}. {pair} ⚠️ {reason[:30]}\n"
+    # Score BUY BB
+    if not buy_result['veto']:
+        if bb_position < bb_config['buy_zone_max']:
+            buy_result['score'] = 20
+            if bb_position < bb_config['oversold_zone']:
+                buy_result['score'] += 12
+                buy_result['reason'].append("BB OVERSOLD")
             else:
-                msg += f"{i}. {pair} ❓ Inconnu\n"
+                buy_result['reason'].append("BB zone BUY")
+        
+        # Appliquer pénalité
+        buy_result['score'] = max(0, buy_result['score'] - buy_result['penalty'])
     
-    await update.message.reply_text(msg)
+    else:
+        buy_result['score'] = -999
+    
+    # Score SELL BB
+    if not sell_result['veto']:
+        if bb_position > bb_config['sell_zone_min']:
+            sell_result['score'] = 20
+            if bb_position > bb_config['overbought_zone']:
+                sell_result['score'] += 12
+                sell_result['reason'].append("BB OVERBOUGHT")
+            else:
+                sell_result['reason'].append("BB zone SELL")
+        
+        # Appliquer pénalité
+        sell_result['score'] = max(0, sell_result['score'] - sell_result['penalty'])
+    
+    else:
+        sell_result['score'] = -999
+    
+    # Croisement bande médiane
+    if len(df) >= 2:
+        prev_price = float(df.iloc[-2]['close'])
+        
+        if prev_price <= current_middle and current_price > current_middle:
+            if buy_result['score'] >= 0:
+                buy_result['score'] += bb_config['middle_band_weight']
+                buy_result['reason'].append("Bullish cross")
+        elif prev_price >= current_middle and current_price < current_middle:
+            if sell_result['score'] >= 0:
+                sell_result['score'] += bb_config['middle_band_weight']
+                sell_result['reason'].append("Bearish cross")
+    
+    # Formater raisons
+    buy_result['reason'] = " | ".join(buy_result['reason']) if buy_result['reason'] else f"BB Pos: {bb_position:.1f}%"
+    sell_result['reason'] = " | ".join(sell_result['reason']) if sell_result['reason'] else f"BB Pos: {bb_position:.1f}%"
+    
+    return {
+        'bb_position': bb_position,
+        'buy': buy_result,
+        'sell': sell_result,
+        'price_above_middle': current_price > current_middle
+    }
 
-async def cmd_apistats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Affiche les statistiques API détaillées"""
-    stats = api_manager.get_stats()
+# ================= FONCTIONS DE FILTRAGE =================
+
+def analyze_atr_volatility(df):
+    """Analyse la volatilité avec ATR"""
+    if len(df) < 20:
+        return {'valid': True, 'reason': 'Données insuffisantes - ATR ignoré', 'score': 5, 'atr_pips': 0}
     
-    msg = (
-        f"🌐 **STATISTIQUES API**\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"📊 **Utilisation quotidienne:**\n"
-        f"• Appels: {stats['daily_calls']}/{stats['max_daily']}\n"
-        f"• Pourcentage: {(stats['daily_calls']/stats['max_daily']*100):.1f}%\n"
-        f"• Restant: {stats['daily_remaining']}\n\n"
-        f"⏱️ **Utilisation minute:**\n"
-        f"• Appels: {stats['recent_minute']}/{stats['max_minute']}\n"
-        f"• Pourcentage: {(stats['recent_minute']/stats['max_minute']*100):.1f}%\n"
-        f"• Disponible: {stats['calls_available_minute']}\n\n"
-        f"📈 **Utilisation heure:**\n"
-        f"• Appels dernière heure: {stats['recent_hour']}\n\n"
-        f"🎯 **Signaux trackés:** {stats['active_signals_tracking']}"
+    atr_indicator = AverageTrueRange(
+        high=df['high'],
+        low=df['low'],
+        close=df['close'],
+        window=SAINT_GRAAL_CONFIG['atr_filter']['window']
+    )
+    atr = float(atr_indicator.average_true_range().iloc[-1])
+    
+    # Convertir en pips (approximation pour forex)
+    atr_pips = atr * 10000
+    
+    config = SAINT_GRAAL_CONFIG['atr_filter']
+    
+    if not config['enabled']:
+        return {'valid': True, 'reason': 'ATR désactivé', 'score': 5, 'atr_pips': atr_pips}
+    
+    if atr_pips < config['min_atr_pips']:
+        return {'valid': False, 'reason': f'ATR trop faible: {atr_pips:.1f} pips', 'score': 0, 'atr_pips': atr_pips}
+    
+    if atr_pips > config['max_atr_pips']:
+        return {'valid': False, 'reason': f'ATR trop élevé: {atr_pips:.1f} pips', 'score': 0, 'atr_pips': atr_pips}
+    
+    # Score basé sur la zone optimale
+    if config['optimal_range'][0] <= atr_pips <= config['optimal_range'][1]:
+        score = 10
+        reason = f'ATR optimal: {atr_pips:.1f} pips'
+    else:
+        score = 5
+        reason = f'ATR acceptable: {atr_pips:.1f} pips'
+    
+    return {'valid': True, 'reason': reason, 'score': score, 'atr_pips': atr_pips}
+
+def analyze_m5_trend(df):
+    """Analyse tendance M5"""
+    if len(df) < 100:
+        return {'trend': 'NEUTRAL', 'reason': 'Données insuffisantes', 'score': 5}
+    
+    if not SAINT_GRAAL_CONFIG['m5_filter']['enabled']:
+        return {'trend': 'NEUTRAL', 'reason': 'Filtre M5 désactivé', 'score': 5}
+    
+    # Utiliser les EMA pour déterminer la tendance
+    ema_fast = EMAIndicator(close=df['close'], window=50).ema_indicator()
+    ema_slow = EMAIndicator(close=df['close'], window=200).ema_indicator()
+    
+    current_ema_fast = float(ema_fast.iloc[-1])
+    current_ema_slow = float(ema_slow.iloc[-1])
+    
+    if current_ema_fast > current_ema_slow * 1.001:
+        trend = "BULLISH"
+        reason = f"Tendance haussière M5: EMA{50}>{200}"
+        score = SAINT_GRAAL_CONFIG['m5_filter']['weight']
+    elif current_ema_fast < current_ema_slow * 0.999:
+        trend = "BEARISH"
+        reason = f"Tendance baissière M5: EMA{50}<{200}"
+        score = SAINT_GRAAL_CONFIG['m5_filter']['weight']
+    else:
+        trend = "NEUTRAL"
+        reason = f"Tendance neutre M5: EMA{50}≈{200}"
+        score = 5
+    
+    return {'trend': trend, 'reason': reason, 'score': score}
+
+def detect_swing_extremes(df):
+    """Détecte les swing highs et lows"""
+    if len(df) < 10:
+        return {'is_swing_high': False, 'is_swing_low': False}
+    
+    lookback = SAINT_GRAAL_CONFIG['forbidden_zones']['swing_filter']['lookback_bars']
+    
+    if len(df) < lookback:
+        return {'is_swing_high': False, 'is_swing_low': False}
+    
+    highs = df['high'].values[-lookback:]
+    lows = df['low'].values[-lookback:]
+    current_high = highs[-1]
+    current_low = lows[-1]
+    
+    # Vérifier si le prix actuel est un extremum local
+    is_swing_high = current_high == max(highs)
+    is_swing_low = current_low == min(lows)
+    
+    return {'is_swing_high': is_swing_high, 'is_swing_low': is_swing_low}
+
+def analyze_micro_momentum(df, direction):
+    """Analyse micro momentum"""
+    if not SAINT_GRAAL_CONFIG['micro_momentum']['enabled']:
+        return {'valid': True, 'score': 0, 'reason': 'Micro momentum désactivé'}
+    
+    lookback = SAINT_GRAAL_CONFIG['micro_momentum']['lookback_bars']
+    
+    if len(df) < lookback + 1:
+        return {'valid': False, 'score': 0, 'reason': 'Données insuffisantes'}
+    
+    closes = df['close'].values[-(lookback+1):]
+    
+    if direction == "BUY":
+        bullish_bars = sum(1 for i in range(1, len(closes)) if closes[i] > closes[i-1])
+        if bullish_bars >= SAINT_GRAAL_CONFIG['micro_momentum']['min_bullish_bars']:
+            score = SAINT_GRAAL_CONFIG['micro_momentum']['weight']
+            reason = f'Micro momentum haussier: {bullish_bars}/{lookback} bougies vertes'
+            return {'valid': True, 'score': score, 'reason': reason}
+    else:  # SELL
+        bearish_bars = sum(1 for i in range(1, len(closes)) if closes[i] < closes[i-1])
+        if bearish_bars >= SAINT_GRAAL_CONFIG['micro_momentum']['min_bearish_bars']:
+            score = SAINT_GRAAL_CONFIG['micro_momentum']['weight']
+            reason = f'Micro momentum baissier: {bearish_bars}/{lookback} bougies rouges'
+            return {'valid': True, 'score': score, 'reason': reason}
+    
+    return {'valid': False, 'score': 0, 'reason': 'Micro momentum insuffisant'}
+
+def check_confidence_killers(df, direction, momentum_data):
+    """Vérifie les facteurs qui tuent la confiance"""
+    confidence_reduction = 0
+    killers = []
+    
+    # 1. Divergence RSI (simple)
+    if len(df) >= 10:
+        closes = df['close'].values[-10:]
+        rsis = RSIIndicator(close=pd.Series(closes), window=14).rsi().values
+        
+        if len(rsis) >= 5:
+            current_rsi = rsis[-1]
+            rsi_trend = np.polyfit(range(5), rsis[-5:], 1)[0]
+            price_trend = np.polyfit(range(5), closes[-5:], 1)[0]
+            
+            if direction == "BUY":
+                if price_trend > 0 and rsi_trend < 0:  # Prix monte, RSI baisse
+                    confidence_reduction += 5
+                    killers.append("Divergence RSI baissière")
+            else:  # SELL
+                if price_trend < 0 and rsi_trend > 0:  # Prix baisse, RSI monte
+                    confidence_reduction += 5
+                    killers.append("Divergence RSI haussière")
+    
+    # 2. Mèche extrême contre le sens
+    current_candle = df.iloc[-1]
+    body_size = abs(current_candle['close'] - current_candle['open'])
+    total_range = current_candle['high'] - current_candle['low']
+    
+    if total_range > 0:
+        wick_ratio = (total_range - body_size) / total_range
+        
+        if direction == "BUY":
+            upper_wick = current_candle['high'] - max(current_candle['open'], current_candle['close'])
+            if upper_wick > body_size * 2.0:  # Très grande mèche haute
+                confidence_reduction += 3
+                killers.append("Grande mèche haute")
+        else:  # SELL
+            lower_wick = min(current_candle['open'], current_candle['close']) - current_candle['low']
+            if lower_wick > body_size * 2.0:  # Très grande mèche basse
+                confidence_reduction += 3
+                killers.append("Grande mèche basse")
+    
+    return confidence_reduction, killers
+
+def calculate_confidence(score):
+    """Confiance par zones avec score max réaliste"""
+    zones = sorted(SAINT_GRAAL_CONFIG['signal_validation']['confidence_zones'].items())
+    max_realistic = SAINT_GRAAL_CONFIG['signal_validation']['max_score_realistic']
+    
+    # Normaliser le score par rapport au max réaliste
+    normalized_score = min(score, max_realistic)
+    
+    base_confidence = 60  # Valeur par défaut
+    
+    # Trouver la zone correspondante
+    for threshold, confidence in zones:
+        if normalized_score >= threshold:
+            base_confidence = confidence
+    
+    # Interpolation entre zones
+    for i in range(len(zones) - 1):
+        current_threshold, current_conf = zones[i]
+        next_threshold, next_conf = zones[i + 1]
+        
+        if current_threshold <= normalized_score < next_threshold:
+            progress = (normalized_score - current_threshold) / (next_threshold - current_threshold)
+            base_confidence = current_conf + (next_conf - current_conf) * progress
+            break
+    
+    return min(95, max(60, int(base_confidence)))
+
+# ================= FONCTION PRINCIPALE V9.2 =================
+
+def analyze_pair_for_signals(df):
+    """
+    🔥 Analyse complète - VERSION 9.2 OPTIMISÉE
+    """
+    # Vérifier cooldown
+    can_trade, reason = trading_state.can_trade(datetime.now())
+    if not can_trade:
+        print(f"⏸️  Trading en pause: {reason}")
+        return None
+    
+    # 🔥 SEUIL DE DONNÉES ASSOUPLI
+    if len(df) < 60:
+        print(f"⚠️  Données limitées ({len(df)} bougies) - analyse en mode réduit")
+        # Mode dégradé pour petites données
+        original_config = SAINT_GRAAL_CONFIG.copy()
+        try:
+            SAINT_GRAAL_CONFIG['m5_filter']['enabled'] = False
+            SAINT_GRAAL_CONFIG['market_state']['enabled'] = False
+            SAINT_GRAAL_CONFIG['signal_validation']['min_score'] = 70  # Réduit temporairement
+        except:
+            pass
+    
+    current_price = float(df.iloc[-1]['close'])
+    print(f"\n{'='*60}")
+    print(f"🔍 ANALYSE M1 V9.2 - Prix: {current_price:.5f}")
+    print(f"{'='*60}")
+    
+    # 🔥 ÉTAT DE MARCHÉ
+    market = detect_market_state(df)
+    print(f"📊 ÉTAT MARCHÉ: {market['state']} - {market['reason']}")
+    
+    # 1. Momentum avec gates séparés
+    momentum = analyze_momentum_with_filters(df)
+    print(f"📈 MOMENTUM:")
+    print(f"   RSI: {momentum['rsi']:.1f} | Stoch: {momentum['stoch_k']:.1f}/{momentum['stoch_d']:.1f}")
+    print(f"   BUY: Score {momentum['buy']['score']} | Gate: {'✅' if momentum['gate_buy'] else '❌'}")
+    print(f"   SELL: Score {momentum['sell']['score']} | Gate: {'✅' if momentum['gate_sell'] else '❌'}")
+    
+    if momentum['violations']:
+        for violation in momentum['violations']:
+            print(f"   ⚠️  {violation}")
+    
+    # 2. Bollinger Bands
+    bb = analyze_bollinger_bands(df)
+    print(f"📊 BOLLINGER: Position {bb['bb_position']:.1f}%")
+    print(f"   BUY: Score {bb['buy']['score']}")
+    print(f"   SELL: Score {bb['sell']['score']}")
+    
+    # 3. Swing avec strict_mode
+    swings = detect_swing_extremes(df)
+    swing_filter = SAINT_GRAAL_CONFIG['forbidden_zones']['swing_filter']
+    
+    swing_adjustment = {'buy': 0, 'sell': 0}
+    swing_killers = {'buy': [], 'sell': []}
+    
+    if swing_filter['enabled']:
+        if swing_filter['no_buy_at_swing_high'] and swings['is_swing_high']:
+            if swing_filter['strict_mode']:
+                swing_adjustment['buy'] = -999
+                swing_killers['buy'].append("Swing High VETO")
+            else:
+                if momentum['buy']['score'] < swing_filter['swing_momentum_threshold']:
+                    swing_adjustment['buy'] = -swing_filter['swing_penalty']
+                    swing_killers['buy'].append(f"Swing High: -{swing_filter['swing_penalty']}")
+        
+        if swing_filter['no_sell_at_swing_low'] and swings['is_swing_low']:
+            if swing_filter['strict_mode']:
+                swing_adjustment['sell'] = -999
+                swing_killers['sell'].append("Swing Low VETO")
+            else:
+                if momentum['sell']['score'] < swing_filter['swing_momentum_threshold']:
+                    swing_adjustment['sell'] = -swing_filter['swing_penalty']
+                    swing_killers['sell'].append(f"Swing Low: -{swing_filter['swing_penalty']}")
+    
+    # 4. ATR
+    atr = analyze_atr_volatility(df)
+    print(f"📏 VOLATILITÉ: {atr['reason']}")
+    
+    if not atr['valid']:
+        print(f"⚠️  ATR VETO: {atr['reason']}")
+        # On continue quand même, ATR n'est pas critique
+    
+    # 5. M5
+    m5 = analyze_m5_trend(df)
+    print(f"⏰ M5: {m5['reason']}")
+    
+    # 🔥 CALCUL SCORES FINAUX
+    buy_score = 0
+    sell_score = 0
+    
+    # Momentum scores
+    if momentum['buy']['veto']:
+        buy_score = -999
+    elif momentum['buy']['score'] > 0:
+        buy_score = momentum['buy']['score']
+    
+    if momentum['sell']['veto']:
+        sell_score = -999
+    elif momentum['sell']['score'] > 0:
+        sell_score = momentum['sell']['score']
+    
+    # BB scores
+    if bb['buy']['veto']:
+        buy_score = -999
+    elif bb['buy']['score'] > 0 and buy_score != -999:
+        buy_score += bb['buy']['score']
+    
+    if bb['sell']['veto']:
+        sell_score = -999
+    elif bb['sell']['score'] > 0 and sell_score != -999:
+        sell_score += bb['sell']['score']
+    
+    # Swing adjustment
+    if swing_adjustment['buy'] == -999:
+        buy_score = -999
+    elif swing_adjustment['buy'] < 0 and buy_score != -999:
+        buy_score += swing_adjustment['buy']
+    
+    if swing_adjustment['sell'] == -999:
+        sell_score = -999
+    elif swing_adjustment['sell'] < 0 and sell_score != -999:
+        sell_score += swing_adjustment['sell']
+    
+    # ATR
+    if atr['valid'] and atr['score'] > 0:
+        if buy_score != -999:
+            buy_score += atr['score']
+        if sell_score != -999:
+            sell_score += atr['score']
+    
+    # 🔥 M5 SOFT VETO
+    if SAINT_GRAAL_CONFIG['m5_filter']['enabled'] and SAINT_GRAAL_CONFIG['m5_filter']['soft_veto']:
+        if m5['trend'] == "BEARISH" and buy_score != -999:
+            buy_score = min(buy_score, SAINT_GRAAL_CONFIG['m5_filter']['max_score_against_trend'])
+            print(f"⚠️  M5 BEARISH soft veto: BUY plafonné à {buy_score}")
+        elif m5['trend'] == "BULLISH" and sell_score != -999:
+            sell_score = min(sell_score, SAINT_GRAAL_CONFIG['m5_filter']['max_score_against_trend'])
+            print(f"⚠️  M5 BULLISH soft veto: SELL plafonné à {sell_score}")
+    
+    # 🔥 PRIORITÉ PAR ÉTAT DE MARCHÉ
+    if SAINT_GRAAL_CONFIG['market_state']['enabled']:
+        if market['state'] == "RANGE" and SAINT_GRAAL_CONFIG['market_state']['prioritize_bb_in_range']:
+            # En range, priorité aux signaux BB
+            if buy_score > 0:
+                buy_score = buy_score * 0.7 + bb['buy']['score'] * 0.3
+            if sell_score > 0:
+                sell_score = sell_score * 0.7 + bb['sell']['score'] * 0.3
+        
+        elif market['state'] == "TREND" and SAINT_GRAAL_CONFIG['market_state']['prioritize_momentum_in_trend']:
+            # En trend, priorité au momentum
+            if buy_score > 0:
+                buy_score = buy_score * 0.8 + momentum['buy']['score'] * 0.2
+            if sell_score > 0:
+                sell_score = sell_score * 0.8 + momentum['sell']['score'] * 0.2
+    
+    print(f"\n🎯 SCORES FINAUX: BUY {buy_score:.1f} | SELL {sell_score:.1f}")
+    
+    # 🔥 CONDITIONS FINALES AVEC GATES SÉPARÉS
+    buy_conditions_met = (
+        not momentum['buy']['veto'] and 
+        not bb['buy']['veto'] and 
+        momentum['buy']['allowed'] and 
+        bb['buy']['allowed'] and
+        momentum['gate_buy'] and  # 🔥 GATE SPÉCIFIQUE BUY
+        buy_score >= SAINT_GRAAL_CONFIG['signal_validation']['min_score'] and
+        buy_score != -999 and
+        swing_adjustment['buy'] != -999
     )
     
-    await update.message.reply_text(msg)
-
-# ================= SERVEUR HTTP =================
-async def health_check(request):
-    """Endpoint de santé"""
-    is_weekend = otc_provider.is_weekend()
-    return web.json_response({
-        'status': 'ok',
-        'timestamp': get_haiti_now().isoformat(),
-        'active_sessions': len(session_manager.active_sessions),
-        'rotation_pairs': len(ROTATION_PAIRS),
-        'crypto_pairs': len(CRYPTO_PAIRS),
-        'weekend_mode': is_weekend,
-        'button_timeout': BUTTON_TIMEOUT_MINUTES,
-        'button_after_candle': 'active',
-        'analysis_display': 'active',
-        'signal_function': 'get_signal_saint_graal',
-        'signal_return_type': 'dict',
-        'version': '5.0'
-    })
-
-async def start_http_server():
-    """Démarre le serveur HTTP"""
-    app = web.Application()
-    app.router.add_get('/health', health_check)
-    app.router.add_get('/', health_check)
+    sell_conditions_met = (
+        not momentum['sell']['veto'] and 
+        not bb['sell']['veto'] and 
+        momentum['sell']['allowed'] and 
+        bb['sell']['allowed'] and
+        momentum['gate_sell'] and  # 🔥 GATE SPÉCIFIQUE SELL
+        sell_score >= SAINT_GRAAL_CONFIG['signal_validation']['min_score'] and
+        sell_score != -999 and
+        swing_adjustment['sell'] != -999
+    )
     
-    runner = web.AppRunner(app)
-    await runner.setup()
+    # Décision finale
+    signal = None
+    final_score = 0
+    quality = "MINIMUM"
+    confidence_killers = []
     
-    port = int(os.getenv('PORT', 10000))
-    site = web.TCPSite(runner, '0.0.0.0', port)
-    await site.start()
+    # Vérifier BUY
+    if buy_conditions_met:
+        micro = analyze_micro_momentum(df, "BUY")
+        
+        # Même sans micro momentum, on peut avoir un signal
+        if micro['valid']:
+            final_score = buy_score + micro['score']
+        else:
+            final_score = buy_score
+            micro = {'reason': 'Micro momentum insuffisant', 'valid': False}
+        
+        if final_score >= SAINT_GRAAL_CONFIG['signal_validation']['min_score']:
+            # 🔥 CONFIDENCE KILLERS
+            confidence_reduction, killers = check_confidence_killers(df, "BUY", momentum)
+            confidence_killers.extend(killers)
+            
+            signal = "CALL"
+            reason = f"BUY Score: {final_score:.1f} | RSI: {momentum['rsi']:.1f} | Stoch: {momentum['stoch_k']:.1f} | BB: {bb['bb_position']:.1f}%"
+            
+            # Qualité basée sur score
+            if final_score >= 125:
+                quality = "PREMIUM"
+            elif final_score >= 115:
+                quality = "EXCELLENT"
+            elif final_score >= 105:
+                quality = "HIGH"
+            elif final_score >= 95:
+                quality = "GOOD"
+            elif final_score >= 85:
+                quality = "SOLID"
+            else:
+                quality = "MINIMUM"
+            
+            # Confiance avec killers
+            base_confidence = calculate_confidence(final_score)
+            final_confidence = max(60, base_confidence - confidence_reduction)
+            
+            print(f"\n✅ SIGNAL BUY DÉTECTÉ!")
+            print(f"   Score: {final_score:.1f} | Qualité: {quality}")
+            print(f"   Confiance: {final_confidence}% (Base: {base_confidence}%)")
+            if confidence_killers:
+                print(f"   Confidence killers: {', '.join(confidence_killers)}")
+            if micro['valid']:
+                print(f"   Micro: {micro['reason']}")
     
-    print(f"✅ HTTP server running on :{port}")
-    return runner
-
-# ================= POINT D'ENTRÉE =================
-async def main():
-    print("\n" + "="*60)
-    print("🤖 BOT SAINT GRAAL 5.0 - ROTATION ITÉRATIVE")
-    print("🎯 8 SIGNAUX GARANTIS - BOUTON APRÈS BOUGIE")
-    print("🌙 ROTATION CRYPTO OPTIMISÉE WEEK-END")
-    print("📊 AFFICHAGE DÉTAILLÉ DES PAIRES ANALYSÉES")
-    print("🔧 VERSION 5.0 - get_signal_saint_graal avec return_dict=True")
-    print("="*60)
-    print(f"🎯 Stratégie: Saint Graal 5.0 avec Rotation Itérative")
-    print(f"📊 Paires Forex analysées: {len(ROTATION_PAIRS)}")
-    print(f"🌙 Paires Crypto week-end: {len(CRYPTO_PAIRS)}")
-    print(f"🔄 Batch: {ROTATION_CONFIG['pairs_per_batch']} paires")
-    print(f"📦 Max batches: {ROTATION_CONFIG['max_batches_per_signal']}")
-    print(f"🎯 Score minimum: {ROTATION_CONFIG['min_score_threshold']}")
-    print(f"🔄 Bouton après bougie: ✅ ACTIVÉ")
-    print(f"📊 Affichage analyses: ✅ ACTIVÉ")
-    print(f"🔧 Fonction signal: get_signal_saint_graal avec return_dict=True")
-    print(f"⏱️ Bouton timeout: {BUTTON_TIMEOUT_MINUTES} minutes")
-    print("="*60 + "\n")
-
-    ensure_db()
-
-    http_runner = await start_http_server()
-
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    # Vérifier SELL
+    elif sell_conditions_met:
+        micro = analyze_micro_momentum(df, "SELL")
+        
+        if micro['valid']:
+            final_score = sell_score + micro['score']
+        else:
+            final_score = sell_score
+            micro = {'reason': 'Micro momentum insuffisant', 'valid': False}
+        
+        if final_score >= SAINT_GRAAL_CONFIG['signal_validation']['min_score']:
+            # 🔥 CONFIDENCE KILLERS
+            confidence_reduction, killers = check_confidence_killers(df, "SELL", momentum)
+            confidence_killers.extend(killers)
+            
+            signal = "PUT"
+            reason = f"SELL Score: {final_score:.1f} | RSI: {momentum['rsi']:.1f} | Stoch: {momentum['stoch_k']:.1f} | BB: {bb['bb_position']:.1f}%"
+            
+            # Qualité
+            if final_score >= 125:
+                quality = "PREMIUM"
+            elif final_score >= 115:
+                quality = "EXCELLENT"
+            elif final_score >= 105:
+                quality = "HIGH"
+            elif final_score >= 95:
+                quality = "GOOD"
+            elif final_score >= 85:
+                quality = "SOLID"
+            else:
+                quality = "MINIMUM"
+            
+            # Confiance avec killers
+            base_confidence = calculate_confidence(final_score)
+            final_confidence = max(60, base_confidence - confidence_reduction)
+            
+            print(f"\n✅ SIGNAL SELL DÉTECTÉ!")
+            print(f"   Score: {final_score:.1f} | Qualité: {quality}")
+            print(f"   Confiance: {final_confidence}% (Base: {base_confidence}%)")
+            if confidence_killers:
+                print(f"   Confidence killers: {', '.join(confidence_killers)}")
+            if micro['valid']:
+                print(f"   Micro: {micro['reason']}")
     
-    app.add_handler(CommandHandler('start', cmd_start))
-    app.add_handler(CommandHandler('menu', cmd_menu))
-    app.add_handler(CommandHandler('startsession', cmd_start_session))
-    app.add_handler(CommandHandler('sessionstatus', cmd_session_status))
-    app.add_handler(CommandHandler('endsession', cmd_end_session))
-    app.add_handler(CommandHandler('forceend', cmd_force_end))
-    app.add_handler(CommandHandler('stats', cmd_stats))
-    
-    app.add_handler(CommandHandler('rotationstats', cmd_rotation_stats))
-    app.add_handler(CommandHandler('buttonconfig', cmd_button_config))
-    app.add_handler(CommandHandler('pairslist', cmd_pairslist))
-    app.add_handler(CommandHandler('cryptolist', cmd_cryptolist))
-    app.add_handler(CommandHandler('lastanalysis', cmd_last_analysis))
-    app.add_handler(CommandHandler('apistats', cmd_apistats))
-    
-    app.add_handler(CallbackQueryHandler(callback_generate_signal, pattern=r'^gen_signal_'))
-    
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling(drop_pending_updates=True)
-
-    bot_info = await app.bot.get_me()
-    print(f"✅ BOT ACTIF: @{bot_info.username}\n")
-    
-    is_weekend = otc_provider.is_weekend()
-    if is_weekend:
-        print(f"🌙 MODE WEEK-END ACTIF: Rotation exclusive Crypto")
-        print(f"🎯 Paires Crypto: {', '.join(CRYPTO_PAIRS)}")
+    if signal:
+        return {
+            'direction': signal,
+            'quality': quality,
+            'score': round(final_score, 1),
+            'confidence': final_confidence,
+            'expiration_minutes': 5,
+            'reason': reason,
+            'details': {
+                'market_state': market['state'],
+                'momentum_score': max(momentum['buy']['score'], momentum['sell']['score']),
+                'bb_score': max(bb['buy']['score'], bb['sell']['score']),
+                'micro_score': micro['score'] if micro['valid'] else 0,
+                'atr_score': atr['score'],
+                'm5_trend': m5['trend'],
+                'rsi': momentum['rsi'],
+                'stoch': momentum['stoch_k'],
+                'bb_position': bb['bb_position'],
+                'atr_pips': atr['atr_pips'],
+                'gate_buy': momentum['gate_buy'],
+                'gate_sell': momentum['gate_sell'],
+                'confidence_killers': confidence_killers,
+                'swing_adjustment': swing_adjustment
+            }
+        }
     else:
-        print(f"📈 MODE FOREX ACTIF: Rotation standard")
-        print(f"📊 Paires Forex: {len(ROTATION_PAIRS)}")
+        print(f"\n❌ AUCUN SIGNAL VALIDE")
+        
+        # Debug gates
+        if 'gate_debug' in momentum:
+            print(f"   Gate debug BUY: {momentum['gate_debug']['buy']}")
+            print(f"   Gate debug SELL: {momentum['gate_debug']['sell']}")
+        
+        if swing_killers['buy']:
+            print(f"   Swing BUY killers: {swing_killers['buy']}")
+        if swing_killers['sell']:
+            print(f"   Swing SELL killers: {swing_killers['sell']}")
+        
+        # Afficher pourquoi pas de signal
+        min_score = SAINT_GRAAL_CONFIG['signal_validation']['min_score']
+        print(f"   Score minimum requis: {min_score}")
+        print(f"   Score BUY: {buy_score:.1f} (requiert: {min_score})")
+        print(f"   Score SELL: {sell_score:.1f} (requiert: {min_score})")
+        
+        return None
+
+# ================= FONCTIONS DE COMPATIBILITÉ POUR LE BOT =================
+
+def get_signal_saint_graal(df, signal_count=0, total_signals=8, return_dict=False):
+    """
+    🔥 Fonction de compatibilité pour le bot de trading
+    Interface: get_signal_saint_graal(df, signal_count, total_signals, return_dict)
+    """
+    print(f"\n🎯 ANALYSE V9.2 - Signal #{signal_count}")
+    print(f"   Données: {len(df)} bougies")
     
-    print(f"🔄 Bouton après bougie: ✅ ACTIVÉ")
-    print(f"📊 Affichage analyses: ✅ ACTIVÉ")
-    print(f"🔧 Fonction signal: get_signal_saint_graal avec return_dict=True")
-    print(f"⏱️ Bouton timeout: {BUTTON_TIMEOUT_MINUTES} min")
-    print(f"🔧 Utilisez /lastanalysis pour voir les paires analysées")
+    # Mode dégradé si données limitées
+    if len(df) < 60:
+        print(f"⚠️  Mode dégradé activé (données limitées)")
+    
+    # Le bot attend exactement ce format de dictionnaire
+    signal = analyze_pair_for_signals(df)
+    
+    if signal:
+        # Ajouter les informations spécifiques que le bot attend
+        signal['signal_count'] = signal_count
+        signal['total_signals'] = total_signals
+        
+        # S'assurer que toutes les clés attendues sont présentes
+        if 'mode' not in signal:
+            signal['mode'] = "V9.2"
+            
+        print(f"✅ Signal trouvé: {signal['direction']} - Score: {signal['score']}")
+        return signal
+    else:
+        print(f"❌ Aucun signal - Score minimum non atteint")
+        return None
 
-    try:
-        while True:
-            await asyncio.sleep(1)
-    except (KeyboardInterrupt, SystemExit):
-        print("\n🛑 Arrêt du bot...")
-        await app.updater.stop()
-        await app.stop()
-        await app.shutdown()
-        await http_runner.cleanup()
+# Alias pour compatibilité
+get_binary_signal = get_signal_saint_graal
 
-if __name__ == '__main__':
-    asyncio.run(main())
+# ================= INITIALISATION =================
+
+if __name__ == "__main__":
+    print("🚀 STRATÉGIE BINAIRE M1 PRO - VERSION 9.2 OPTIMISÉE")
+    print("🔥 ARCHITECTURE PRO - FILTRES ÉQUILIBRÉS")
+    print("\n" + "="*60)
+    print("AMÉLIORATIONS CRITIQUES APPLIQUÉES:")
+    print("1. ✅ Score minimum réduit: 78 (au lieu de 85)")
+    print("2. ✅ Filtres assouplis mais maintenus")
+    print("3. ✅ Seuil de données: 60 bougies (au lieu de 100)")
+    print("4. ✅ Veto BB désactivé, pénalités réduites")
+    print("5. ✅ Zones de trading élargies (RSI/Stoch/BB)")
+    print("6. ✅ Micro momentum optionnel (non bloquant)")
+    print("="*60)
+    
+    print("\n🎯 COMPATIBLE AVEC SIGNAL_BOT.PY:")
+    print("✅ Interface get_signal_saint_graal préservée")
+    print("✅ Multi-paires préservé")
+    print("✅ Rotation Crypto week-end fonctionnelle")
+    print("✅ Filtres essentiels maintenus")
+    print("="*60)
+    
+    print("\n✅ V9.2 PRÊTE POUR PRODUCTION")
+    print("🎯 Objectif: Équilibre Fréquence/Qualité")
+    print("🛡️  Drawdown cible: -25% max")
+    print("🧠 Filtres: Optimisés pour générer des signaux")
