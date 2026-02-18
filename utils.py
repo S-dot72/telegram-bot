@@ -1,6 +1,6 @@
 """
-🚀 STRATÉGIE BINAIRE M1 PRO - VERSION 10.1 MULTI-TIMEFRAME
-🔥 APPROCHE "THE SNIPER" : M15 (direction) + M5 (divergence/patterns) + M1 (entrée)
+🚀 STRATÉGIE BINAIRE M1 PRO - VERSION 10.0 (sans money management)
+🔥 GÉNÉRATION DE SIGNAUX PURS - ANALYSE MULTI-TIMEFRAME
 """
 
 import copy
@@ -8,25 +8,16 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 from contextlib import contextmanager
-from ta.trend import EMAIndicator, ADXIndicator
+from ta.trend import EMAIndicator, MACD, ADXIndicator
 from ta.momentum import RSIIndicator, StochasticOscillator
 from ta.volatility import BollingerBands, AverageTrueRange
 import warnings
 warnings.filterwarnings('ignore')
 
-# ================= CONFIGURATION AVANCÉE =================
+# ================= CONFIGURATION =================
 
 SAINT_GRAAL_CONFIG = {
     'expiration_minutes': 5,
-
-    # Mode Sniper (multi-timeframe strict)
-    'sniper_mode': True,  # active la confluence M15 + M5 + M1
-
-    # Paramètres pour les niveaux S/R
-    'support_resistance': {
-        'lookback_bars': 50,      # nombre de bougies M15 à analyser
-        'tolerance_pips': 5,      # tolérance en pips pour considérer qu'on est sur un niveau
-    },
 
     'forbidden_zones': {
         'no_buy_zone': {
@@ -133,7 +124,7 @@ SAINT_GRAAL_CONFIG = {
             95: 86,
             105: 91,
         },
-        'cooldown_bars': 2,
+        'cooldown_bars': 2,  # conservé mais non utilisé
     },
 }
 
@@ -151,168 +142,10 @@ def degraded_mode_config():
     finally:
         SAINT_GRAAL_CONFIG.update(original)
 
-# ================= UTILITAIRES D'AGRÉGATION =================
-
-def aggregate_to_timeframe(df_m1, timeframe_minutes):
-    """
-    Agrège des données M1 en M5 ou M15.
-    - df_m1 : DataFrame avec colonnes ['open','high','low','close'] et index datetime
-    - timeframe_minutes : 5 ou 15
-    Retourne un DataFrame OHLC au timeframe demandé.
-    """
-    rule = f'{timeframe_minutes}T'
-    ohlc = {
-        'open': 'first',
-        'high': 'max',
-        'low': 'min',
-        'close': 'last'
-    }
-    df_resampled = df_m1.resample(rule).agg(ohlc).dropna()
-    return df_resampled
-
-# ================= DÉTECTION DES NIVEAUX S/R SUR M15 =================
-
-def detect_support_resistance(df_m15, lookback=None, tolerance_pips=None):
-    """
-    Détecte les niveaux de support et résistance à partir des swing highs/lows sur M15.
-    Retourne deux listes : supports, resistances (prix).
-    """
-    if lookback is None:
-        lookback = SAINT_GRAAL_CONFIG['support_resistance']['lookback_bars']
-    if tolerance_pips is None:
-        tolerance_pips = SAINT_GRAAL_CONFIG['support_resistance']['tolerance_pips']
-
-    if len(df_m15) < lookback:
-        return [], []
-
-    highs = df_m15['high'].values[-lookback:]
-    lows = df_m15['low'].values[-lookback:]
-
-    # Détection des pivots (simplifiée : un point est un pivot s'il est le plus haut/bas sur 2 bars de chaque côté)
-    swing_highs = []
-    swing_lows = []
-    for i in range(2, len(highs)-2):
-        if highs[i] > highs[i-1] and highs[i] > highs[i-2] and highs[i] > highs[i+1] and highs[i] > highs[i+2]:
-            swing_highs.append(highs[i])
-        if lows[i] < lows[i-1] and lows[i] < lows[i-2] and lows[i] < lows[i+1] and lows[i] < lows[i+2]:
-            swing_lows.append(lows[i])
-
-    # Conversion de la tolérance en valeur absolue (en fonction du prix moyen)
-    avg_price = (df_m15['close'].mean())
-    tolerance_abs = tolerance_pips * 0.0001 if avg_price < 50 else tolerance_pips * 0.01  # approximation
-
-    def cluster(values, tol):
-        if not values:
-            return []
-        values.sort()
-        clusters = [[values[0]]]
-        for v in values[1:]:
-            if abs(v - clusters[-1][-1]) <= tol:
-                clusters[-1].append(v)
-            else:
-                clusters.append([v])
-        return [np.mean(c) for c in clusters]
-
-    resistances = cluster(swing_highs, tolerance_abs)
-    supports = cluster(swing_lows, tolerance_abs)
-    return supports, resistances
-
-def is_near_level(price, levels, tolerance_pips, avg_price):
-    """Vérifie si price est proche d'un niveau (tolérance en pips convertie)."""
-    if not levels:
-        return False
-    tolerance_abs = tolerance_pips * 0.0001 if avg_price < 50 else tolerance_pips * 0.01
-    for level in levels:
-        if abs(price - level) <= tolerance_abs:
-            return True
-    return False
-
-# ================= DÉTECTION DES DIVERGENCES RSI SUR M5 =================
-
-def detect_rsi_divergence(df_m5, period=30):
-    """
-    Détecte une divergence haussière ou baissière sur les 30 dernières bougies M5.
-    Retourne 'bullish', 'bearish' ou None.
-    """
-    if len(df_m5) < period:
-        return None
-    closes = df_m5['close'].values[-period:]
-    rsi = RSIIndicator(close=df_m5['close'], window=14).rsi().values[-period:]
-
-    # Trouver les minima et maxima locaux (simplifié : on utilise une fenêtre de 3)
-    def find_pivots(series, order=3):
-        highs = []
-        lows = []
-        for i in range(order, len(series)-order):
-            if series[i] == max(series[i-order:i+order+1]):
-                highs.append((i, series[i]))
-            if series[i] == min(series[i-order:i+order+1]):
-                lows.append((i, series[i]))
-        return highs, lows
-
-    price_highs, price_lows = find_pivots(closes)
-    rsi_highs, rsi_lows = find_pivots(rsi)
-
-    if len(price_lows) >= 2 and len(rsi_lows) >= 2:
-        # Deux derniers plus bas
-        pl1, pl2 = price_lows[-2], price_lows[-1]
-        rl1, rl2 = rsi_lows[-2], rsi_lows[-1]
-        if pl2[1] < pl1[1] and rl2[1] > rl1[1]:
-            return 'bullish'
-
-    if len(price_highs) >= 2 and len(rsi_highs) >= 2:
-        ph1, ph2 = price_highs[-2], price_highs[-1]
-        rh1, rh2 = rsi_highs[-2], rsi_highs[-1]
-        if ph2[1] > ph1[1] and rh2[1] < rh1[1]:
-            return 'bearish'
-
-    return None
-
-# ================= DÉTECTION DES PATTERNS DE BOUGIES =================
-
-def is_pin_bar(candle, direction=None):
-    """
-    candle : dict avec 'open','high','low','close'
-    direction : 'buy' pour pin bar bas (longue mèche basse), 'sell' pour haute.
-    Retourne True si pattern détecté.
-    """
-    body = abs(candle['close'] - candle['open'])
-    high_low = candle['high'] - candle['low']
-    if high_low == 0:
-        return False
-    body_ratio = body / high_low
-    if body_ratio > 0.3:  # corps trop grand
-        return False
-    lower_wick = min(candle['open'], candle['close']) - candle['low']
-    upper_wick = candle['high'] - max(candle['open'], candle['close'])
-    if direction == 'buy' and lower_wick / high_low > 0.6:
-        return True
-    if direction == 'sell' and upper_wick / high_low > 0.6:
-        return True
-    if direction is None:
-        return (lower_wick / high_low > 0.6) or (upper_wick / high_low > 0.6)
-    return False
-
-def is_engulfing(prev, curr):
-    """
-    Vérifie si la bougie curr englobe la précédente.
-    Retourne 'bullish' ou 'bearish' ou None.
-    """
-    prev_body = abs(prev['close'] - prev['open'])
-    curr_body = abs(curr['close'] - curr['open'])
-    prev_dir = 1 if prev['close'] > prev['open'] else -1
-    curr_dir = 1 if curr['close'] > curr['open'] else -1
-    if curr_dir != prev_dir and curr_body > prev_body:
-        if curr_dir == 1 and curr['close'] > prev['high']:
-            return 'bullish'
-        if curr_dir == -1 and curr['close'] < prev['low']:
-            return 'bearish'
-    return None
-
-# ================= FONCTIONS D'ANALYSE EXISTANTES (légèrement adaptées) =================
+# ================= FONCTIONS D'ANALYSE =================
 
 def detect_market_state(df):
-    """Détecte si le marché est en TREND ou RANGE (inchangé)"""
+    """Détecte si le marché est en TREND ou RANGE"""
     if len(df) < 25:
         return {'state': 'NEUTRAL', 'adx': 0, 'reason': 'Données insuffisantes'}
     try:
@@ -340,7 +173,7 @@ def detect_market_state(df):
     return {'state': state, 'adx': adx, 'rsi': current_rsi, 'reason': reason}
 
 def calculate_momentum_gate(df, direction, momentum_data):
-    """Gate momentum réduit à 1/3 conditions (inchangé)"""
+    """Gate momentum réduit à 1/3 conditions."""
     if not SAINT_GRAAL_CONFIG['momentum_rules']['smart_gate']:
         stoch_diff = abs(momentum_data['stoch_k'] - momentum_data['stoch_d'])
         return stoch_diff >= SAINT_GRAAL_CONFIG['momentum_rules']['momentum_gate_diff'], {}
@@ -366,7 +199,7 @@ def calculate_momentum_gate(df, direction, momentum_data):
     return gate_score >= 1, debug_info
 
 def analyze_momentum_with_filters(df):
-    """Analyse momentum (inchangé)"""
+    """Analyse momentum avec strict_mode=False."""
     if len(df) < 20:
         return {
             'rsi': 50, 'stoch_k': 50, 'stoch_d': 50, 'prev_rsi': 50,
@@ -485,7 +318,7 @@ def analyze_momentum_with_filters(df):
     }
 
 def analyze_bollinger_bands(df):
-    """Analyse BB (inchangé)"""
+    """Analyse BB avec strict_mode=False."""
     if len(df) < SAINT_GRAAL_CONFIG['bollinger_config']['window']:
         return {
             'bb_position': 50,
@@ -557,7 +390,7 @@ def analyze_bollinger_bands(df):
     }
 
 def analyze_atr_volatility(df):
-    """Analyse ATR (inchangé)"""
+    """Analyse ATR avec détection automatique des paires JPY."""
     if len(df) < 15:
         return {'valid': True, 'reason': 'ATR ignoré (peu de données)', 'score': 5, 'atr_pips': 0}
     try:
@@ -584,7 +417,7 @@ def analyze_atr_volatility(df):
     return {'valid': True, 'reason': f'ATR acceptable: {atr_pips:.1f} pips', 'score': 5, 'atr_pips': atr_pips}
 
 def analyze_m5_trend(df):
-    """Analyse tendance M5 avec EMA21/EMA50 (inchangé)"""
+    """Analyse tendance M5 avec EMA21/EMA50."""
     min_bars = SAINT_GRAAL_CONFIG['m5_filter']['min_bars_required']
     if len(df) < min_bars:
         return {'trend': 'NEUTRAL', 'reason': f'Données insuffisantes ({len(df)}/{min_bars})', 'score': 5}
@@ -609,7 +442,7 @@ def analyze_m5_trend(df):
         return {'trend': 'NEUTRAL', 'reason': f"Tendance neutre: EMA{ema_fast_n} ≈ EMA{ema_slow_n}", 'score': 5}
 
 def detect_swing_extremes(df):
-    """Détecte les swing highs et lows (inchangé)"""
+    """Détecte les swing highs et lows."""
     lookback = SAINT_GRAAL_CONFIG['forbidden_zones']['swing_filter']['lookback_bars']
     if len(df) < lookback + 1:
         return {'is_swing_high': False, 'is_swing_low': False}
@@ -620,7 +453,7 @@ def detect_swing_extremes(df):
     return {'is_swing_high': is_swing_high, 'is_swing_low': is_swing_low}
 
 def analyze_micro_momentum(df, direction):
-    """Analyse micro momentum (inchangé)"""
+    """Analyse micro momentum sur les dernières bougies."""
     if not SAINT_GRAAL_CONFIG['micro_momentum']['enabled']:
         return {'valid': True, 'score': 0, 'reason': 'Micro momentum désactivé'}
     lookback = SAINT_GRAAL_CONFIG['micro_momentum']['lookback_bars']
@@ -638,7 +471,7 @@ def analyze_micro_momentum(df, direction):
     return {'valid': False, 'score': 0, 'reason': 'Micro momentum insuffisant'}
 
 def check_confidence_killers(df, direction, momentum_data):
-    """Vérifie les facteurs réduisant la confiance (inchangé)"""
+    """Vérifie les facteurs réduisant la confiance."""
     confidence_reduction = 0
     killers = []
     if len(df) >= 15:
@@ -677,7 +510,7 @@ def check_confidence_killers(df, direction, momentum_data):
     return confidence_reduction, killers
 
 def calculate_confidence(score):
-    """Calcule la confiance à partir du score (inchangé)"""
+    """Calcule la confiance à partir du score."""
     zones = sorted(SAINT_GRAAL_CONFIG['signal_validation']['confidence_zones'].items())
     max_realistic = SAINT_GRAAL_CONFIG['signal_validation']['max_score_realistic']
     normalized = min(score, max_realistic)
@@ -694,84 +527,47 @@ def calculate_confidence(score):
             break
     return min(95, max(60, int(base_confidence)))
 
-# ================= FONCTION PRINCIPALE MULTI-TIMEFRAME =================
+# ================= FONCTION PRINCIPALE =================
 
-def analyze_pair_for_signals(df_m1, df_m5=None, df_m15=None):
+def analyze_pair_for_signals(df):
     """
-    Analyse complète avec multi-timeframe.
-    - df_m1 : DataFrame M1 obligatoire
-    - df_m5 : DataFrame M5 (optionnel, sera agrégé si non fourni)
-    - df_m15 : DataFrame M15 (optionnel, sera agrégé si non fourni)
+    Analyse complète M1 — sans money management.
     """
-    # Agrégation si nécessaire
-    if df_m5 is None:
-        df_m5 = aggregate_to_timeframe(df_m1, 5)
-    if df_m15 is None:
-        df_m15 = aggregate_to_timeframe(df_m1, 15)
-
-    # Vérification de la longueur minimale
-    if len(df_m1) < 60:
-        print(f"⚠️  Données M1 limitées ({len(df_m1)} bougies) — mode dégradé activé")
+    # Mode dégradé si données limitées
+    degraded = len(df) < 60
+    if degraded:
+        print(f"⚠️  Données limitées ({len(df)} bougies) — mode dégradé activé")
         ctx = degraded_mode_config()
         ctx.__enter__()
     else:
         ctx = None
 
     try:
-        return _run_analysis_multi(df_m1, df_m5, df_m15)
+        return _run_analysis(df)
     finally:
         if ctx is not None:
             ctx.__exit__(None, None, None)
 
-def _run_analysis_multi(df_m1, df_m5, df_m15):
-    current_price = float(df_m1.iloc[-1]['close'])
+def _run_analysis(df):
+    current_price = float(df.iloc[-1]['close'])
     print(f"\n{'='*60}")
-    print(f"🔍 ANALYSE MULTI-TIMEFRAME — Prix M1: {current_price:.5f}")
+    print(f"🔍 ANALYSE M1 V10.0 — Prix: {current_price:.5f}")
     print(f"{'='*60}")
 
-    # ========== ANALYSE M15 ==========
-    market = detect_market_state(df_m15)
-    print(f"📊 M15: {market['state']} — {market['reason']}")
+    market = detect_market_state(df)
+    print(f"📊 MARCHÉ: {market['state']} — {market['reason']}")
 
-    # Détection des niveaux S/R sur M15
-    supports, resistances = detect_support_resistance(df_m15)
-    avg_price = df_m15['close'].mean()
-    tol_pips = SAINT_GRAAL_CONFIG['support_resistance']['tolerance_pips']
-    near_support = is_near_level(current_price, supports, tol_pips, avg_price)
-    near_resistance = is_near_level(current_price, resistances, tol_pips, avg_price)
-    if near_support:
-        print(f"   ✅ Prix proche d'un support M15")
-    if near_resistance:
-        print(f"   ✅ Prix proche d'une résistance M15")
-
-    # ========== ANALYSE M5 ==========
-    # Divergence RSI
-    divergence = detect_rsi_divergence(df_m5)
-    if divergence:
-        print(f"📈 M5: Divergence {divergence} détectée")
-
-    # Patterns sur la dernière bougie M5
-    last_m5 = df_m5.iloc[-1].to_dict()
-    prev_m5 = df_m5.iloc[-2].to_dict() if len(df_m5) > 1 else None
-    pin_m5_buy = is_pin_bar(last_m5, 'buy')
-    pin_m5_sell = is_pin_bar(last_m5, 'sell')
-    engulf_m5 = is_engulfing(prev_m5, last_m5) if prev_m5 is not None else None
-    if pin_m5_buy or pin_m5_sell or engulf_m5:
-        print(f"📊 M5: Pattern détecté (Pin/Engulfing)")
-
-    # ========== ANALYSE M1 ==========
-    # Indicateurs classiques (momentum, BB, etc.) sur M1
-    momentum = analyze_momentum_with_filters(df_m1)
-    print(f"📈 MOMENTUM M1: RSI {momentum['rsi']:.1f} | Stoch {momentum['stoch_k']:.1f}/{momentum['stoch_d']:.1f}")
+    momentum = analyze_momentum_with_filters(df)
+    print(f"📈 MOMENTUM: RSI {momentum['rsi']:.1f} | Stoch {momentum['stoch_k']:.1f}/{momentum['stoch_d']:.1f}")
     print(f"   BUY  score: {momentum['buy']['score']}  | Gate: {'✅' if momentum['gate_buy'] else '❌'}")
     print(f"   SELL score: {momentum['sell']['score']} | Gate: {'✅' if momentum['gate_sell'] else '❌'}")
     for v in momentum['violations']:
         print(f"   {v}")
 
-    bb = analyze_bollinger_bands(df_m1)
-    print(f"📊 BB M1: position {bb['bb_position']:.1f}% | BUY={bb['buy']['score']} SELL={bb['sell']['score']}")
+    bb = analyze_bollinger_bands(df)
+    print(f"📊 BB: position {bb['bb_position']:.1f}% | BUY={bb['buy']['score']} SELL={bb['sell']['score']}")
 
-    swings = detect_swing_extremes(df_m1)
+    swings = detect_swing_extremes(df)
     swing_filter = SAINT_GRAAL_CONFIG['forbidden_zones']['swing_filter']
     swing_adj = {'buy': 0, 'sell': 0}
     swing_killers = {'buy': [], 'sell': []}
@@ -783,30 +579,23 @@ def _run_analysis_multi(df_m1, df_m5, df_m15):
             swing_adj['sell'] = -swing_filter['swing_penalty']
             swing_killers['sell'].append(f"Swing Low: -{swing_filter['swing_penalty']}")
 
-    atr = analyze_atr_volatility(df_m1)
-    print(f"📏 ATR M1: {atr['reason']}")
+    atr = analyze_atr_volatility(df)
+    print(f"📏 ATR: {atr['reason']}")
 
-    m5_trend = analyze_m5_trend(df_m5)  # tendance M5 via EMA
-    print(f"⏰ M5 trend: {m5_trend['reason']}")
+    m5 = analyze_m5_trend(df)
+    print(f"⏰ M5: {m5['reason']}")
 
-    # Patterns sur la dernière bougie M1 (pour confirmation d'entrée)
-    last_m1 = df_m1.iloc[-1].to_dict()
-    prev_m1 = df_m1.iloc[-2].to_dict() if len(df_m1) > 1 else None
-    pin_m1_buy = is_pin_bar(last_m1, 'buy')
-    pin_m1_sell = is_pin_bar(last_m1, 'sell')
-    engulf_m1 = is_engulfing(prev_m1, last_m1) if prev_m1 is not None else None
-
-    # ========== CALCUL DES SCORES (compatible avec ancien mode) ==========
+    # Calcul scores finaux
     buy_score = momentum['buy']['score'] + bb['buy']['score'] + swing_adj['buy'] + atr['score']
     sell_score = momentum['sell']['score'] + bb['sell']['score'] + swing_adj['sell'] + atr['score']
 
-    if m5_trend['trend'] == "BULLISH":
-        buy_score += m5_trend['score']
-    elif m5_trend['trend'] == "BEARISH":
-        sell_score += m5_trend['score']
+    if m5['trend'] == "BULLISH":
+        buy_score += m5['score']
+    elif m5['trend'] == "BEARISH":
+        sell_score += m5['score']
     else:
-        buy_score += m5_trend['score'] // 2
-        sell_score += m5_trend['score'] // 2
+        buy_score += m5['score'] // 2
+        sell_score += m5['score'] // 2
 
     if SAINT_GRAAL_CONFIG['market_state']['enabled']:
         if market['state'] == "RANGE" and SAINT_GRAAL_CONFIG['market_state']['prioritize_bb_in_range']:
@@ -823,40 +612,20 @@ def _run_analysis_multi(df_m1, df_m5, df_m15):
     print(f"\n🎯 SCORES: BUY {buy_score:.1f} | SELL {sell_score:.1f} | MIN requis: {SAINT_GRAAL_CONFIG['signal_validation']['min_score']}")
 
     min_score = SAINT_GRAAL_CONFIG['signal_validation']['min_score']
-    sniper_mode = SAINT_GRAAL_CONFIG.get('sniper_mode', False)
 
-    # ========== CONDITIONS DE SIGNAL ==========
-    # Conditions de base (toujours requises)
-    buy_conditions_base = (
+    buy_conditions_met = (
         momentum['buy']['allowed'] and
         bb['buy']['allowed'] and
         momentum['gate_buy'] and
         buy_score >= min_score
     )
-    sell_conditions_base = (
+
+    sell_conditions_met = (
         momentum['sell']['allowed'] and
         bb['sell']['allowed'] and
         momentum['gate_sell'] and
         sell_score >= min_score
     )
-
-    if sniper_mode:
-        # Conditions supplémentaires pour le mode Sniper
-        buy_sniper = (
-            (near_support or market['state'] == 'RANGE') and  # soit sur support, soit en range
-            (divergence == 'bullish' or pin_m5_buy or engulf_m5 == 'bullish') and
-            (pin_m1_buy or engulf_m1 == 'bullish')  # confirmation sur M1
-        )
-        sell_sniper = (
-            (near_resistance or market['state'] == 'RANGE') and
-            (divergence == 'bearish' or pin_m5_sell or engulf_m5 == 'bearish') and
-            (pin_m1_sell or engulf_m1 == 'bearish')
-        )
-        buy_conditions = buy_conditions_base and buy_sniper
-        sell_conditions = sell_conditions_base and sell_sniper
-    else:
-        buy_conditions = buy_conditions_base
-        sell_conditions = sell_conditions_base
 
     signal = None
     final_score = 0
@@ -866,20 +635,20 @@ def _run_analysis_multi(df_m1, df_m5, df_m15):
     micro = {'valid': False, 'score': 0, 'reason': ''}
     confidence_killers = []
 
-    if buy_conditions:
-        micro = analyze_micro_momentum(df_m1, "BUY")
+    if buy_conditions_met:
+        micro = analyze_micro_momentum(df, "BUY")
         final_score = buy_score + (micro['score'] if micro['valid'] else 0)
         if final_score >= min_score:
-            confidence_reduction, killers = check_confidence_killers(df_m1, "BUY", momentum)
+            confidence_reduction, killers = check_confidence_killers(df, "BUY", momentum)
             confidence_killers.extend(killers)
             signal = "CALL"
             reason_text = (f"BUY Score: {final_score:.1f} | RSI: {momentum['rsi']:.1f} "
                            f"| Stoch: {momentum['stoch_k']:.1f} | BB: {bb['bb_position']:.1f}%")
-    elif sell_conditions:
-        micro = analyze_micro_momentum(df_m1, "SELL")
+    elif sell_conditions_met:
+        micro = analyze_micro_momentum(df, "SELL")
         final_score = sell_score + (micro['score'] if micro['valid'] else 0)
         if final_score >= min_score:
-            confidence_reduction, killers = check_confidence_killers(df_m1, "SELL", momentum)
+            confidence_reduction, killers = check_confidence_killers(df, "SELL", momentum)
             confidence_killers.extend(killers)
             signal = "PUT"
             reason_text = (f"SELL Score: {final_score:.1f} | RSI: {momentum['rsi']:.1f} "
@@ -919,7 +688,7 @@ def _run_analysis_multi(df_m1, df_m5, df_m15):
                 'bb_score': max(bb['buy']['score'], bb['sell']['score']),
                 'micro_score': micro['score'] if micro['valid'] else 0,
                 'atr_score': atr['score'],
-                'm5_trend': m5_trend['trend'],
+                'm5_trend': m5['trend'],
                 'rsi': momentum['rsi'],
                 'stoch': momentum['stoch_k'],
                 'bb_position': bb['bb_position'],
@@ -927,20 +696,13 @@ def _run_analysis_multi(df_m1, df_m5, df_m15):
                 'gate_buy': momentum['gate_buy'],
                 'gate_sell': momentum['gate_sell'],
                 'confidence_killers': confidence_killers,
-                'swing_adjustment': swing_adj,
-                'near_support': near_support,
-                'near_resistance': near_resistance,
-                'divergence': divergence,
-                'pin_m5': {'buy': pin_m5_buy, 'sell': pin_m5_sell},
-                'engulf_m5': engulf_m5,
-                'pin_m1': {'buy': pin_m1_buy, 'sell': pin_m1_sell},
-                'engulf_m1': engulf_m1,
+                'swing_adjustment': swing_adj
             }
         }
     else:
         print(f"\n❌ AUCUN SIGNAL VALIDE")
-        print(f"   Score BUY:  {buy_score:.1f}  | Gate BUY:  {'✅' if momentum['gate_buy'] else '❌'} | Conditions: {'✅' if buy_conditions else '❌'}")
-        print(f"   Score SELL: {sell_score:.1f} | Gate SELL: {'✅' if momentum['gate_sell'] else '❌'} | Conditions: {'✅' if sell_conditions else '❌'}")
+        print(f"   Score BUY:  {buy_score:.1f}  | Gate BUY:  {'✅' if momentum['gate_buy'] else '❌'} | Conditions: {'✅' if buy_conditions_met else '❌'}")
+        print(f"   Score SELL: {sell_score:.1f} | Gate SELL: {'✅' if momentum['gate_sell'] else '❌'} | Conditions: {'✅' if sell_conditions_met else '❌'}")
         if swing_killers['buy']:
             print(f"   Swing BUY:  {swing_killers['buy']}")
         if swing_killers['sell']:
@@ -948,9 +710,6 @@ def _run_analysis_multi(df_m1, df_m5, df_m15):
         if momentum.get('gate_debug'):
             print(f"   Gate debug BUY:  {momentum['gate_debug']['buy']}")
             print(f"   Gate debug SELL: {momentum['gate_debug']['sell']}")
-        if sniper_mode:
-            print(f"   Sniper conditions BUY:  near_support={near_support}, divergence/pattern M5={divergence or pin_m5_buy or engulf_m5}, pattern M1={pin_m1_buy or engulf_m1}")
-            print(f"   Sniper conditions SELL: near_resistance={near_resistance}, divergence/pattern M5={divergence or pin_m5_sell or engulf_m5}, pattern M1={pin_m1_sell or engulf_m1}")
         return None
 
 # ================= INTERFACE POUR LE BOT =================
@@ -958,15 +717,14 @@ def _run_analysis_multi(df_m1, df_m5, df_m15):
 def get_signal_saint_graal(df, signal_count=0, total_signals=8, return_dict=False):
     """
     Interface de compatibilité pour signal_bot.py
-    Ici, on suppose que df est en M1. On agrège pour obtenir M5 et M15.
     """
-    print(f"\n🎯 ANALYSE MULTI-TIMEFRAME — Signal #{signal_count} | {len(df)} bougies M1")
-    signal = analyze_pair_for_signals(df)  # df_m5 et df_m15 seront agrégés automatiquement
+    print(f"\n🎯 ANALYSE V10.0 — Signal #{signal_count} | {len(df)} bougies")
+    signal = analyze_pair_for_signals(df)
     if signal:
         signal['signal_count'] = signal_count
         signal['total_signals'] = total_signals
         if 'mode' not in signal:
-            signal['mode'] = "V10.1 MTF"
+            signal['mode'] = "V10.0"
         print(f"✅ Signal: {signal['direction']} — Score: {signal['score']} — Qualité: {signal['quality']}")
         return signal
     print(f"❌ Pas de signal (score minimum: {SAINT_GRAAL_CONFIG['signal_validation']['min_score']})")
@@ -975,7 +733,7 @@ def get_signal_saint_graal(df, signal_count=0, total_signals=8, return_dict=Fals
 get_binary_signal = get_signal_saint_graal
 
 if __name__ == "__main__":
-    print("🚀 STRATÉGIE BINAIRE M1 PRO — VERSION 10.1 MULTI-TIMEFRAME")
+    print("🚀 STRATÉGIE BINAIRE M1 PRO — VERSION 10.0 (sans money management)")
     print("=" * 60)
-    print("APPROCHE 'THE SNIPER' : M15 (direction/niveaux) + M5 (divergence/patterns) + M1 (entrée)")
+    print("GÉNÉRATION DE SIGNAUX PURS - ANALYSE MULTI-TIMEFRAME")
     print("=" * 60)
